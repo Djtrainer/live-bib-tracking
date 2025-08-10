@@ -15,332 +15,200 @@ import easyocr
 from pathlib import Path
 from ultralytics import YOLO
 import time
-
+from collections import Counter
+from pathlib import Path
+from ultralytics import YOLO
+import cv2
+import easyocr
+import time
 
 class VideoInferenceProcessor:
     
     def __init__(self, model_path, video_path, target_fps=1, confidence_threshold=0.25):
-        """
-        Initialize the video inference processor.
-
-        Args:
-            model_path (str): Path to the trained YOLO model
-            video_path (str): Path to the input video file
-            target_fps (int): Target processing frame rate
-            confidence_threshold (float): YOLO confidence threshold
-        """
         self.model_path = Path(model_path)
         self.video_path = Path(video_path)
         self.target_fps = target_fps
         self.confidence_threshold = confidence_threshold
+        # This will store history keyed by the PERSON's tracker ID
         self.track_history = {}
 
-        # Load YOLO model
-        print(f"Loading YOLO model from {self.model_path}")
-        self.model = YOLO(str(self.model_path))
-        print("Model loaded successfully!")
-        print(f"Model classes: {self.model.names}")
-
+        # --- KEY CHANGE: LOAD TWO SEPARATE MODEL INSTANCES ---
+        print("Loading models...")
+        # This model instance will be used ONLY for tracking and will become stateful
+        self.tracker_model = YOLO(str(self.model_path))
+        # This model instance will be used ONLY for prediction and will remain stateless
+        self.predictor_model = YOLO(str(self.model_path))
+        print("Models loaded successfully!")
+        
         # Initialize EasyOCR reader
         print("Initializing EasyOCR reader...")
         self.ocr_reader = easyocr.Reader(["en"])
         print("EasyOCR reader initialized!")
 
-        # Video capture
+        # Video capture and properties
         self.cap = cv2.VideoCapture(str(self.video_path))
         if not self.cap.isOpened():
             raise ValueError(f"Could not open video file: {self.video_path}")
-
-        # Get video properties
         self.original_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        print("Video properties:")
-        print(f"  Original FPS: {self.original_fps:.2f}")
-        print(f"  Total frames: {self.total_frames}")
-        print(f"  Resolution: {self.frame_width}x{self.frame_height}")
-        print(f"  Target processing FPS: {self.target_fps}")
-
-        # Calculate frame skip interval
         self.frame_skip = max(1, int(self.original_fps / self.target_fps))
-        print(f"  Processing every {self.frame_skip} frames")
 
+    # --- NO CHANGES to helper functions below ---
     def preprocess_for_easyocr(self, image_crop):
-        """
-        Preprocess cropped bib image for better OCR results.
-
-        Args:
-            image_crop (np.ndarray): Cropped bib image
-
-        Returns:
-            np.ndarray: Preprocessed image
-        """
-        # Convert to grayscale if needed
-        if len(image_crop.shape) == 3:
-            gray = cv2.cvtColor(image_crop, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image_crop
-
-        # Apply bilateral filter for noise reduction while preserving edges
+        if len(image_crop.shape) == 3: gray = cv2.cvtColor(image_crop, cv2.COLOR_BGR2GRAY)
+        else: gray = image_crop
         denoised = cv2.bilateralFilter(gray, 9, 75, 75)
-
-        # Apply adaptive thresholding for better contrast
-        binary_image = cv2.adaptiveThreshold(
-            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-        )
-
-        return binary_image
+        return cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
 
     def extract_bib_with_easyocr(self, image_crop):
-        """
-        Extract bib number using EasyOCR.
-
-        Args:
-            image_crop (np.ndarray): Cropped bib image
-
-        Returns:
-            tuple: (bib_number, confidence) or (None, None) if no text found
-        """
         try:
-            # Use EasyOCR to detect text (numbers only)
             result = self.ocr_reader.readtext(image_crop, allowlist="0123456789")
-
             if result:
-                # Get the result with highest confidence
-                best_result = max(result, key=lambda x: x[2])
-                bbox, text, confidence = best_result
+                _, text, confidence = max(result, key=lambda x: x[2])
                 return text, confidence
-            else:
-                return None, None
-
-        except Exception as e:
-            print(f"EasyOCR error: {e}")
             return None, None
+        except Exception: return None, None
 
     def crop_bib_from_prediction(self, image, bbox, padding=15):
-        """
-        Crop bib region from image with padding.
-
-        Args:
-            image (np.ndarray): Input image
-            bbox (list): Bounding box coordinates [x1, y1, x2, y2]
-            padding (int): Padding around the bounding box
-
-        Returns:
-            np.ndarray: Cropped image region
-        """
         x1, y1, x2, y2 = [int(coord) for coord in bbox]
-
-        # Add padding
-        x1 = max(0, x1 - padding)
-        y1 = max(0, y1 - padding)
-        x2 = min(image.shape[1], x2 + padding)
-        y2 = min(image.shape[0], y2 + padding)
-
+        x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
+        x2, y2 = min(image.shape[1], x2 + padding), min(image.shape[0], y2 + padding)
         return image[y1:y2, x1:x2]
 
-    def draw_predictions(self, image, predictions):
-        """
-        Draw bounding boxes and labels on the image.
+    # --- HYBRID LOGIC (NO CHANGES) ---
+    def update_history_hybrid(self, tracked_persons, all_detections):
+        if tracked_persons is None or tracked_persons.boxes.id is None or all_detections is None:
+            return
 
-        Args:
-            image (np.ndarray): Input image
-            predictions: YOLO prediction results
+        bib_boxes = [box for box in all_detections.boxes if int(box.cls) == 1]
+        if not bib_boxes: return
 
-        Returns:
-            np.ndarray: Annotated image
-        """
+        for person_box in tracked_persons.boxes:
+            person_id = int(person_box.id[0])
+            px1, py1, px2, py2 = person_box.xyxy[0]
+
+            for bib_box in bib_boxes:
+                bx1, by1, bx2, by2 = bib_box.xyxy[0]
+                if px1 < (bx1 + bx2) / 2 < px2 and py1 < (by1 + by2) / 2 < py2:
+                    if person_id not in self.track_history:
+                        self.track_history[person_id] = {'ocr_reads': []}
+                    bib_crop = self.crop_bib_from_prediction(all_detections.orig_img, bib_box.xyxy[0])
+                    if bib_crop.size > 0:
+                        bib_number, ocr_conf = self.extract_bib_with_easyocr(self.preprocess_for_easyocr(bib_crop))
+                        if bib_number and ocr_conf:
+                            self.track_history[person_id]['ocr_reads'].append((bib_number, ocr_conf, float(bib_box.conf)))
+                    break
+
+    def draw_hybrid_predictions(self, image, tracked_persons, all_detections):
         annotated_image = image.copy()
-
-        if predictions is None or len(predictions.boxes) == 0:
-            return annotated_image
-
-        boxes = predictions.boxes.xyxy.cpu().numpy()
-        classes = predictions.boxes.cls.cpu().numpy()
-        confidences = predictions.boxes.conf.cpu().numpy()
-
-        for box, cls, conf in zip(boxes, classes, confidences):
-            x1, y1, x2, y2 = [int(coord) for coord in box]
-            class_id = int(cls)
-            class_name = self.model.names.get(class_id, f"Class {class_id}")
-
-            # Set colors: blue for person (class 0), red for bib (class 1)
-            if class_id == 0:  # Person
-                color = (255, 0, 0)  # Blue in BGR
-                label = f"Person: {conf:.2f}"
-            elif class_id == 1:  # Bib
-                color = (0, 0, 255)  # Red in BGR
-
-                # Crop bib region and perform OCR
-                bib_crop = self.crop_bib_from_prediction(image, box)
-                if bib_crop.size > 0:
-                    bib_number, ocr_confidence = self.extract_bib_with_easyocr(bib_crop)
-                    if bib_number:
-                        label = (
-                            f"Bib {bib_number}: {conf:.2f} (OCR: {ocr_confidence:.2f})"
-                        )
-                    else:
-                        label = f"Bib: {conf:.2f} (OCR: Failed)"
-                else:
-                    label = f"Bib: {conf:.2f}"
-            else:
-                color = (0, 255, 0)  # Green for other classes
-                label = f"{class_name}: {conf:.2f}"
-
-            # Draw bounding box
-            cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
-
-            # Draw label background
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-            cv2.rectangle(
-                annotated_image,
-                (x1, y1 - label_size[1] - 10),
-                (x1 + label_size[0], y1),
-                color,
-                -1,
-            )
-
-            # Draw label text
-            cv2.putText(
-                annotated_image,
-                label,
-                (x1, y1 - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-            )
-
+        if all_detections:
+            for box in all_detections.boxes:
+                if int(box.cls) == 1:
+                    x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
+                    cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        
+        if tracked_persons and tracked_persons.boxes.id is not None:
+            for box in tracked_persons.boxes:
+                person_id = int(box.id[0])
+                x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
+                current_best_read = ""
+                if person_id in self.track_history and self.track_history[person_id]['ocr_reads']:
+                    reads = [r[0] for r in self.track_history[person_id]['ocr_reads']]
+                    if reads: current_best_read = Counter(reads).most_common(1)[0][0]
+                label_text = f"Racer ID {person_id} | Bib: {current_best_read}"
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                cv2.putText(annotated_image, label_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
         return annotated_image
 
-    def process_video(self, output_path=None, display=True):
+    def determine_final_bibs(self):
         """
-        Process the video file with YOLO inference and OCR.
+        Processes the aggregated track_history to determine the final bib for each racer.
+        This version contains the fix for the 'scores' variable error.
+        """
+        final_results = {}
+        for tracker_id, data in self.track_history.items():
+            ocr_reads = data.get('ocr_reads', [])
+            if not ocr_reads:
+                continue
 
-        Args:
-            output_path (str, optional): Path to save the output video
-            display (bool): Whether to display the video in real-time
-        """
-        # Setup video writer if output path is provided
+            # Filter out unreliable reads (e.g., wrong length, low confidence)
+            filtered_reads = [r for r in ocr_reads if 2 <= len(r[0]) <= 5 and r[1] > 0.4]
+            if not filtered_reads:
+                continue
+
+            # --- CORRECTED LOGIC FOR CALCULATING SCORES ---
+            # 1. First, initialize an empty dictionary.
+            scores = {}
+            # 2. Then, loop through the filtered reads to populate it.
+            for bib_num, ocr_conf, yolo_conf in filtered_reads:
+                # The score for this single reading combines OCR and YOLO confidence
+                score = ocr_conf * yolo_conf
+                # Add this score to the cumulative total for that bib number
+                scores[bib_num] = scores.get(bib_num, 0) + score
+            # --- END OF CORRECTION ---
+
+            # Find the bib number with the highest total score
+            if scores:
+                most_likely_bib = max(scores, key=scores.get)
+                final_results[tracker_id] = {
+                    'final_bib': most_likely_bib,
+                    'score': scores[most_likely_bib]
+                }
+                
+        return final_results
+
+    def process_video(self, output_path=None, display=True):
+        # ... video writer setup ...
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = None
         if output_path:
-            out = cv2.VideoWriter(
-                output_path,
-                fourcc,
-                self.target_fps,
-                (self.frame_width, self.frame_height),
-            )
-
+            out = cv2.VideoWriter(output_path, fourcc, self.target_fps, (self.frame_width, self.frame_height))
+        
         frame_count = 0
-        processed_frames = 0
         start_time = time.time()
-
-        print("\nStarting video processing...")
-        print("Press 'q' to quit, 'p' to pause/resume")
-
-        paused = False
-
+        
         try:
             while True:
                 ret, frame = self.cap.read()
-                if not ret:
-                    break
-
-                # Skip frames to achieve target FPS
+                if not ret: break
                 if frame_count % self.frame_skip != 0:
                     frame_count += 1
                     continue
 
-                # Run YOLO inference
-                results = self.model(
-                    frame, conf=self.confidence_threshold, verbose=False
-                )
-                predictions = results[0] if results else None
+                # --- HYBRID MODEL CALLS USING TWO SEPARATE INSTANCES ---
+                # 1. Track ONLY persons using the dedicated tracker_model
+                person_results = self.tracker_model.track(frame, persist=True, classes=[0], verbose=False)
+                tracked_persons = person_results[0] if person_results else None
 
-                # Draw predictions and OCR results
-                annotated_frame = self.draw_predictions(frame, predictions)
+                # 2. Predict ALL objects using the separate, stateless predictor_model
+                all_detections_results = self.predictor_model.predict(frame, conf=self.confidence_threshold, verbose=False)
+                all_detections = all_detections_results[0] if all_detections_results else None
 
-                # Add frame info
-                info_text = (
-                    f"Frame: {frame_count}/{self.total_frames} | "
-                    f"Processed: {processed_frames} | "
-                    f"FPS: {processed_frames / (time.time() - start_time):.1f}"
-                )
-                cv2.putText(
-                    annotated_frame,
-                    info_text,
-                    (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2,
-                )
+                # 3. Update history using the new hybrid function
+                self.update_history_hybrid(tracked_persons, all_detections)
 
-                # Save frame if output video is specified
-                if out:
-                    out.write(annotated_frame)
-
-                # Display frame
+                # 4. Draw predictions using the new hybrid function
+                annotated_frame = self.draw_hybrid_predictions(frame, tracked_persons, all_detections)
+                
                 if display:
                     cv2.imshow("Live Bib Tracking", annotated_frame)
-
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord("q"):
-                        break
-                    elif key == ord("p"):
-                        paused = not paused
-                        if paused:
-                            print("Video paused. Press 'p' to resume.")
-                        else:
-                            print("Video resumed.")
-
-                    while paused:
-                        key = cv2.waitKey(1) & 0xFF
-                        if key == ord("p"):
-                            paused = False
-                            print("Video resumed.")
-                            break
-                        elif key == ord("q"):
-                            return
-
+                    if cv2.waitKey(1) & 0xFF == ord("q"): break
+                if out: out.write(annotated_frame)
                 frame_count += 1
-                processed_frames += 1
-
-                # Print progress every 100 processed frames
-                if processed_frames % 100 == 0:
-                    elapsed_time = time.time() - start_time
-                    fps = processed_frames / elapsed_time
-                    progress = (frame_count / self.total_frames) * 100
-                    print(
-                        f"Progress: {progress:.1f}% | "
-                        f"Processing FPS: {fps:.1f} | "
-                        f"Processed frames: {processed_frames}"
-                    )
-
-        except KeyboardInterrupt:
-            print("\nProcessing interrupted by user.")
 
         finally:
-            # Cleanup
+            final_results = self.determine_final_bibs()
+            print("\n--- Final Bib Number Results ---")
+            if final_results:
+                for tracker_id, data in final_results.items():
+                    print(f"  Racer ID {tracker_id}: Final Bib = {data['final_bib']} (Score: {data['score']:.2f})")
+            else:
+                print("  No reliable bib numbers were finalized.")
             self.cap.release()
-            if out:
-                out.release()
-            if display:
-                cv2.destroyAllWindows()
-
-            # Print final statistics
-            total_time = time.time() - start_time
-            avg_fps = processed_frames / total_time if total_time > 0 else 0
-            print("\nProcessing completed!")
-            print(f"Total frames processed: {processed_frames}")
-            print(f"Total time: {total_time:.2f} seconds")
-            print(f"Average processing FPS: {avg_fps:.2f}")
-            if output_path:
-                print(f"Output video saved to: {output_path}")
-
+            if out: out.release()
+            cv2.destroyAllWindows()
+            
 
 def main():
     parser = argparse.ArgumentParser(
