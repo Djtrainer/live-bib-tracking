@@ -1,14 +1,4 @@
-#!/usr/bin/env python3
-"""
-Video Inference Script for Live Bib Tracking
-
-This script processes a video file, runs YOLO inference to detect people and bibs,
-performs OCR on detected bibs, and displays the results with bounding boxes and labels.
-
-Usage:
-    python src/video_inference.py --video data/raw/2024_race.MOV --fps 5 --conf 0.25
-"""
-
+import os
 import argparse
 import cv2
 import easyocr
@@ -24,11 +14,13 @@ import time
 
 class VideoInferenceProcessor:
     
-    def __init__(self, model_path, video_path, target_fps=1, confidence_threshold=0.25):
+    def __init__(self, model_path, video_path, target_fps=1, confidence_threshold=0, finish_line_fraction=0.85):
+        
         self.model_path = Path(model_path)
         self.video_path = Path(video_path)
         self.target_fps = target_fps
         self.confidence_threshold = confidence_threshold
+
         # This will store history keyed by the PERSON's tracker ID
         self.track_history = {}
 
@@ -53,8 +45,8 @@ class VideoInferenceProcessor:
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.frame_skip = max(1, int(self.original_fps / self.target_fps))
+        self.finish_line_x = int(self.frame_width*finish_line_fraction)
 
-    # --- NO CHANGES to helper functions below ---
     def preprocess_for_easyocr(self, image_crop):
         if len(image_crop.shape) == 3: gray = cv2.cvtColor(image_crop, cv2.COLOR_BGR2GRAY)
         else: gray = image_crop
@@ -76,7 +68,32 @@ class VideoInferenceProcessor:
         x2, y2 = min(image.shape[1], x2 + padding), min(image.shape[0], y2 + padding)
         return image[y1:y2, x1:x2]
 
-    # --- HYBRID LOGIC (NO CHANGES) ---
+    def check_finish_line_crossings(self, tracked_persons):
+        """Checks if any tracked racers have crossed the virtual finish line."""
+        if tracked_persons is None or tracked_persons.boxes.id is None:
+            return
+
+        for person_box in tracked_persons.boxes:
+            person_id = int(person_box.id[0])
+            # Use the center of the bounding box as the racer's position
+            x1, _, x2, _ = person_box.xyxy[0]
+            current_x_center = (x1 + x2) / 2
+            
+            history = self.track_history.get(person_id)
+            # Proceed only if the racer is already being tracked and hasn't finished yet
+            if history and history['finish_time_ms'] is None:
+                last_x_center = history.get('last_x_center')
+                
+                # Check if the racer crossed the line from left to right
+                if last_x_center is not None and last_x_center < self.finish_line_x and current_x_center >= self.finish_line_x:
+                    # Racer crossed the line! Record the video timestamp.
+                    finish_time = self.cap.get(cv2.CAP_PROP_POS_MSEC)
+                    history['finish_time_ms'] = finish_time
+                    print(f"Racer ID {person_id} finished at {finish_time/1000:.2f}s")
+                    self.print_live_leaderboard()
+                # Update the last known position for the next frame
+                history['last_x_center'] = current_x_center
+                
     def update_history_hybrid(self, tracked_persons, all_detections):
         if tracked_persons is None or tracked_persons.boxes.id is None or all_detections is None:
             return
@@ -92,7 +109,12 @@ class VideoInferenceProcessor:
                 bx1, by1, bx2, by2 = bib_box.xyxy[0]
                 if px1 < (bx1 + bx2) / 2 < px2 and py1 < (by1 + by2) / 2 < py2:
                     if person_id not in self.track_history:
-                        self.track_history[person_id] = {'ocr_reads': []}
+                        # Initialize with new fields for timing
+                        self.track_history[person_id] = {
+                            'ocr_reads': [], 
+                            'last_x_center': None, 
+                            'finish_time_ms': None
+                        }
                     bib_crop = self.crop_bib_from_prediction(all_detections.orig_img, bib_box.xyxy[0])
                     if bib_crop.size > 0:
                         bib_number, ocr_conf = self.extract_bib_with_easyocr(self.preprocess_for_easyocr(bib_crop))
@@ -102,6 +124,8 @@ class VideoInferenceProcessor:
 
     def draw_hybrid_predictions(self, image, tracked_persons, all_detections):
         annotated_image = image.copy()
+        cv2.line(annotated_image, (self.finish_line_x, 0), (self.finish_line_x, self.frame_height), (0, 255, 255), 3)
+
         if all_detections:
             for box in all_detections.boxes:
                 if int(box.cls) == 1:
@@ -158,6 +182,51 @@ class VideoInferenceProcessor:
                 
         return final_results
 
+    def print_live_leaderboard(self):
+        """
+        Clears the terminal and prints the current state of the leaderboard.
+        """
+        # 1. Clear the terminal screen (works on Windows, macOS, and Linux)
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+        # 2. Get the most up-to-date bib number guesses
+        current_bib_results = self.determine_final_bibs()
+
+        # 3. Assemble the list of finished racers
+        leaderboard = []
+        for tracker_id, history_data in self.track_history.items():
+            # Check if this racer has a recorded finish time
+            if history_data and history_data.get('finish_time_ms') is not None:
+                bib_result = current_bib_results.get(tracker_id)
+                # If the bib number is determined, use it. Otherwise, show "Pending".
+                bib_number = bib_result['final_bib'] if bib_result else "Pending"
+
+                leaderboard.append({
+                    'id': tracker_id,
+                    'bib': bib_number,
+                    'time_ms': history_data['finish_time_ms']
+                })
+        
+        # 4. Sort the leaderboard by finish time
+        leaderboard.sort(key=lambda x: x['time_ms'])
+
+        # 5. Print the formatted leaderboard
+        print(f"--- 🏁 Live Race Leaderboard (Updated: {time.strftime('%I:%M:%S %p')}) 🏁 ---")
+        if leaderboard:
+            for i, entry in enumerate(leaderboard):
+                total_seconds = entry['time_ms'] / 1000
+                minutes = int(total_seconds // 60)
+                seconds = int(total_seconds % 60)
+                milliseconds = int((total_seconds - int(total_seconds)) * 100)
+                time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
+
+                print(f"  {i+1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<8} | Time: {time_str}")
+        else:
+            print("  Waiting for the first racer to finish...")
+        
+        print("----------------------------------------------------------")
+        print("\n(Processing video... Press Ctrl+C to stop and show final results)")
+
     def process_video(self, output_path=None, display=True):
         # ... video writer setup ...
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -178,8 +247,10 @@ class VideoInferenceProcessor:
 
                 # --- HYBRID MODEL CALLS USING TWO SEPARATE INSTANCES ---
                 # 1. Track ONLY persons using the dedicated tracker_model
-                person_results = self.tracker_model.track(frame, persist=True, classes=[0], verbose=False)
+                person_results = self.tracker_model.track(frame, persist=True, tracker="config/custom_tracker.yaml", classes=[0], verbose=False)
                 tracked_persons = person_results[0] if person_results else None
+
+                self.check_finish_line_crossings(tracked_persons)
 
                 # 2. Predict ALL objects using the separate, stateless predictor_model
                 all_detections_results = self.predictor_model.predict(frame, conf=self.confidence_threshold, verbose=False)
@@ -198,13 +269,44 @@ class VideoInferenceProcessor:
                 frame_count += 1
 
         finally:
-            final_results = self.determine_final_bibs()
-            print("\n--- Final Bib Number Results ---")
-            if final_results:
-                for tracker_id, data in final_results.items():
-                    print(f"  Racer ID {tracker_id}: Final Bib = {data['final_bib']} (Score: {data['score']:.2f})")
+            # First, determine the final bib numbers for everyone
+            final_bib_results = self.determine_final_bibs()
+
+            # --- NEW: ASSEMBLE AND PRINT THE LEADERBOARD ---
+            leaderboard = []
+            for tracker_id, result_data in final_bib_results.items():
+                history_data = self.track_history.get(tracker_id)
+                if history_data and history_data.get('finish_time_ms') is not None:
+                    leaderboard.append({
+                        'id': tracker_id,
+                        'bib': result_data['final_bib'],
+                        'time_ms': history_data['finish_time_ms']
+                    })
+
+            # Sort the leaderboard by finish time (fastest first)
+            leaderboard.sort(key=lambda x: x['time_ms'])
+            
+            print("\n--- 🏁 Official Race Leaderboard 🏁 ---")
+            if leaderboard:
+                for i, entry in enumerate(leaderboard):
+                    # Format time as MM:SS.ms
+                    total_seconds = entry['time_ms'] / 1000
+                    minutes = int(total_seconds // 60)
+                    seconds = int(total_seconds % 60)
+                    milliseconds = int((total_seconds - int(total_seconds)) * 100)
+                    time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
+
+                    print(f"  {i+1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<6} | Time: {time_str}")
             else:
-                print("  No reliable bib numbers were finalized.")
+                print("  No racers finished the race.")
+            # print("----------------------------------------")
+            # final_results = self.determine_final_bibs()
+            # print("\n--- Final Bib Number Results ---")
+            # if final_results:
+            #     for tracker_id, data in final_results.items():
+            #         print(f"  Racer ID {tracker_id}: Final Bib = {data['final_bib']} (Score: {data['score']:.2f})")
+            # else:
+            #     print("  No reliable bib numbers were finalized.")
             self.cap.release()
             if out: out.release()
             cv2.destroyAllWindows()
@@ -227,10 +329,10 @@ def main():
         help="Path to trained YOLO model",
     )
     parser.add_argument(
-        "--fps", type=int, default=5, help="Target processing frame rate"
+        "--fps", type=int, default=20, help="Target processing frame rate"
     )
     parser.add_argument(
-        "--conf", type=float, default=0.25, help="YOLO confidence threshold"
+        "--conf", type=float, default=0.3, help="YOLO confidence threshold"
     )
     parser.add_argument(
         "--output", type=str, default=None, help="Path to save output video (optional)"
