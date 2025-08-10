@@ -215,140 +215,6 @@ class VideoInferenceProcessor:
 
         return annotated_image
 
-    def update_track_history(self, predictions):
-        """
-        Updates the track history with new detections and OCR results.
-        This version assumes a bib is associated with the person it is inside of.
-        """
-        if predictions is None or predictions.boxes.id is None:
-            return
-
-        # Get all detections with their tracker IDs
-        boxes = predictions.boxes.xyxy.cpu().numpy()
-        classes = predictions.boxes.cls.cpu().numpy()
-        confidences = predictions.boxes.conf.cpu().numpy()
-        tracker_ids = predictions.boxes.id.cpu().numpy().astype(int)
-
-        # Separate persons and bibs for easier association
-        persons = {tid: box for tid, box, cls in zip(tracker_ids, boxes, classes) if cls == 0}
-        bibs = {tid: (box, conf) for tid, box, conf, cls in zip(tracker_ids, boxes, confidences, classes) if cls == 1}
-
-        # For each bib, find which person it belongs to
-        for bib_id, (bib_box, bib_yolo_conf) in bibs.items():
-            # Find the person bounding box that contains the center of the bib
-            bib_center_x = (bib_box[0] + bib_box[2]) / 2
-            bib_center_y = (bib_box[1] + bib_box[3]) / 2
-            
-            associated_person_id = None
-            for person_id, person_box in persons.items():
-                if (person_box[0] < bib_center_x < person_box[2] and
-                    person_box[1] < bib_center_y < person_box[3]):
-                    associated_person_id = person_id
-                    break
-            
-            if associated_person_id:
-                # Initialize tracker if not seen before
-                if associated_person_id not in self.track_history:
-                    self.track_history[associated_person_id] = {'ocr_reads': [], 'final_bib': None}
-
-                # Perform OCR on the bib
-                bib_crop = self.crop_bib_from_prediction(predictions.orig_img, bib_box)
-                if bib_crop.size > 0:
-                    preprocessed_crop = self.preprocess_for_easyocr(bib_crop)
-                    bib_number, ocr_confidence = self.extract_bib_with_easyocr(preprocessed_crop)
-                    
-                    if bib_number and ocr_confidence:
-                        # Store the reading with both OCR and YOLO confidence
-                        self.track_history[associated_person_id]['ocr_reads'].append(
-                            (bib_number, ocr_confidence, bib_yolo_conf)
-                        )
-
-    def draw_tracked_predictions(self, image, predictions):
-        """Draw tracked bounding boxes and the current best guess for the bib."""
-        annotated_image = image.copy()
-        
-        if predictions is None or predictions.boxes.id is None:
-            return annotated_image
-
-        boxes = predictions.boxes.xyxy.cpu().numpy()
-        classes = predictions.boxes.cls.cpu().numpy()
-        tracker_ids = predictions.boxes.id.cpu().numpy().astype(int)
-
-        for box, cls, tracker_id in zip(boxes, classes, tracker_ids):
-            x1, y1, x2, y2 = [int(coord) for coord in box]
-            class_id = int(cls)
-
-            if class_id == 0:  # Person
-                color = (255, 0, 0)  # Blue
-                # Check if we have a bib number for this person
-                current_best_bib = "No Bib"
-                if tracker_id in self.track_history and self.track_history[tracker_id]['ocr_reads']:
-                    # Simple way to show current best: most frequent read so far
-                    from collections import Counter
-                    reads = [r[0] for r in self.track_history[tracker_id]['ocr_reads']]
-                    current_best_bib = Counter(reads).most_common(1)[0][0]
-
-                label = f"Racer ID {tracker_id} | Bib: {current_best_bib}"
-                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(annotated_image, label, (x1, y1 - 10), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
-        return annotated_image
-
-    def determine_final_bibs(self):
-        """
-        Process the aggregated track_history to determine the final bib for each racer.
-        
-        Returns:
-            dict: A dictionary with the final results for each track_id.
-        """
-        final_results = {}
-        for tracker_id, data in self.track_history.items():
-            ocr_reads = data['ocr_reads']
-            
-            if not ocr_reads:
-                continue
-
-            # --- DECISION LOGIC ---
-            
-            # 1. Filter out unreliable reads
-            # Bibs are usually 2-5 digits. Adjust as needed.
-            # Require a minimum OCR confidence.
-            filtered_reads = [
-                r for r in ocr_reads 
-                if 2 <= len(r[0]) <= 5 and r[1] > 0.4 
-            ]
-            
-            if not filtered_reads:
-                continue
-
-            # 2. Calculate a weighted score for each unique bib number
-            scores = {}
-            for bib_num, ocr_conf, yolo_conf in filtered_reads:
-                # The score is the sum of confidences for each time a number is read
-                # You can experiment with weighting: ocr_conf * yolo_conf is also a great metric
-                score = ocr_conf 
-                if bib_num not in scores:
-                    scores[bib_num] = 0
-                scores[bib_num] += score
-
-            # 3. Find the bib number with the highest total score
-            if scores:
-                most_likely_bib = max(scores, key=scores.get)
-                final_score = scores[most_likely_bib]
-                
-                final_results[tracker_id] = {
-                    'final_bib': most_likely_bib,
-                    'score': final_score,
-                    'all_reads': Counter([r[0] for r in filtered_reads]).most_common()
-                }
-
-        # Update the main history object with the final determination
-        for tracker_id, result in final_results.items():
-            self.track_history[tracker_id]['final_bib'] = result['final_bib']
-            
-        return final_results
-
     def process_video(self, output_path=None, display=True):
         """
         Process the video file with YOLO inference and OCR.
@@ -389,17 +255,13 @@ class VideoInferenceProcessor:
                     continue
 
                 # Run YOLO inference
-                results = self.model.track(
-                    frame, persist=True, conf=self.confidence_threshold, verbose=False
+                results = self.model(
+                    frame, conf=self.confidence_threshold, verbose=False
                 )
                 predictions = results[0] if results else None
 
-                self.update_track_history(predictions)
-
-                annotated_frame = self.draw_tracked_predictions(frame, predictions)
-
-                # # Draw predictions and OCR results
-                # annotated_frame = self.draw_predictions(frame, predictions)
+                # Draw predictions and OCR results
+                annotated_frame = self.draw_predictions(frame, predictions)
 
                 # Add frame info
                 info_text = (
@@ -462,11 +324,6 @@ class VideoInferenceProcessor:
             print("\nProcessing interrupted by user.")
 
         finally:
-            final_results = self.determine_final_bibs()
-            print("\n--- Final Bib Number Results ---")
-            for tracker_id, data in final_results.items():
-                print(f"  Racer ID {tracker_id}: Final Bib = {data['final_bib']} (Score: {data['score']:.2f})")
-            print("--------------------------------")
             # Cleanup
             self.cap.release()
             if out:
@@ -483,8 +340,6 @@ class VideoInferenceProcessor:
             print(f"Average processing FPS: {avg_fps:.2f}")
             if output_path:
                 print(f"Output video saved to: {output_path}")
-
-            
 
 
 def main():
