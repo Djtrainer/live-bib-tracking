@@ -6,17 +6,79 @@ from pathlib import Path
 from ultralytics import YOLO
 import time
 from collections import Counter
+import numpy as np
+
+from utils import get_logger
+
+logger = get_logger()
 
 
 class VideoInferenceProcessor:
+    """Processes race video footage to track racers, extract bib numbers using OCR, and determine finish times.
+    This class uses YOLO models for object detection and tracking, and EasyOCR for reading bib numbers.
+    It maintains a history of tracked racers, detects when they cross a virtual finish line, and produces live and final leaderboards.
+    Args:
+        model_path (str or Path): Path to the YOLO model weights.
+        video_path (str or Path): Path to the input race video file.
+        target_fps (int, optional): Target frames per second for processing. Defaults to 1.
+        confidence_threshold (float, optional): Minimum confidence for detections. Defaults to 0.
+        finish_line_fraction (float, optional): Fraction of frame width to set the finish line. Defaults to 0.85.
+    Attributes:
+        model_path (Path): Path to YOLO model weights.
+        video_path (Path): Path to input video file.
+        target_fps (int): Target FPS for processing.
+        confidence_threshold (float): Detection confidence threshold.
+        track_history (dict): History of tracked racers keyed by tracker ID.
+        tracker_model (YOLO): YOLO model instance for tracking persons.
+        predictor_model (YOLO): YOLO model instance for stateless predictions.
+        ocr_reader (easyocr.Reader): EasyOCR reader for bib extraction.
+        cap (cv2.VideoCapture): OpenCV video capture object.
+        original_fps (float): Original FPS of the video.
+        frame_width (int): Width of video frames.
+        frame_height (int): Height of video frames.
+        frame_skip (int): Number of frames to skip for target FPS.
+        finish_line_x (int): X-coordinate of the virtual finish line.
+        inference_interval (int): Interval for running inference.
+        last_annotated_frame (np.ndarray): Last annotated frame for display.
+    Methods:
+        preprocess_for_easyocr(image_crop):
+            Preprocesses an image crop for OCR (grayscale, denoise, threshold).
+        extract_bib_with_easyocr(image_crop):
+            Extracts bib number and confidence from an image crop using EasyOCR.
+        crop_bib_from_prediction(image, bbox, padding=15):
+            Crops the bib region from an image using bounding box coordinates.
+        check_finish_line_crossings(tracked_persons):
+            Checks if tracked racers have crossed the virtual finish line.
+        update_history_hybrid(tracked_persons, all_detections):
+            Updates racer history with OCR reads and finish line status.
+        draw_hybrid_predictions(image, tracked_persons, all_detections, scale=1.0):
+            Draws bounding boxes and labels for racers and bibs on the frame.
+        determine_final_bibs():
+            Aggregates OCR reads to determine the most likely bib for each racer.
+        print_live_leaderboard():
+            Prints the current leaderboard to the terminal, sorted by finish time.
+        process_video(output_path=None, display=True):
+            Processes the video, tracks racers, extracts bibs, and displays or saves annotated frames.
+            Prints live and final leaderboards."""
+
     def __init__(
         self,
-        model_path,
-        video_path,
-        target_fps=1,
-        confidence_threshold=0,
-        finish_line_fraction=0.85,
+        model_path: str | Path,
+        video_path: str | Path,
+        target_fps: int = 1,
+        confidence_threshold: float = 0,
+        finish_line_fraction: float = 0.85,
     ):
+        """
+        Initializes the VideoInferenceProcessor for live bib tracking.
+
+        Args:
+            model_path (str | Path): Path to YOLO model weights.
+            video_path (str | Path): Path to input video file.
+            target_fps (int, optional): Target FPS for processing. Defaults to 1.
+            confidence_threshold (float, optional): YOLO detection confidence threshold. Defaults to 0.
+            finish_line_fraction (float, optional): Fraction of frame width for finish line. Defaults to 0.85.
+        """
         self.model_path = Path(model_path)
         self.video_path = Path(video_path)
         self.target_fps = target_fps
@@ -25,18 +87,17 @@ class VideoInferenceProcessor:
         # This will store history keyed by the PERSON's tracker ID
         self.track_history = {}
 
-        # --- KEY CHANGE: LOAD TWO SEPARATE MODEL INSTANCES ---
-        print("Loading models...")
+        logger.info("Loading models...")
         # This model instance will be used ONLY for tracking and will become stateful
         self.tracker_model = YOLO(str(self.model_path))
         # This model instance will be used ONLY for prediction and will remain stateless
         self.predictor_model = YOLO(str(self.model_path))
-        print("Models loaded successfully!")
+        logger.info("Models loaded successfully!")
 
         # Initialize EasyOCR reader
-        print("Initializing EasyOCR reader...")
+        logger.info("Initializing EasyOCR reader...")
         self.ocr_reader = easyocr.Reader(["en"])
-        print("EasyOCR reader initialized!")
+        logger.info("EasyOCR reader initialized!")
 
         # Video capture and properties
         self.cap = cv2.VideoCapture(str(self.video_path))
@@ -51,7 +112,17 @@ class VideoInferenceProcessor:
         self.inference_interval = 1
         self.last_annotated_frame = None
 
-    def preprocess_for_easyocr(self, image_crop):
+    def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
+        """
+        Preprocesses an image crop for use with EasyOCR by converting it to grayscale,
+        applying denoising, and adaptive thresholding.
+
+        Args:
+            image_crop (np.ndarray): The input image crop, either in color (BGR) or grayscale.
+
+        Returns:
+            np.ndarray: The processed binary image suitable for OCR.
+        """
         if len(image_crop.shape) == 3:
             gray = cv2.cvtColor(image_crop, cv2.COLOR_BGR2GRAY)
         else:
@@ -61,7 +132,20 @@ class VideoInferenceProcessor:
             denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
 
-    def extract_bib_with_easyocr(self, image_crop):
+    def extract_bib_with_easyocr(
+        self, image_crop: np.ndarray
+    ) -> tuple[str | None, float | None]:
+        """
+        Extracts the bib number and its confidence score from an image crop using EasyOCR.
+
+        Args:
+            image_crop (np.ndarray): The preprocessed image crop containing the bib.
+
+        Returns:
+            tuple[str | None, float | None]: The detected bib number (as a string) and its confidence score.
+                Returns (None, None) if no bib is detected or an error occurs.
+        """
+
         try:
             result = self.ocr_reader.readtext(image_crop, allowlist="0123456789")
             if result:
@@ -71,14 +155,44 @@ class VideoInferenceProcessor:
         except Exception:
             return None, None
 
-    def crop_bib_from_prediction(self, image, bbox, padding=15):
+    def crop_bib_from_prediction(
+        self,
+        image: np.ndarray,
+        bbox: tuple[float, float, float, float],
+        padding: int = 15,
+    ) -> np.ndarray:
+        """
+        Crops a region from the input image based on the bounding box coordinates,
+        with optional padding applied.
+
+        Args:
+            image (numpy.ndarray): The input image from which the region will be cropped.
+            bbox (tuple[float, float, float, float]): The bounding box coordinates
+            (x1, y1, x2, y2) specifying the region to crop.
+            padding (int, optional): The number of pixels to add as padding around
+            the bounding box. Defaults to 15.
+
+        Returns:
+            numpy.ndarray: The cropped region of the image.
+        """
         x1, y1, x2, y2 = [int(coord) for coord in bbox]
         x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
         x2, y2 = min(image.shape[1], x2 + padding), min(image.shape[0], y2 + padding)
         return image[y1:y2, x1:x2]
 
-    def check_finish_line_crossings(self, tracked_persons):
-        """Checks if any tracked racers have crossed the virtual finish line."""
+    def check_finish_line_crossings(self, tracked_persons: YOLO) -> None:
+        """
+        Checks if any tracked racers have crossed the virtual finish line.
+
+        This method updates the track history for each racer by recording the finish time
+        when a racer crosses the finish line from left to right. It also prints the live
+        leaderboard whenever a racer finishes.
+
+        Args:
+            tracked_persons (YOLO): The YOLO tracking results containing bounding boxes
+                and tracker IDs for detected persons.
+        """
+
         if tracked_persons is None or tracked_persons.boxes.id is None:
             return
 
@@ -102,12 +216,30 @@ class VideoInferenceProcessor:
                     # Racer crossed the line! Record the video timestamp.
                     finish_time = self.cap.get(cv2.CAP_PROP_POS_MSEC)
                     history["finish_time_ms"] = finish_time
-                    print(f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s")
+                    logger.info(
+                        f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
+                    )
                     self.print_live_leaderboard()
                 # Update the last known position for the next frame
                 history["last_x_center"] = current_x_center
 
-    def update_history_hybrid(self, tracked_persons, all_detections):
+    def update_history_hybrid(
+        self, tracked_persons: YOLO, all_detections: YOLO
+    ) -> None:
+        """
+        Updates the track history for racers by associating detected bibs with tracked persons.
+
+        This method uses YOLO tracking results to identify persons and YOLO detection results
+        to identify bibs. It associates bibs with persons based on bounding box overlap and
+        updates the track history with OCR reads and finish line status.
+
+        Args:
+            tracked_persons (YOLO): YOLO tracking results containing bounding boxes and tracker IDs for detected persons.
+            all_detections (YOLO): YOLO detection results containing bounding boxes and classes for detected objects.
+
+        Returns:
+            None
+        """
         if (
             tracked_persons is None
             or tracked_persons.boxes.id is None
@@ -147,8 +279,25 @@ class VideoInferenceProcessor:
                     break
 
     def draw_hybrid_predictions(
-        self, image, tracked_persons, all_detections, scale=1.0
-    ):
+        self,
+        image: np.ndarray,
+        tracked_persons: "Detections",
+        all_detections: "Detections",
+        scale: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Draws hybrid predictions on the input image, including finish line, detected boxes, and tracked persons with their IDs and best OCR bib reads.
+
+        Args:
+            image (np.ndarray): The input image on which to draw annotations.
+            tracked_persons (Detections): Object containing tracked person detections, including IDs and bounding boxes.
+            all_detections (Detections): Object containing all detection boxes and classes.
+            scale (float, optional): Scale factor to adjust bounding box coordinates. Defaults to 1.0.
+
+        Returns:
+            np.ndarray: The annotated image with drawn predictions.
+        """
+
         annotated_image = image.copy()
         cv2.line(
             annotated_image,
@@ -191,8 +340,16 @@ class VideoInferenceProcessor:
 
     def determine_final_bibs(self):
         """
-        Processes the aggregated track_history to determine the final bib for each racer.
-        This version contains the fix for the 'scores' variable error.
+        Determines the most likely bib number for each racer based on OCR and YOLO confidence scores.
+
+        This method processes the aggregated `track_history` and filters OCR reads for reliability.
+        It calculates a score for each bib number by multiplying OCR and YOLO confidences, then
+        selects the bib number with the highest total score for each tracker.
+
+        Returns:
+            dict: A dictionary mapping tracker IDs to a dictionary containing:
+                - "final_bib" (str): The most likely bib number.
+                - "score" (float): The total confidence score for the selected bib number.
         """
         final_results = {}
         for tracker_id, data in self.track_history.items():
@@ -206,17 +363,11 @@ class VideoInferenceProcessor:
             ]
             if not filtered_reads:
                 continue
-
-            # --- CORRECTED LOGIC FOR CALCULATING SCORES ---
-            # 1. First, initialize an empty dictionary.
             scores = {}
-            # 2. Then, loop through the filtered reads to populate it.
+
             for bib_num, ocr_conf, yolo_conf in filtered_reads:
-                # The score for this single reading combines OCR and YOLO confidence
                 score = ocr_conf * yolo_conf
-                # Add this score to the cumulative total for that bib number
                 scores[bib_num] = scores.get(bib_num, 0) + score
-            # --- END OF CORRECTION ---
 
             # Find the bib number with the highest total score
             if scores:
@@ -232,20 +383,18 @@ class VideoInferenceProcessor:
         """
         Clears the terminal and prints the current state of the leaderboard.
         """
-        # 1. Clear the terminal screen (works on Windows, macOS, and Linux)
+
         os.system("cls" if os.name == "nt" else "clear")
 
-        # 2. Get the most up-to-date bib number guesses
         current_bib_results = self.determine_final_bibs()
 
-        # 3. Assemble the list of finished racers
         leaderboard = []
         for tracker_id, history_data in self.track_history.items():
             # Check if this racer has a recorded finish time
             if history_data and history_data.get("finish_time_ms") is not None:
                 bib_result = current_bib_results.get(tracker_id)
-                # If the bib number is determined, use it. Otherwise, show "Pending".
-                bib_number = bib_result["final_bib"] if bib_result else "Pending"
+                # If the bib number is determined, use it. Otherwise, show "No Bib".
+                bib_number = bib_result["final_bib"] if bib_result else "No Bib"
 
                 leaderboard.append(
                     {
@@ -255,11 +404,9 @@ class VideoInferenceProcessor:
                     }
                 )
 
-        # 4. Sort the leaderboard by finish time
         leaderboard.sort(key=lambda x: x["time_ms"])
 
-        # 5. Print the formatted leaderboard
-        print(
+        logger.info(
             f"--- 🏁 Live Race Leaderboard (Updated: {time.strftime('%I:%M:%S %p')}) 🏁 ---"
         )
         if leaderboard:
@@ -270,17 +417,31 @@ class VideoInferenceProcessor:
                 milliseconds = int((total_seconds - int(total_seconds)) * 100)
                 time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
 
-                print(
+                logger.info(
                     f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<8} | Time: {time_str}"
                 )
         else:
-            print("  Waiting for the first racer to finish...")
+            logger.info("  Waiting for the first racer to finish...")
 
-        print("----------------------------------------------------------")
-        print("\n(Processing video... Press Ctrl+C to stop and show final results)")
+        logger.info("----------------------------------------------------------")
+        logger.info(
+            "\n(Processing video... Press Ctrl+C to stop and show final results)"
+        )
 
-    def process_video(self, output_path=None, display=True):
-        # ... video writer setup ...
+    def process_video(
+        self, output_path: str | Path = None, display: bool = True
+    ) -> None:
+        """
+        Processes the race video to track racers, extract bib numbers using OCR, and determine finish times.
+        Optionally displays the annotated video in real-time and/or saves it to an output file.
+
+        Args:
+            output_path (str | Path, optional): Path to save the annotated output video. Defaults to None.
+            display (bool, optional): Whether to display the annotated video in real-time. Defaults to True.
+
+        Returns:
+            None
+        """
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = None
         if output_path:
@@ -292,8 +453,6 @@ class VideoInferenceProcessor:
             )
 
         frame_count = 0
-        start_time = time.time()
-
         try:
             while True:
                 ret, frame = self.cap.read()
@@ -310,8 +469,7 @@ class VideoInferenceProcessor:
 
                 processing_frame = cv2.resize(frame, (proc_w, proc_h))
                 if frame_count % self.inference_interval == 0:
-                    # --- HYBRID MODEL CALLS USING TWO SEPARATE INSTANCES ---
-                    # 1. Track ONLY persons using the dedicated tracker_model
+                    # Track ONLY persons using the dedicated tracker_model
                     person_results = self.tracker_model.track(
                         processing_frame,
                         persist=True,
@@ -323,7 +481,7 @@ class VideoInferenceProcessor:
 
                     self.check_finish_line_crossings(tracked_persons)
 
-                    # 2. Predict ALL objects using the separate, stateless predictor_model
+                    # Predict ALL objects using the separate, stateless predictor_model
                     all_detections_results = self.predictor_model.predict(
                         processing_frame, conf=self.confidence_threshold, verbose=False
                     )
@@ -331,10 +489,10 @@ class VideoInferenceProcessor:
                         all_detections_results[0] if all_detections_results else None
                     )
 
-                    # 3. Update history using the new hybrid function
+                    # Update history using the new hybrid function
                     self.update_history_hybrid(tracked_persons, all_detections)
 
-                    # 4. Draw predictions using the new hybrid function
+                    # Draw predictions using the new hybrid function
                     annotated_frame = self.draw_hybrid_predictions(
                         frame, tracked_persons, all_detections, scale=scale
                     )
@@ -357,7 +515,6 @@ class VideoInferenceProcessor:
             # First, determine the final bib numbers for everyone
             final_bib_results = self.determine_final_bibs()
 
-            # --- NEW: ASSEMBLE AND PRINT THE LEADERBOARD ---
             leaderboard = []
             for tracker_id, result_data in final_bib_results.items():
                 history_data = self.track_history.get(tracker_id)
@@ -373,7 +530,7 @@ class VideoInferenceProcessor:
             # Sort the leaderboard by finish time (fastest first)
             leaderboard.sort(key=lambda x: x["time_ms"])
 
-            print("\n--- 🏁 Official Race Leaderboard 🏁 ---")
+            logger.info("\n--- 🏁 Official Race Leaderboard 🏁 ---")
             if leaderboard:
                 for i, entry in enumerate(leaderboard):
                     # Format time as MM:SS.ms
@@ -383,19 +540,12 @@ class VideoInferenceProcessor:
                     milliseconds = int((total_seconds - int(total_seconds)) * 100)
                     time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
 
-                    print(
+                    logger.info(
                         f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<6} | Time: {time_str}"
                     )
             else:
-                print("  No racers finished the race.")
-            # print("----------------------------------------")
-            # final_results = self.determine_final_bibs()
-            # print("\n--- Final Bib Number Results ---")
-            # if final_results:
-            #     for tracker_id, data in final_results.items():
-            #         print(f"  Racer ID {tracker_id}: Final Bib = {data['final_bib']} (Score: {data['score']:.2f})")
-            # else:
-            #     print("  No reliable bib numbers were finalized.")
+                logger.info("  No racers finished the race.")
+            logger.info("----------------------------------------------------------")
             self.cap.release()
             if out:
                 out.release()
@@ -435,11 +585,11 @@ def main():
 
     # Validate input files
     if not Path(args.video).exists():
-        print(f"Error: Video file not found: {args.video}")
+        logger.info(f"Error: Video file not found: {args.video}")
         return
 
     if not Path(args.model).exists():
-        print(f"Error: Model file not found: {args.model}")
+        logger.info(f"Error: Model file not found: {args.model}")
         return
 
     # Create processor and run inference
@@ -454,7 +604,7 @@ def main():
         processor.process_video(output_path=args.output, display=not args.no_display)
 
     except Exception as e:
-        print(f"Error during processing: {e}")
+        logger.info(f"Error during processing: {e}")
         return
 
 
