@@ -47,6 +47,9 @@ class VideoInferenceProcessor:
         self.frame_skip = max(1, int(self.original_fps / self.target_fps))
         self.finish_line_x = int(self.frame_width*finish_line_fraction)
 
+        self.inference_interval = 1
+        self.last_annotated_frame = None
+
     def preprocess_for_easyocr(self, image_crop):
         if len(image_crop.shape) == 3: gray = cv2.cvtColor(image_crop, cv2.COLOR_BGR2GRAY)
         else: gray = image_crop
@@ -122,20 +125,20 @@ class VideoInferenceProcessor:
                             self.track_history[person_id]['ocr_reads'].append((bib_number, ocr_conf, float(bib_box.conf)))
                     break
 
-    def draw_hybrid_predictions(self, image, tracked_persons, all_detections):
+    def draw_hybrid_predictions(self, image, tracked_persons, all_detections, scale=1.0):
         annotated_image = image.copy()
         cv2.line(annotated_image, (self.finish_line_x, 0), (self.finish_line_x, self.frame_height), (0, 255, 255), 3)
 
         if all_detections:
             for box in all_detections.boxes:
                 if int(box.cls) == 1:
-                    x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
+                    x1, y1, x2, y2 = [int(c / scale) for c in box.xyxy[0]]
                     cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 0, 255), 2)
         
         if tracked_persons and tracked_persons.boxes.id is not None:
             for box in tracked_persons.boxes:
                 person_id = int(box.id[0])
-                x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
+                x1, y1, x2, y2 = [int(c / scale) for c in box.xyxy[0]]
                 current_best_read = ""
                 if person_id in self.track_history and self.track_history[person_id]['ocr_reads']:
                     reads = [r[0] for r in self.track_history[person_id]['ocr_reads']]
@@ -245,27 +248,43 @@ class VideoInferenceProcessor:
                     frame_count += 1
                     continue
 
-                # --- HYBRID MODEL CALLS USING TWO SEPARATE INSTANCES ---
-                # 1. Track ONLY persons using the dedicated tracker_model
-                person_results = self.tracker_model.track(frame, persist=True, tracker="config/custom_tracker.yaml", classes=[0], verbose=False)
-                tracked_persons = person_results[0] if person_results else None
+                orig_h, orig_w = frame.shape[:2]
+                proc_w = orig_w
+                scale = proc_w / orig_w
+                proc_h = int(orig_h * scale)
 
-                self.check_finish_line_crossings(tracked_persons)
+                processing_frame = cv2.resize(frame, (proc_w, proc_h))
+                if frame_count % self.inference_interval == 0:
 
-                # 2. Predict ALL objects using the separate, stateless predictor_model
-                all_detections_results = self.predictor_model.predict(frame, conf=self.confidence_threshold, verbose=False)
-                all_detections = all_detections_results[0] if all_detections_results else None
+                    # --- HYBRID MODEL CALLS USING TWO SEPARATE INSTANCES ---
+                    # 1. Track ONLY persons using the dedicated tracker_model
+                    person_results = self.tracker_model.track(processing_frame, persist=True, tracker="config/custom_tracker.yaml", classes=[0], verbose=False)
+                    tracked_persons = person_results[0] if person_results else None
 
-                # 3. Update history using the new hybrid function
-                self.update_history_hybrid(tracked_persons, all_detections)
+                    self.check_finish_line_crossings(tracked_persons)
 
-                # 4. Draw predictions using the new hybrid function
-                annotated_frame = self.draw_hybrid_predictions(frame, tracked_persons, all_detections)
+                    # 2. Predict ALL objects using the separate, stateless predictor_model
+                    all_detections_results = self.predictor_model.predict(processing_frame, conf=self.confidence_threshold, verbose=False)
+                    all_detections = all_detections_results[0] if all_detections_results else None
+
+                    # 3. Update history using the new hybrid function
+                    self.update_history_hybrid(tracked_persons, all_detections)
+
+                    # 4. Draw predictions using the new hybrid function
+                    annotated_frame = self.draw_hybrid_predictions(frame, tracked_persons, all_detections, scale=scale)
                 
+                    self.last_annotated_frame = annotated_frame
+                    display_frame = annotated_frame
+                else:
+                    if self.last_annotated_frame is not None:
+                        display_frame = self.last_annotated_frame
+
                 if display:
-                    cv2.imshow("Live Bib Tracking", annotated_frame)
-                    if cv2.waitKey(1) & 0xFF == ord("q"): break
-                if out: out.write(annotated_frame)
+                    cv2.imshow("Live Bib Tracking", display_frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"): 
+                        break
+                if out: 
+                    out.write(display_frame)
                 frame_count += 1
 
         finally:
@@ -329,7 +348,7 @@ def main():
         help="Path to trained YOLO model",
     )
     parser.add_argument(
-        "--fps", type=int, default=20, help="Target processing frame rate"
+        "--fps", type=int, default=10, help="Target processing frame rate"
     )
     parser.add_argument(
         "--conf", type=float, default=0.3, help="YOLO confidence threshold"
