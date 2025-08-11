@@ -6,3 +6,7 @@ __pycache__/
 *.pyc
 *runs/
 *.pt
+
+src/dataloader.py
+src/extract_images.py
+notebooks/*
