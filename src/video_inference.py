@@ -96,7 +96,7 @@ class VideoInferenceProcessor:
 
         # Initialize EasyOCR reader
         logger.info("Initializing EasyOCR reader...")
-        self.ocr_reader = easyocr.Reader(["en"])
+        self.ocr_reader = easyocr.Reader(["en"], gpu=True)
         logger.info("EasyOCR reader initialized!")
 
         # Video capture and properties
@@ -428,6 +428,38 @@ class VideoInferenceProcessor:
             "\n(Processing video... Press Ctrl+C to stop and show final results)"
         )
 
+    # def process_video(self, output_path=None, display=True):
+    #     # This is a simplified loop for speed testing ONLY
+        
+    #     frame_count = 0
+    #     start_time = time.time()
+        
+    #     while True:
+    #         ret, frame = self.cap.read()
+    #         if not ret:
+    #             break
+            
+    #         # This loop does nothing but read and display the frame.
+    #         # It establishes your maximum possible FPS.
+            
+    #         # --- Draw Timer and Lag Info (to measure speed) ---
+    #         elapsed_seconds = time.time() - start_time
+    #         video_seconds = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            
+    #         if elapsed_seconds > 0:
+    #             processing_speed_factor = video_seconds / elapsed_seconds
+    #             lag_text = f"Bare-Bones Speed: {processing_speed_factor:.1f}x"
+    #             cv2.putText(frame, lag_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+    #         # ---------------------------------------------
+
+    #         cv2.imshow("Live Bib Tracking", frame)
+    #         if cv2.waitKey(1) & 0xFF == ord("q"):
+    #             break
+            
+    #         frame_count += 1
+            
+    #     self.cap.release()
+    #     cv2.destroyAllWindows()
     def process_video(
         self, output_path: str | Path = None, display: bool = True
     ) -> None:
@@ -453,6 +485,7 @@ class VideoInferenceProcessor:
             )
 
         frame_count = 0
+        start_time = time.time()
         try:
             while True:
                 ret, frame = self.cap.read()
@@ -467,9 +500,11 @@ class VideoInferenceProcessor:
                 scale = proc_w / orig_w
                 proc_h = int(orig_h * scale)
 
-                processing_frame = cv2.resize(frame, (proc_w, proc_h))
+                processing_frame = frame #cv2.resize(frame, (proc_w, proc_h))
+ 
                 if frame_count % self.inference_interval == 0:
                     # Track ONLY persons using the dedicated tracker_model
+                    # person_results = None
                     person_results = self.tracker_model.track(
                         processing_frame,
                         persist=True,
@@ -482,6 +517,7 @@ class VideoInferenceProcessor:
                     self.check_finish_line_crossings(tracked_persons)
 
                     # Predict ALL objects using the separate, stateless predictor_model
+                    # all_detections_results = None 
                     all_detections_results = self.predictor_model.predict(
                         processing_frame, conf=self.confidence_threshold, verbose=False
                     )
@@ -499,6 +535,41 @@ class VideoInferenceProcessor:
 
                     self.last_annotated_frame = annotated_frame
                     display_frame = annotated_frame
+
+                    elapsed_seconds = time.time() - start_time                    
+                    # --- TIMER BLOCK ---
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    timer_text = f"Live Timer: {minutes:02d}:{seconds:02d}"
+                    
+                    # Get text size to create a background rectangle for readability
+                    (text_width, text_height), _ = cv2.getTextSize(timer_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
+                    text_x = self.frame_width - text_width - 20
+                    text_y = text_height + 20
+                    
+                    # Draw black background rectangle
+                    cv2.rectangle(display_frame, (text_x - 10, text_y - text_height - 10), (text_x + text_width + 10, text_y + 10), (0,0,0), -1)
+                    # Draw timer text in white
+                    cv2.putText(display_frame, timer_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    video_seconds = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                    
+                    if elapsed_seconds > 0:
+                        lag_seconds = elapsed_seconds - video_seconds
+                        processing_speed_factor = video_seconds / elapsed_seconds
+                        # Create the text string to display
+                        lag_text = f"Lag: {lag_seconds:.1f}s (Speed: {processing_speed_factor:.1f}x)"
+                    else:
+                        lag_text = "Lag: Calculating..."
+
+                    # 3. Add the lag text below the live timer
+                    (lag_text_width, _), _ = cv2.getTextSize(lag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                    lag_text_x = self.frame_width - lag_text_width - 20
+                    lag_text_y = text_y + text_height + 5 # Position it below the timer text
+                    
+                    # Draw black background rectangle and the lag text in yellow
+                    cv2.rectangle(annotated_frame, (lag_text_x - 10, lag_text_y - text_height), (lag_text_x + lag_text_width + 10, lag_text_y + 10), (0,0,0), -1)
+                    cv2.putText(annotated_frame, lag_text, (lag_text_x, lag_text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    
                 else:
                     if self.last_annotated_frame is not None:
                         display_frame = self.last_annotated_frame
@@ -507,8 +578,8 @@ class VideoInferenceProcessor:
                     cv2.imshow("Live Bib Tracking", display_frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
-                if out:
-                    out.write(display_frame)
+                # if out:
+                #     out.write(display_frame)
                 frame_count += 1
 
         finally:
@@ -569,7 +640,7 @@ def main():
         help="Path to trained YOLO model",
     )
     parser.add_argument(
-        "--fps", type=int, default=10, help="Target processing frame rate"
+        "--fps", type=int, default=8, help="Target processing frame rate"
     )
     parser.add_argument(
         "--conf", type=float, default=0.3, help="YOLO confidence threshold"
