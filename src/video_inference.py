@@ -474,39 +474,6 @@ class VideoInferenceProcessor:
             "\n(Processing video... Press Ctrl+C to stop and show final results)"
         )
 
-    # def process_video(self, output_path=None, display=True):
-    #     # This is a simplified loop for speed testing ONLY
-        
-    #     frame_count = 0
-    #     start_time = time.time()
-        
-    #     while True:
-    #         ret, frame = self.cap.read()
-    #         if not ret:
-    #             break
-            
-    #         # This loop does nothing but read and display the frame.
-    #         # It establishes your maximum possible FPS.
-            
-    #         # --- Draw Timer and Lag Info (to measure speed) ---
-    #         elapsed_seconds = time.time() - start_time
-    #         video_seconds = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-            
-    #         if elapsed_seconds > 0:
-    #             processing_speed_factor = video_seconds / elapsed_seconds
-    #             lag_text = f"Bare-Bones Speed: {processing_speed_factor:.1f}x"
-    #             cv2.putText(frame, lag_text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
-    #         # ---------------------------------------------
-
-    #         cv2.imshow("Live Bib Tracking", frame)
-    #         if cv2.waitKey(1) & 0xFF == ord("q"):
-    #             break
-            
-    #         frame_count += 1
-            
-    #     self.cap.release()
-    #     cv2.destroyAllWindows()
-
     def process_video_live_stream(
         self, output_path: str | Path = None, display: bool = True
     ):
