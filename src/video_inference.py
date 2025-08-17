@@ -10,6 +10,7 @@ from collections import Counter
 import numpy as np
 import imageio
 import streamlink
+import requests
 
 from utils import get_logger
 
@@ -191,7 +192,7 @@ class VideoInferenceProcessor:
 
         This method updates the track history for each racer by recording the finish time
         when a racer crosses the finish line from left to right. It also prints the live
-        leaderboard whenever a racer finishes.
+        leaderboard and sends the result to a local server.
 
         Args:
             tracked_persons (YOLO): The YOLO tracking results containing bounding boxes
@@ -224,7 +225,28 @@ class VideoInferenceProcessor:
                     logger.info(
                         f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
                     )
+
+                    # --- NEW: SEND RESULT TO LOCAL SERVER ---
+                    # 1. Get the current best bib guess for this finisher
+                    final_bib_results = self.determine_final_bibs()
+                    bib_result = final_bib_results.get(person_id)
+                    
+                    if bib_result:
+                        # 2. Create the data payload to send
+                        payload = {
+                            "bibNumber": bib_result['final_bib'],
+                            "finishTimeMs": finish_time
+                        }
+                        try:
+                            # 3. Send a POST request to the local server
+                            requests.post('http://localhost:8000/add_finisher', json=payload, timeout=2)
+                            logger.info(f"Sent finisher data to local UI: Bib #{payload['bibNumber']}")
+                        except requests.exceptions.ConnectionError:
+                            logger.warning("Could not connect to local UI server. Is it running?")
+                    # --- END OF NEW CODE ---
+                    
                     self.print_live_leaderboard()
+
                 # Update the last known position for the next frame
                 history["last_x_center"] = current_x_center
 
@@ -472,7 +494,9 @@ class VideoInferenceProcessor:
             cap = cv2.VideoCapture(best_stream_url)
 
             if not cap.isOpened():
-                logger.info("Error: OpenCV could not open the IVS stream URL. Please check the URL and ensure the stream is live.")
+                logger.info(
+                    "Error: OpenCV could not open the IVS stream URL. Please check the URL and ensure the stream is live."
+                )
                 return
 
             while True:
@@ -481,7 +505,7 @@ class VideoInferenceProcessor:
                 if not ret:
                     print("Stream has ended or timed out.")
                     break
-                
+
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
                 orig_h, orig_w = frame.shape[:2]
@@ -606,8 +630,7 @@ class VideoInferenceProcessor:
                     break
                 frame_count += 1
         finally:
-            
-            if 'cap' in locals():
+            if "cap" in locals():
                 cap.release()
             # First, determine the final bib numbers for everyone
             final_bib_results = self.determine_final_bibs()

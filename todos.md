@@ -1,4 +1,6 @@
-# AWS IVS
+# TODOs list
+
+## AWS IVS
 
 &#x2611; **Setup IVS** - Establish live connection between mobile device and IVS.
 
@@ -8,19 +10,21 @@
 
 &#x2610; **Finalize Streaming** - Ensure streaming software on mobile device is adequate for capturing ~1hour long stream
 
-# Validate Compute
+## Validate Compute
 
 &#x2610; **Determine Minimally Viable EC2** - Determine whch EC2 instance is sufficient for live streaming in 4K/1080p. Do this by simulating stream from video file.
 
-# Modeling
+## Modeling
 
 &#x2610; **More Training** - Pull in additional open source bib data sources to bolster training data for more robust model.
 
-# Miscellaneous
+## Miscellaneous
+
+&#x2610; **Architecture Diagram** - Build out architecture diagram for readme
 
 &#x2610; **Validate Upload Requirements** - Determine necessary upload requirements for live edge streaming of video and determine what hardware is required. Is hotspot adequate?
 
-# Code
+## Code
 
 &#x2610; **Add Database with APIs** - Add pipeline component to save leaderboard to a database, determining the optimal option (DynamoDB?).
 
@@ -28,5 +32,13 @@
 
 &#x2610; **Add Utility Backend APIs** - Build out backend APIs for various backend functions e.g., to read/update data in database
 
-# Cost
+&#x2610; **Connect to Master CSV** - Build out a method for linking the data directly to the master csv to pull information about users. 
+
+&#x2610; **Develop a Leaderboard** - Build out a leaderboard with results segrated by overall, age bracked, gender.
+
+## Cost
 &#x2610; **Cost Tracking** - Compile a running list of components and track the cost of each to keep operational costs low and elliminate inefficiencies.
+
+
+## Testing
+&#x2610; **Field Test** - Test connection, leaderboard, backend and frontend code for an hour at location.
