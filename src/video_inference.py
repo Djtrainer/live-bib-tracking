@@ -9,6 +9,7 @@ import time
 from collections import Counter
 import numpy as np
 import imageio
+import streamlink
 
 from utils import get_logger
 
@@ -461,12 +462,19 @@ class VideoInferenceProcessor:
         frame_count = 0
         start_time = time.time()
         try:
-            # reader = imageio.get_reader(str(ivs_playback_url), format="FFMPEG")
-            cap = cv2.VideoCapture(ivs_playback_url)
-            if not cap.isOpened():
-                print("Error: OpenCV could not open the IVS stream URL. Please check the URL and ensure the stream is live.")
+            streams = streamlink.streams(ivs_playback_url)
+            if "best" not in streams:
+                logger.info("Could not find 'best' stream in the provided URL.")
                 return
-            
+
+            best_stream_url = streams["best"].url
+            logger.info(f"Connecting to stream: {best_stream_url}")
+            cap = cv2.VideoCapture(best_stream_url)
+
+            if not cap.isOpened():
+                logger.info("Error: OpenCV could not open the IVS stream URL. Please check the URL and ensure the stream is live.")
+                return
+
             while True:
                 # Read one frame at a time from the stream
                 ret, frame = cap.read()
