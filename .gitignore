@@ -11,3 +11,4 @@ src/dataloader.py
 src/extract_images.py
 notebooks/*
 README_video*
+.env

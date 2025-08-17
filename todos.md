@@ -1,6 +1,7 @@
-# Kinesis Data Streams
-- **Setup KDS** - Establish live connection between mobile device and KDS.
-- **Read KDS from EC2** - Build out connection between the KDS and the EC2 instance, validating the E2E pipeline.
+# AWS IVS
+- **Setup IVS** - Establish live connection between mobile device and IVS.
+- **Read IVS from EC2** - Build out connection between the IVS and the EC2 instance, validating the E2E pipeline.
+- **Finalize Streaming** - Ensure streaming software on mobile device is adequate for capturing ~1hour long stream
 
 # Validate Compute
 - **Determine Minimally Viable EC2** - Determine whch EC2 instance is sufficient for live streaming in 4K/1080p. Do this by simulating stream from video file.
