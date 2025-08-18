@@ -239,7 +239,7 @@ class VideoInferenceProcessor:
                         }
                         try:
                             # 3. Send a POST request to the local server
-                            requests.post('http://localhost:8000/add_finisher', json=payload, timeout=2)
+                            requests.post('http://localhost:8000/api/results', json=payload, timeout=2)
                             logger.info(f"Sent finisher data to local UI: Bib #{payload['bibNumber']}")
                         except requests.exceptions.ConnectionError:
                             logger.warning("Could not connect to local UI server. Is it running?")
