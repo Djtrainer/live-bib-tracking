@@ -1,16 +1,22 @@
 import os
 import argparse
 import cv2
+import dotenv
 import easyocr
 from pathlib import Path
 from ultralytics import YOLO
 import time
 from collections import Counter
 import numpy as np
+import imageio
+import streamlink
+import requests
 
 from utils import get_logger
 
 logger = get_logger()
+
+dotenv.load_dotenv()
 
 
 class VideoInferenceProcessor:
@@ -96,7 +102,7 @@ class VideoInferenceProcessor:
 
         # Initialize EasyOCR reader
         logger.info("Initializing EasyOCR reader...")
-        self.ocr_reader = easyocr.Reader(["en"])
+        self.ocr_reader = easyocr.Reader(["en"], gpu=True)
         logger.info("EasyOCR reader initialized!")
 
         # Video capture and properties
@@ -186,7 +192,7 @@ class VideoInferenceProcessor:
 
         This method updates the track history for each racer by recording the finish time
         when a racer crosses the finish line from left to right. It also prints the live
-        leaderboard whenever a racer finishes.
+        leaderboard and sends the result to a local server.
 
         Args:
             tracked_persons (YOLO): The YOLO tracking results containing bounding boxes
@@ -219,7 +225,28 @@ class VideoInferenceProcessor:
                     logger.info(
                         f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
                     )
+
+                    # --- NEW: SEND RESULT TO LOCAL SERVER ---
+                    # 1. Get the current best bib guess for this finisher
+                    final_bib_results = self.determine_final_bibs()
+                    bib_result = final_bib_results.get(person_id)
+                    
+                    if bib_result:
+                        # 2. Create the data payload to send
+                        payload = {
+                            "bibNumber": bib_result['final_bib'],
+                            "finishTimeMs": finish_time
+                        }
+                        try:
+                            # 3. Send a POST request to the local server
+                            requests.post('http://localhost:8000/api/results', json=payload, timeout=2)
+                            logger.info(f"Sent finisher data to local UI: Bib #{payload['bibNumber']}")
+                        except requests.exceptions.ConnectionError:
+                            logger.warning("Could not connect to local UI server. Is it running?")
+                    # --- END OF NEW CODE ---
+                    
                     self.print_live_leaderboard()
+
                 # Update the last known position for the next frame
                 history["last_x_center"] = current_x_center
 
@@ -428,6 +455,221 @@ class VideoInferenceProcessor:
             "\n(Processing video... Press Ctrl+C to stop and show final results)"
         )
 
+    def process_video_live_stream(
+        self,
+        output_path: str | Path = None,
+        display: bool = True,
+        ivs_playback_url: str = None,
+    ):
+        """
+        Processes a live video stream from AWS IVS to track racers,
+        extract bib numbers using OCR, and determine finish times.
+        Optionally displays the annotated video in real-time and/or saves it to an output file.
+        Args:
+            output_path (str | Path, optional): Path to save the annotated output video. Defaults to None.
+            display (bool, optional): Whether to display the annotated video in real-time. Defaults to True.
+            ivs_playback_url (str, optional): The playback URL for the Kinesis Video Stream. Required if processing a live stream.
+        """
+        # TODO: consolidate redundant logic with process_video
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = None
+        if output_path:
+            out = cv2.VideoWriter(
+                output_path,
+                fourcc,
+                self.target_fps,
+                (self.frame_width, self.frame_height),
+            )
+
+        frame_count = 0
+        start_time = time.time()
+        try:
+            streams = streamlink.streams(ivs_playback_url)
+            if "best" not in streams:
+                logger.info("Could not find 'best' stream in the provided URL.")
+                return
+
+            best_stream_url = streams["best"].url
+            logger.info(f"Connecting to stream: {best_stream_url}")
+            cap = cv2.VideoCapture(best_stream_url)
+
+            if not cap.isOpened():
+                logger.info(
+                    "Error: OpenCV could not open the IVS stream URL. Please check the URL and ensure the stream is live."
+                )
+                return
+
+            while True:
+                # Read one frame at a time from the stream
+                ret, frame = cap.read()
+                if not ret:
+                    print("Stream has ended or timed out.")
+                    break
+
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+                orig_h, orig_w = frame.shape[:2]
+                proc_w = orig_w
+                scale = proc_w / orig_w
+                proc_h = int(orig_h * scale)
+
+                processing_frame = frame  # cv2.resize(frame, (proc_w, proc_h))
+
+                if frame_count % self.inference_interval == 0:
+                    # Track ONLY persons using the dedicated tracker_model
+                    # person_results = None
+                    person_results = self.tracker_model.track(
+                        processing_frame,
+                        persist=True,
+                        tracker="config/custom_tracker.yaml",
+                        classes=[0],
+                        verbose=False,
+                    )
+                    tracked_persons = person_results[0] if person_results else None
+
+                    self.check_finish_line_crossings(tracked_persons)
+
+                    # Predict ALL objects using the separate, stateless predictor_model
+                    # all_detections_results = None
+                    all_detections_results = self.predictor_model.predict(
+                        processing_frame, conf=self.confidence_threshold, verbose=False
+                    )
+                    all_detections = (
+                        all_detections_results[0] if all_detections_results else None
+                    )
+
+                    # Update history using the new hybrid function
+                    self.update_history_hybrid(tracked_persons, all_detections)
+
+                    # Draw predictions using the new hybrid function
+                    annotated_frame = self.draw_hybrid_predictions(
+                        frame, tracked_persons, all_detections, scale=scale
+                    )
+
+                    self.last_annotated_frame = annotated_frame
+                    display_frame = annotated_frame
+
+                    elapsed_seconds = time.time() - start_time
+                    video_seconds = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+
+                    # --- TIMER BLOCK ---
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    timer_text = f"Live Timer: {minutes:02d}:{seconds:02d}"
+
+                    # Get text size to create a background rectangle for readability
+                    (text_width, text_height), _ = cv2.getTextSize(
+                        timer_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2
+                    )
+                    text_x = self.frame_width - text_width - 20
+                    text_y = text_height + 20
+
+                    # Draw black background rectangle
+                    cv2.rectangle(
+                        display_frame,
+                        (text_x - 10, text_y - text_height - 10),
+                        (text_x + text_width + 10, text_y + 10),
+                        (0, 0, 0),
+                        -1,
+                    )
+                    # Draw timer text in white
+                    cv2.putText(
+                        display_frame,
+                        timer_text,
+                        (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 255, 255),
+                        2,
+                    )
+                    # video_seconds = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+
+                    if elapsed_seconds > 0:
+                        lag_seconds = elapsed_seconds - video_seconds
+                        processing_speed_factor = video_seconds / elapsed_seconds
+                        # Create the text string to display
+                        lag_text = f"Lag: {lag_seconds:.1f}s (Speed: {processing_speed_factor:.1f}x)"
+                    else:
+                        lag_text = "Lag: Calculating..."
+
+                    # 3. Add the lag text below the live timer
+                    (lag_text_width, _), _ = cv2.getTextSize(
+                        lag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+                    )
+                    lag_text_x = self.frame_width - lag_text_width - 20
+                    lag_text_y = (
+                        text_y + text_height + 5
+                    )  # Position it below the timer text
+
+                    # Draw black background rectangle and the lag text in yellow
+                    cv2.rectangle(
+                        annotated_frame,
+                        (lag_text_x - 10, lag_text_y - text_height),
+                        (lag_text_x + lag_text_width + 10, lag_text_y + 10),
+                        (0, 0, 0),
+                        -1,
+                    )
+                    cv2.putText(
+                        annotated_frame,
+                        lag_text,
+                        (lag_text_x, lag_text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 255),
+                        2,
+                    )
+
+                else:
+                    if self.last_annotated_frame is not None:
+                        display_frame = self.last_annotated_frame
+
+                if display:
+                    cv2.imshow("Live Bib Tracking", display_frame)
+
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+                frame_count += 1
+        finally:
+            if "cap" in locals():
+                cap.release()
+            # First, determine the final bib numbers for everyone
+            final_bib_results = self.determine_final_bibs()
+
+            leaderboard = []
+            for tracker_id, result_data in final_bib_results.items():
+                history_data = self.track_history.get(tracker_id)
+                if history_data and history_data.get("finish_time_ms") is not None:
+                    leaderboard.append(
+                        {
+                            "id": tracker_id,
+                            "bib": result_data["final_bib"],
+                            "time_ms": history_data["finish_time_ms"],
+                        }
+                    )
+
+            # Sort the leaderboard by finish time (fastest first)
+            leaderboard.sort(key=lambda x: x["time_ms"])
+
+            logger.info("\n--- 🏁 Official Race Leaderboard 🏁 ---")
+            if leaderboard:
+                for i, entry in enumerate(leaderboard):
+                    # Format time as MM:SS.ms
+                    total_seconds = entry["time_ms"] / 1000
+                    minutes = int(total_seconds // 60)
+                    seconds = int(total_seconds % 60)
+                    milliseconds = int((total_seconds - int(total_seconds)) * 100)
+                    time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
+
+                    logger.info(
+                        f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<6} | Time: {time_str}"
+                    )
+            else:
+                logger.info("  No racers finished the race.")
+            logger.info("----------------------------------------------------------")
+            self.cap.release()
+
+            cv2.destroyAllWindows()
+
     def process_video(
         self, output_path: str | Path = None, display: bool = True
     ) -> None:
@@ -453,6 +695,7 @@ class VideoInferenceProcessor:
             )
 
         frame_count = 0
+        start_time = time.time()
         try:
             while True:
                 ret, frame = self.cap.read()
@@ -467,9 +710,11 @@ class VideoInferenceProcessor:
                 scale = proc_w / orig_w
                 proc_h = int(orig_h * scale)
 
-                processing_frame = cv2.resize(frame, (proc_w, proc_h))
+                processing_frame = frame  # cv2.resize(frame, (proc_w, proc_h))
+
                 if frame_count % self.inference_interval == 0:
                     # Track ONLY persons using the dedicated tracker_model
+                    # person_results = None
                     person_results = self.tracker_model.track(
                         processing_frame,
                         persist=True,
@@ -482,6 +727,7 @@ class VideoInferenceProcessor:
                     self.check_finish_line_crossings(tracked_persons)
 
                     # Predict ALL objects using the separate, stateless predictor_model
+                    # all_detections_results = None
                     all_detections_results = self.predictor_model.predict(
                         processing_frame, conf=self.confidence_threshold, verbose=False
                     )
@@ -499,6 +745,75 @@ class VideoInferenceProcessor:
 
                     self.last_annotated_frame = annotated_frame
                     display_frame = annotated_frame
+
+                    elapsed_seconds = time.time() - start_time
+                    # --- TIMER BLOCK ---
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    timer_text = f"Live Timer: {minutes:02d}:{seconds:02d}"
+
+                    # Get text size to create a background rectangle for readability
+                    (text_width, text_height), _ = cv2.getTextSize(
+                        timer_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2
+                    )
+                    text_x = self.frame_width - text_width - 20
+                    text_y = text_height + 20
+
+                    # Draw black background rectangle
+                    cv2.rectangle(
+                        display_frame,
+                        (text_x - 10, text_y - text_height - 10),
+                        (text_x + text_width + 10, text_y + 10),
+                        (0, 0, 0),
+                        -1,
+                    )
+                    # Draw timer text in white
+                    cv2.putText(
+                        display_frame,
+                        timer_text,
+                        (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (255, 255, 255),
+                        2,
+                    )
+                    video_seconds = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+
+                    if elapsed_seconds > 0:
+                        lag_seconds = elapsed_seconds - video_seconds
+                        processing_speed_factor = video_seconds / elapsed_seconds
+                        # Create the text string to display
+                        lag_text = f"Lag: {lag_seconds:.1f}s (Speed: {processing_speed_factor:.1f}x)"
+                    else:
+                        lag_text = "Lag: Calculating..."
+
+                    # 3. Add the lag text below the live timer
+                    (lag_text_width, _), _ = cv2.getTextSize(
+                        lag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+                    )
+                    lag_text_x = self.frame_width - lag_text_width - 20
+                    lag_text_y = (
+                        text_y + text_height + 5
+                    )  # Position it below the timer text
+
+                    # Draw black background rectangle and the lag text in yellow
+                    cv2.rectangle(
+                        annotated_frame,
+                        (lag_text_x - 10, lag_text_y - text_height),
+                        (lag_text_x + lag_text_width + 10, lag_text_y + 10),
+                        (0, 0, 0),
+                        -1,
+                    )
+                    cv2.putText(
+                        annotated_frame,
+                        lag_text,
+                        (lag_text_x, lag_text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 255),
+                        2,
+                    )
+
                 else:
                     if self.last_annotated_frame is not None:
                         display_frame = self.last_annotated_frame
@@ -507,8 +822,8 @@ class VideoInferenceProcessor:
                     cv2.imshow("Live Bib Tracking", display_frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
-                if out:
-                    out.write(display_frame)
+                # if out:
+                #     out.write(display_frame)
                 frame_count += 1
 
         finally:
@@ -569,7 +884,7 @@ def main():
         help="Path to trained YOLO model",
     )
     parser.add_argument(
-        "--fps", type=int, default=10, help="Target processing frame rate"
+        "--fps", type=int, default=8, help="Target processing frame rate"
     )
     parser.add_argument(
         "--conf", type=float, default=0.3, help="YOLO confidence threshold"
@@ -579,6 +894,12 @@ def main():
     )
     parser.add_argument(
         "--no-display", action="store_true", help="Disable real-time video display"
+    )
+    parser.add_argument(
+        "--from-stream",
+        type=str,
+        default=False,
+        help="Whether to process a live stream from IVS or from a recording",
     )
 
     args = parser.parse_args()
@@ -601,7 +922,19 @@ def main():
             confidence_threshold=args.conf,
         )
 
-        processor.process_video(output_path=args.output, display=not args.no_display)
+        if args.from_stream:
+            ivs_playback_url = os.getenv("IVS_PLAYBACK_URL")
+            logger.info(f"Processing live stream: {ivs_playback_url}")
+            processor.process_video_live_stream(
+                output_path=args.output,
+                display=not args.no_display,
+                ivs_playback_url=ivs_playback_url,
+            )
+        else:
+            logger.info(f"Processing video file: {args.video}")
+            processor.process_video(
+                output_path=args.output, display=not args.no_display
+            )
 
     except Exception as e:
         logger.info(f"Error during processing: {e}")
