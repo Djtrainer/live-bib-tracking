@@ -235,7 +235,7 @@ class VideoInferenceProcessor:
                         # 2. Create the data payload to send
                         payload = {
                             "bibNumber": bib_result['final_bib'],
-                            "finishTimeMs": finish_time
+                            "finishTime": finish_time
                         }
                         try:
                             # 3. Send a POST request to the local server
