@@ -13,3 +13,4 @@ notebooks/*
 README_video*
 .env
 ec2_instructions.md
+deployment_instructions.md
