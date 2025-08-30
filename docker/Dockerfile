@@ -51,7 +51,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN groupadd -r appuser && useradd -r -g appuser -m appuser
 
 # Copy virtual environment from builder stage
 COPY --from=builder /opt/venv /opt/venv
@@ -67,10 +67,21 @@ COPY pyproject.toml .
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/data /app/runs /app/models && \
-    chown -R appuser:appuser /app
+    chown -R appuser:appuser /app && \
+    chown -R appuser:appuser /home/appuser
+
+# Create EasyOCR cache directory with proper permissions
+RUN mkdir -p /home/appuser/.EasyOCR && \
+    chown -R appuser:appuser /home/appuser/.EasyOCR
 
 # Switch to non-root user
 USER appuser
+
+# Set EasyOCR cache directory
+ENV EASYOCR_MODULE_PATH="/home/appuser/.EasyOCR"
+
+# Disable Ultralytics auto-update to prevent permission issues
+ENV YOLO_AUTOINSTALL="false"
 
 # Set Python path to include src directory
 ENV PYTHONPATH="/app/src"
