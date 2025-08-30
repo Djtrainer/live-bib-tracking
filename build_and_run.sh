@@ -6,4 +6,5 @@ docker build -f docker/Dockerfile -t live-bib-tracking .
   live-bib-tracking \
   python src/image_processor/video_inference.py \
   --video /app/data/raw/2024_race.MOV \
-  --model /app/models/last.pt
+  --model /app/models/last.pt \
+  --no-display
