@@ -117,6 +117,9 @@ class VideoInferenceProcessor:
 
         self.inference_interval = 1
         self.last_annotated_frame = None
+        
+        # Track when processing started for wall time calculations
+        self.processing_start_time = None
 
     def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
         """
@@ -219,9 +222,11 @@ class VideoInferenceProcessor:
                     and last_x_center < self.finish_line_x
                     and current_x_center >= self.finish_line_x
                 ):
-                    # Racer crossed the line! Record the video timestamp.
+                    # Racer crossed the line! Record both video timestamp and wall-clock time.
                     finish_time = self.cap.get(cv2.CAP_PROP_POS_MSEC)
+                    finish_wall_time = time.time()  # Capture current wall-clock time
                     history["finish_time_ms"] = finish_time
+                    history["finish_wall_time"] = finish_wall_time  # Store wall-clock time
                     logger.info(
                         f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
                     )
@@ -291,6 +296,7 @@ class VideoInferenceProcessor:
                             "ocr_reads": [],
                             "last_x_center": None,
                             "finish_time_ms": None,
+                            "finish_wall_time": None,
                         }
                     bib_crop = self.crop_bib_from_prediction(
                         all_detections.orig_img, bib_box.xyxy[0]
@@ -308,8 +314,8 @@ class VideoInferenceProcessor:
     def draw_hybrid_predictions(
         self,
         image: np.ndarray,
-        tracked_persons: "Detections",
-        all_detections: "Detections",
+        tracked_persons,
+        all_detections,
         scale: float = 1.0,
     ) -> np.ndarray:
         """
@@ -423,11 +429,25 @@ class VideoInferenceProcessor:
                 # If the bib number is determined, use it. Otherwise, show "No Bib".
                 bib_number = bib_result["final_bib"] if bib_result else "No Bib"
 
+                # Calculate elapsed time since script started using actual wall-clock time
+                if (self.processing_start_time is not None and 
+                    history_data.get("finish_wall_time") is not None):
+                    # Calculate actual elapsed time from script start to when racer finished
+                    elapsed_seconds = history_data["finish_wall_time"] - self.processing_start_time
+                    
+                    # Format as elapsed time (MM:SS)
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    wall_time_str = f"{minutes:02d}:{seconds:02d}"
+                else:
+                    wall_time_str = "N/A"
+
                 leaderboard.append(
                     {
                         "id": tracker_id,
                         "bib": bib_number,
                         "time_ms": history_data["finish_time_ms"],
+                        "wall_time": wall_time_str,
                     }
                 )
 
@@ -442,10 +462,10 @@ class VideoInferenceProcessor:
                 minutes = int(total_seconds // 60)
                 seconds = int(total_seconds % 60)
                 milliseconds = int((total_seconds - int(total_seconds)) * 100)
-                time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
+                video_time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
 
                 logger.info(
-                    f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<8} | Time: {time_str}"
+                    f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<8} | Video Time: {video_time_str} | Elapsed Time: {entry['wall_time']}"
                 )
         else:
             logger.info("  Waiting for the first racer to finish...")
@@ -454,6 +474,243 @@ class VideoInferenceProcessor:
         logger.info(
             "\n(Processing video... Press Ctrl+C to stop and show final results)"
         )
+
+    def _process_frame(self, frame: np.ndarray, frame_count: int, start_time: float, cap: cv2.VideoCapture) -> np.ndarray:
+        """
+        Processes a single frame for object detection, tracking, and annotation.
+        
+        Args:
+            frame (np.ndarray): The input frame to process
+            frame_count (int): Current frame number
+            start_time (float): Processing start time for timing calculations
+            cap (cv2.VideoCapture): Video capture object for timing info
+            
+        Returns:
+            np.ndarray: The annotated frame ready for display
+        """
+        orig_h, orig_w = frame.shape[:2]
+        proc_w = orig_w
+        scale = proc_w / orig_w
+        proc_h = int(orig_h * scale)
+
+        processing_frame = frame  # cv2.resize(frame, (proc_w, proc_h))
+
+        if frame_count % self.inference_interval == 0:
+            # Track ONLY persons using the dedicated tracker_model
+            person_results = self.tracker_model.track(
+                processing_frame,
+                persist=True,
+                tracker="config/custom_tracker.yaml",
+                classes=[0],
+                verbose=False,
+            )
+            tracked_persons = person_results[0] if person_results else None
+
+            self.check_finish_line_crossings(tracked_persons)
+
+            # Predict ALL objects using the separate, stateless predictor_model
+            all_detections_results = self.predictor_model.predict(
+                processing_frame, conf=self.confidence_threshold, verbose=False
+            )
+            all_detections = (
+                all_detections_results[0] if all_detections_results else None
+            )
+
+            # Update history using the new hybrid function
+            self.update_history_hybrid(tracked_persons, all_detections)
+
+            # Draw predictions using the new hybrid function
+            annotated_frame = self.draw_hybrid_predictions(
+                frame, tracked_persons, all_detections, scale=scale
+            )
+
+            self.last_annotated_frame = annotated_frame
+            display_frame = annotated_frame
+
+            # Add all UI overlays to the frame
+            display_frame = self.draw_ui_overlays(display_frame, start_time, cap)
+        else:
+            if self.last_annotated_frame is not None:
+                display_frame = self.last_annotated_frame
+            else:
+                display_frame = frame
+
+        return display_frame
+
+    def draw_ui_overlays(self, frame: np.ndarray, start_time: float, cap: cv2.VideoCapture) -> np.ndarray:
+        """
+        Draws all UI overlays on the frame including wall clock, live timer, and video timing information.
+        
+        Args:
+            frame (np.ndarray): The frame to add overlays to
+            start_time (float): Processing start time
+            cap (cv2.VideoCapture): Video capture object for timing info
+            
+        Returns:
+            np.ndarray: Frame with all UI overlays added
+        """
+        # --- WALL CLOCK (Top-left corner) ---
+        current_time = time.strftime("%I:%M:%S %p")
+        wall_clock_text = f"Wall Clock: {current_time}"
+        
+        # Get text size for wall clock
+        (clock_width, clock_height), _ = cv2.getTextSize(
+            wall_clock_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+        )
+        
+        # Position in top-left corner
+        clock_x = 20
+        clock_y = clock_height + 20
+        
+        # Draw semi-transparent black background for wall clock
+        overlay = frame.copy()
+        cv2.rectangle(
+            overlay,
+            (clock_x - 10, clock_y - clock_height - 10),
+            (clock_x + clock_width + 10, clock_y + 10),
+            (0, 0, 0),
+            -1,
+        )
+        # Blend with original frame for semi-transparency
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        
+        # Draw wall clock text in white
+        cv2.putText(
+            frame,
+            wall_clock_text,
+            (clock_x, clock_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2,
+        )
+
+        # --- LIVE TIMER (Top-right corner) ---
+        elapsed_seconds = time.time() - start_time
+        video_seconds = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+
+        minutes = int(elapsed_seconds // 60)
+        seconds = int(elapsed_seconds % 60)
+        timer_text = f"Live Timer: {minutes:02d}:{seconds:02d}"
+
+        # Get text size to create a background rectangle for readability
+        (text_width, text_height), _ = cv2.getTextSize(
+            timer_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2
+        )
+        text_x = self.frame_width - text_width - 20
+        text_y = text_height + 20
+
+        # Draw black background rectangle
+        cv2.rectangle(
+            frame,
+            (text_x - 10, text_y - text_height - 10),
+            (text_x + text_width + 10, text_y + 10),
+            (0, 0, 0),
+            -1,
+        )
+        # Draw timer text in white
+        cv2.putText(
+            frame,
+            timer_text,
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (255, 255, 255),
+            2,
+        )
+
+        # --- VIDEO TIME / LAG INFO (Below live timer) ---
+        if elapsed_seconds > 0:
+            lag_seconds = elapsed_seconds - video_seconds
+            processing_speed_factor = video_seconds / elapsed_seconds
+            lag_text = f"Lag: {lag_seconds:.1f}s (Speed: {processing_speed_factor:.1f}x)"
+        else:
+            lag_text = "Lag: Calculating..."
+
+        # Add the lag text below the live timer
+        (lag_text_width, _), _ = cv2.getTextSize(
+            lag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+        )
+        lag_text_x = self.frame_width - lag_text_width - 20
+        lag_text_y = text_y + text_height + 5
+
+        # Draw black background rectangle and the lag text in yellow
+        cv2.rectangle(
+            frame,
+            (lag_text_x - 10, lag_text_y - text_height),
+            (lag_text_x + lag_text_width + 10, lag_text_y + 10),
+            (0, 0, 0),
+            -1,
+        )
+        cv2.putText(
+            frame,
+            lag_text,
+            (lag_text_x, lag_text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2,
+        )
+
+        return frame
+
+    def _generate_final_leaderboard(self) -> None:
+        """
+        Generates and prints the final race leaderboard.
+        """
+        final_bib_results = self.determine_final_bibs()
+
+        leaderboard = []
+        for tracker_id, result_data in final_bib_results.items():
+            history_data = self.track_history.get(tracker_id)
+            if history_data and history_data.get("finish_time_ms") is not None:
+                leaderboard.append(
+                    {
+                        "id": tracker_id,
+                        "bib": result_data["final_bib"],
+                        "time_ms": history_data["finish_time_ms"],
+                    }
+                )
+
+        # Sort the leaderboard by finish time (fastest first)
+        leaderboard.sort(key=lambda x: x["time_ms"])
+
+        logger.info("\n--- 🏁 Official Race Leaderboard 🏁 ---")
+        if leaderboard:
+            for i, entry in enumerate(leaderboard):
+                # Format time as MM:SS.ms
+                total_seconds = entry["time_ms"] / 1000
+                minutes = int(total_seconds // 60)
+                seconds = int(total_seconds % 60)
+                milliseconds = int((total_seconds - int(total_seconds)) * 100)
+                time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
+
+                logger.info(
+                    f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<6} | Time: {time_str}"
+                )
+        else:
+            logger.info("  No racers finished the race.")
+        logger.info("----------------------------------------------------------")
+
+    def _setup_video_writer(self, output_path: str | Path = None) -> cv2.VideoWriter | None:
+        """
+        Sets up video writer for output if path is provided.
+        
+        Args:
+            output_path (str | Path, optional): Path to save output video
+            
+        Returns:
+            cv2.VideoWriter | None: Video writer object or None if no output path
+        """
+        if output_path:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            return cv2.VideoWriter(
+                str(output_path),
+                fourcc,
+                self.target_fps,
+                (self.frame_width, self.frame_height),
+            )
+        return None
 
     def process_video_live_stream(
         self,
@@ -470,19 +727,13 @@ class VideoInferenceProcessor:
             display (bool, optional): Whether to display the annotated video in real-time. Defaults to True.
             ivs_playback_url (str, optional): The playback URL for the Kinesis Video Stream. Required if processing a live stream.
         """
-        # TODO: consolidate redundant logic with process_video
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = None
-        if output_path:
-            out = cv2.VideoWriter(
-                output_path,
-                fourcc,
-                self.target_fps,
-                (self.frame_width, self.frame_height),
-            )
-
+        out = self._setup_video_writer(output_path)
         frame_count = 0
         start_time = time.time()
+        
+        # Set processing start time for wall time calculations
+        self.processing_start_time = start_time
+        
         try:
             streams = streamlink.streams(ivs_playback_url)
             if "best" not in streams:
@@ -507,121 +758,9 @@ class VideoInferenceProcessor:
                     break
 
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-                orig_h, orig_w = frame.shape[:2]
-                proc_w = orig_w
-                scale = proc_w / orig_w
-                proc_h = int(orig_h * scale)
-
-                processing_frame = frame  # cv2.resize(frame, (proc_w, proc_h))
-
-                if frame_count % self.inference_interval == 0:
-                    # Track ONLY persons using the dedicated tracker_model
-                    # person_results = None
-                    person_results = self.tracker_model.track(
-                        processing_frame,
-                        persist=True,
-                        tracker="config/custom_tracker.yaml",
-                        classes=[0],
-                        verbose=False,
-                    )
-                    tracked_persons = person_results[0] if person_results else None
-
-                    self.check_finish_line_crossings(tracked_persons)
-
-                    # Predict ALL objects using the separate, stateless predictor_model
-                    # all_detections_results = None
-                    all_detections_results = self.predictor_model.predict(
-                        processing_frame, conf=self.confidence_threshold, verbose=False
-                    )
-                    all_detections = (
-                        all_detections_results[0] if all_detections_results else None
-                    )
-
-                    # Update history using the new hybrid function
-                    self.update_history_hybrid(tracked_persons, all_detections)
-
-                    # Draw predictions using the new hybrid function
-                    annotated_frame = self.draw_hybrid_predictions(
-                        frame, tracked_persons, all_detections, scale=scale
-                    )
-
-                    self.last_annotated_frame = annotated_frame
-                    display_frame = annotated_frame
-
-                    elapsed_seconds = time.time() - start_time
-                    video_seconds = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-
-                    # --- TIMER BLOCK ---
-                    minutes = int(elapsed_seconds // 60)
-                    seconds = int(elapsed_seconds % 60)
-                    timer_text = f"Live Timer: {minutes:02d}:{seconds:02d}"
-
-                    # Get text size to create a background rectangle for readability
-                    (text_width, text_height), _ = cv2.getTextSize(
-                        timer_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2
-                    )
-                    text_x = self.frame_width - text_width - 20
-                    text_y = text_height + 20
-
-                    # Draw black background rectangle
-                    cv2.rectangle(
-                        display_frame,
-                        (text_x - 10, text_y - text_height - 10),
-                        (text_x + text_width + 10, text_y + 10),
-                        (0, 0, 0),
-                        -1,
-                    )
-                    # Draw timer text in white
-                    cv2.putText(
-                        display_frame,
-                        timer_text,
-                        (text_x, text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (255, 255, 255),
-                        2,
-                    )
-                    # video_seconds = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-
-                    if elapsed_seconds > 0:
-                        lag_seconds = elapsed_seconds - video_seconds
-                        processing_speed_factor = video_seconds / elapsed_seconds
-                        # Create the text string to display
-                        lag_text = f"Lag: {lag_seconds:.1f}s (Speed: {processing_speed_factor:.1f}x)"
-                    else:
-                        lag_text = "Lag: Calculating..."
-
-                    # 3. Add the lag text below the live timer
-                    (lag_text_width, _), _ = cv2.getTextSize(
-                        lag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
-                    )
-                    lag_text_x = self.frame_width - lag_text_width - 20
-                    lag_text_y = (
-                        text_y + text_height + 5
-                    )  # Position it below the timer text
-
-                    # Draw black background rectangle and the lag text in yellow
-                    cv2.rectangle(
-                        annotated_frame,
-                        (lag_text_x - 10, lag_text_y - text_height),
-                        (lag_text_x + lag_text_width + 10, lag_text_y + 10),
-                        (0, 0, 0),
-                        -1,
-                    )
-                    cv2.putText(
-                        annotated_frame,
-                        lag_text,
-                        (lag_text_x, lag_text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 255),
-                        2,
-                    )
-
-                else:
-                    if self.last_annotated_frame is not None:
-                        display_frame = self.last_annotated_frame
+                
+                # Process the frame
+                display_frame = self._process_frame(frame, frame_count, start_time, cap)
 
                 if display:
                     cv2.imshow("Live Bib Tracking", display_frame)
@@ -629,45 +768,14 @@ class VideoInferenceProcessor:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
                 frame_count += 1
+                
         finally:
             if "cap" in locals():
                 cap.release()
-            # First, determine the final bib numbers for everyone
-            final_bib_results = self.determine_final_bibs()
-
-            leaderboard = []
-            for tracker_id, result_data in final_bib_results.items():
-                history_data = self.track_history.get(tracker_id)
-                if history_data and history_data.get("finish_time_ms") is not None:
-                    leaderboard.append(
-                        {
-                            "id": tracker_id,
-                            "bib": result_data["final_bib"],
-                            "time_ms": history_data["finish_time_ms"],
-                        }
-                    )
-
-            # Sort the leaderboard by finish time (fastest first)
-            leaderboard.sort(key=lambda x: x["time_ms"])
-
-            logger.info("\n--- 🏁 Official Race Leaderboard 🏁 ---")
-            if leaderboard:
-                for i, entry in enumerate(leaderboard):
-                    # Format time as MM:SS.ms
-                    total_seconds = entry["time_ms"] / 1000
-                    minutes = int(total_seconds // 60)
-                    seconds = int(total_seconds % 60)
-                    milliseconds = int((total_seconds - int(total_seconds)) * 100)
-                    time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
-
-                    logger.info(
-                        f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<6} | Time: {time_str}"
-                    )
-            else:
-                logger.info("  No racers finished the race.")
-            logger.info("----------------------------------------------------------")
+            if out:
+                out.release()
+            self._generate_final_leaderboard()
             self.cap.release()
-
             cv2.destroyAllWindows()
 
     def process_video(
@@ -684,18 +792,13 @@ class VideoInferenceProcessor:
         Returns:
             None
         """
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = None
-        if output_path:
-            out = cv2.VideoWriter(
-                output_path,
-                fourcc,
-                self.target_fps,
-                (self.frame_width, self.frame_height),
-            )
-
+        out = self._setup_video_writer(output_path)
         frame_count = 0
         start_time = time.time()
+        
+        # Set processing start time for wall time calculations
+        self.processing_start_time = start_time
+        
         try:
             while True:
                 ret, frame = self.cap.read()
@@ -705,165 +808,23 @@ class VideoInferenceProcessor:
                     frame_count += 1
                     continue
 
-                orig_h, orig_w = frame.shape[:2]
-                proc_w = orig_w
-                scale = proc_w / orig_w
-                proc_h = int(orig_h * scale)
-
-                processing_frame = frame  # cv2.resize(frame, (proc_w, proc_h))
-
-                if frame_count % self.inference_interval == 0:
-                    # Track ONLY persons using the dedicated tracker_model
-                    # person_results = None
-                    person_results = self.tracker_model.track(
-                        processing_frame,
-                        persist=True,
-                        tracker="config/custom_tracker.yaml",
-                        classes=[0],
-                        verbose=False,
-                    )
-                    tracked_persons = person_results[0] if person_results else None
-
-                    self.check_finish_line_crossings(tracked_persons)
-
-                    # Predict ALL objects using the separate, stateless predictor_model
-                    # all_detections_results = None
-                    all_detections_results = self.predictor_model.predict(
-                        processing_frame, conf=self.confidence_threshold, verbose=False
-                    )
-                    all_detections = (
-                        all_detections_results[0] if all_detections_results else None
-                    )
-
-                    # Update history using the new hybrid function
-                    self.update_history_hybrid(tracked_persons, all_detections)
-
-                    # Draw predictions using the new hybrid function
-                    annotated_frame = self.draw_hybrid_predictions(
-                        frame, tracked_persons, all_detections, scale=scale
-                    )
-
-                    self.last_annotated_frame = annotated_frame
-                    display_frame = annotated_frame
-
-                    elapsed_seconds = time.time() - start_time
-                    # --- TIMER BLOCK ---
-                    minutes = int(elapsed_seconds // 60)
-                    seconds = int(elapsed_seconds % 60)
-                    timer_text = f"Live Timer: {minutes:02d}:{seconds:02d}"
-
-                    # Get text size to create a background rectangle for readability
-                    (text_width, text_height), _ = cv2.getTextSize(
-                        timer_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2
-                    )
-                    text_x = self.frame_width - text_width - 20
-                    text_y = text_height + 20
-
-                    # Draw black background rectangle
-                    cv2.rectangle(
-                        display_frame,
-                        (text_x - 10, text_y - text_height - 10),
-                        (text_x + text_width + 10, text_y + 10),
-                        (0, 0, 0),
-                        -1,
-                    )
-                    # Draw timer text in white
-                    cv2.putText(
-                        display_frame,
-                        timer_text,
-                        (text_x, text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (255, 255, 255),
-                        2,
-                    )
-                    video_seconds = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-
-                    if elapsed_seconds > 0:
-                        lag_seconds = elapsed_seconds - video_seconds
-                        processing_speed_factor = video_seconds / elapsed_seconds
-                        # Create the text string to display
-                        lag_text = f"Lag: {lag_seconds:.1f}s (Speed: {processing_speed_factor:.1f}x)"
-                    else:
-                        lag_text = "Lag: Calculating..."
-
-                    # 3. Add the lag text below the live timer
-                    (lag_text_width, _), _ = cv2.getTextSize(
-                        lag_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
-                    )
-                    lag_text_x = self.frame_width - lag_text_width - 20
-                    lag_text_y = (
-                        text_y + text_height + 5
-                    )  # Position it below the timer text
-
-                    # Draw black background rectangle and the lag text in yellow
-                    cv2.rectangle(
-                        annotated_frame,
-                        (lag_text_x - 10, lag_text_y - text_height),
-                        (lag_text_x + lag_text_width + 10, lag_text_y + 10),
-                        (0, 0, 0),
-                        -1,
-                    )
-                    cv2.putText(
-                        annotated_frame,
-                        lag_text,
-                        (lag_text_x, lag_text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 255),
-                        2,
-                    )
-
-                else:
-                    if self.last_annotated_frame is not None:
-                        display_frame = self.last_annotated_frame
+                # Process the frame
+                display_frame = self._process_frame(frame, frame_count, start_time, self.cap)
 
                 if display:
                     cv2.imshow("Live Bib Tracking", display_frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
-                # if out:
-                #     out.write(display_frame)
+                        
+                if out:
+                    out.write(display_frame)
                 frame_count += 1
 
         finally:
-            # First, determine the final bib numbers for everyone
-            final_bib_results = self.determine_final_bibs()
-
-            leaderboard = []
-            for tracker_id, result_data in final_bib_results.items():
-                history_data = self.track_history.get(tracker_id)
-                if history_data and history_data.get("finish_time_ms") is not None:
-                    leaderboard.append(
-                        {
-                            "id": tracker_id,
-                            "bib": result_data["final_bib"],
-                            "time_ms": history_data["finish_time_ms"],
-                        }
-                    )
-
-            # Sort the leaderboard by finish time (fastest first)
-            leaderboard.sort(key=lambda x: x["time_ms"])
-
-            logger.info("\n--- 🏁 Official Race Leaderboard 🏁 ---")
-            if leaderboard:
-                for i, entry in enumerate(leaderboard):
-                    # Format time as MM:SS.ms
-                    total_seconds = entry["time_ms"] / 1000
-                    minutes = int(total_seconds // 60)
-                    seconds = int(total_seconds % 60)
-                    milliseconds = int((total_seconds - int(total_seconds)) * 100)
-                    time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
-
-                    logger.info(
-                        f"  {i + 1}. Racer ID: {entry['id']:<4} | Bib: {entry['bib']:<6} | Time: {time_str}"
-                    )
-            else:
-                logger.info("  No racers finished the race.")
-            logger.info("----------------------------------------------------------")
-            self.cap.release()
             if out:
                 out.release()
+            self._generate_final_leaderboard()
+            self.cap.release()
             cv2.destroyAllWindows()
 
 

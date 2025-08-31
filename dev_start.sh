@@ -29,7 +29,7 @@ fi
 # Start the FastAPI backend
 echo "Starting FastAPI backend on http://localhost:8000..."
 cd src/api_backend
-python local_server.py &
+uvicorn local_server:app --host 0.0.0.0 --port 8000 --reload &
 BACKEND_PID=$!
 cd ../..
 
