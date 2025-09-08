@@ -6,10 +6,11 @@
     - Refactor code to read from IVS instead of playing video file
         - maybe add a flag for "testing" vs. "live"
     - Test E2E flow recording the screen live
-    - Run E2E on test and record finish list, compare with final results
     - Determine backup, video saving from IVS etc
 
 2. Validate Yolo/OCR Performance
+    - Build out race list CSV ingestion to names, bib numbers and racer metadata
+    - Run E2E on test and record finish list, compare with final results
     - Analyze the results - Does the model perform well on the dataset
     - Does the model perform well outside of training set? Test out of distribution data to determine generalizability
         - if no, need to find different bib datasets
