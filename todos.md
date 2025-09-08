@@ -1,5 +1,27 @@
-# TODOs list
+# Roadmap
 
+1. Complete E2E EC2 <--> IVS Connection
+    - Test delay on EC2 - if any delay, find solutions.
+        - Ideally 4K video can be processed real time, otherwise investigate alternatives (1080p, processing frame rate)
+    - Refactor code to read from IVS instead of playing video file
+        - maybe add a flag for "testing" vs. "live"
+    - Test E2E flow recording the screen live
+    - Run E2E on test and record finish list, compare with final results
+2. Validate Yolo/OCR Performance
+    - Analyze the results - Does the model perform well on the dataset
+    - Does the model perform well outside of training set? Test out of distribution data to determine generalizability
+        - if no, need to find different bib datasets
+        - ensure fine tuning didn't destroy generalizability
+3. Test connectivity
+    - Test streaming and processing with no wifi - do we need a hotspot
+4. Game day operations
+    - Optimize the leaderboard - top x results by y categories to display on a screen somewhere (validate with stakeholders)
+    - Answer operational questions
+        - How will the camera/computer be set up at the race?
+        - Where will the screen be?
+    - Stress test system - what can go wrong, mitigations, back-ups and contingencies
+
+# Overall TODOs
 ## AWS IVS
 
 &#x2611; **Setup IVS** - Establish live connection between mobile device and IVS.
