@@ -7,13 +7,17 @@
         - maybe add a flag for "testing" vs. "live"
     - Test E2E flow recording the screen live
     - Run E2E on test and record finish list, compare with final results
+    - Determine backup, video saving from IVS etc
+
 2. Validate Yolo/OCR Performance
     - Analyze the results - Does the model perform well on the dataset
     - Does the model perform well outside of training set? Test out of distribution data to determine generalizability
         - if no, need to find different bib datasets
         - ensure fine tuning didn't destroy generalizability
+
 3. Test connectivity
     - Test streaming and processing with no wifi - do we need a hotspot
+
 4. Game day operations
     - Optimize the leaderboard - top x results by y categories to display on a screen somewhere (validate with stakeholders)
     - Answer operational questions
