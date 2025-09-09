@@ -15,3 +15,5 @@ README_video*
 ec2_instructions.md
 deployment_instructions.md
 *.pem
+data_lite.zip
+models.zip
