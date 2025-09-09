@@ -3,6 +3,12 @@
 1. Complete E2E EC2 <--> IVS Connection
     - Test delay on EC2 - if any delay, find solutions.
         - Ideally 4K video can be processed real time, otherwise investigate alternatives (1080p, processing frame rate)
+        
+        **On g4dn.xlarge there is still a delay - work on optimizing video processing locally**
+        ```
+        2025-09-09 12:43:07,667 -   1. Racer ID: 1    | Bib: 10       | Video Time: 00:09.33 | Elapsed Time: 00:29
+        2025-09-09 12:43:07,667 -   2. Racer ID: 3    | Bib: 322      | Video Time: 00:59.52 | Elapsed Time: 02:51
+        ```
     - Refactor code to read from IVS instead of playing video file
         - maybe add a flag for "testing" vs. "live"
     - Test E2E flow recording the screen live
