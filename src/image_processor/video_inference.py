@@ -503,14 +503,21 @@ class VideoInferenceProcessor:
                 tracker="config/custom_tracker.yaml",
                 classes=[0],
                 verbose=False,
+                workers=4  # Use the correct 'workers' argument
             )
             tracked_persons = person_results[0] if person_results else None
 
             self.check_finish_line_crossings(tracked_persons)
 
             # Predict ALL objects using the separate, stateless predictor_model
+            # all_detections_results = self.predictor_model.predict(
+            #     processing_frame, conf=self.confidence_threshold, verbose=False
+            # )
             all_detections_results = self.predictor_model.predict(
-                processing_frame, conf=self.confidence_threshold, verbose=False
+                processing_frame,
+                conf=self.confidence_threshold,
+                verbose=False,
+                workers=4 # Use the correct 'workers' argument
             )
             all_detections = (
                 all_detections_results[0] if all_detections_results else None
