@@ -9,8 +9,10 @@
         2025-09-09 12:43:07,667 -   1. Racer ID: 1    | Bib: 10       | Video Time: 00:09.33 | Elapsed Time: 00:29
         2025-09-09 12:43:07,667 -   2. Racer ID: 3    | Bib: 322      | Video Time: 00:59.52 | Elapsed Time: 02:51
         ```
+        - **Get real time processing to work by balancing framerate and resolution
     - Refactor code to read from IVS instead of playing video file
         - maybe add a flag for "testing" vs. "live"
+        - if live processing can work, refactor code to read straight from phone
     - Test E2E flow recording the screen live
     - Determine backup, video saving from IVS etc
 

@@ -1,8 +1,12 @@
+import os
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 import json
+import queue
+from starlette.responses import StreamingResponse
+import cv2
 
 
 class ConnectionManager:
@@ -55,6 +59,33 @@ def time_string_to_milliseconds(time_str: str) -> float:
     except (ValueError, IndexError):
         # Return an invalid value if the format is wrong
         return -1.0
+
+
+async def frame_generator():
+    """Generator function to yield frames for the browser."""
+    while True:
+        try:
+            # Get the next frame from the queue (wait up to 1 second)
+            frame = frame_queue.get(timeout=1)
+            # Encode the frame as a JPEG and yield it
+            ret, buffer = cv2.imencode(".jpg", frame)
+            if not ret:
+                continue
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
+            )
+        except queue.Empty:
+            # If the queue is empty, just continue waiting
+            pass
+
+
+@app.get("/video_feed")
+async def video_feed():
+    """Returns the MJPEG stream."""
+    return StreamingResponse(
+        frame_generator(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 @app.get("/api/results")
@@ -184,7 +215,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # Mount the frontend dist directory to serve static files (index.html, etc.)
 # Use different paths for development vs production (Docker)
-import os
 if os.path.exists("../frontend/dist"):
     # Development mode - running from src/api_backend
     static_dir = "../frontend/dist"

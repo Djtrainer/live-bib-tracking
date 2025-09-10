@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Bib Tracking Video Stream</title>
+    <style>
+        body {
+            background-color: #1a1a1a;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: Arial, sans-serif;
+            color: white;
+        }
+        h1 {
+            color: #ffffff;
+            text-align: center;
+            margin-bottom: 20px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        #video-container {
+            border: 2px solid #333;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+            background-color: #000;
+        }
+        #video-stream {
+            display: block;
+            max-width: 100%;
+            height: auto;
+        }
+        .info {
+            margin-top: 20px;
+            text-align: center;
+            color: #ccc;
+            max-width: 800px;
+        }
+        .legend {
+            margin-top: 15px;
+            padding: 15px;
+            background-color: #2a2a2a;
+            border-radius: 8px;
+            border: 1px solid #444;
+        }
+        .legend h3 {
+            margin-top: 0;
+            color: #fff;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 8px 0;
+        }
+        .color-box {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            border: 1px solid #666;
+        }
+        .yellow { background-color: #ffff00; }
+        .blue { background-color: #0000ff; }
+        .red { background-color: #ff0000; }
+        .status {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #333;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>🏃‍♂️ Live Bib Tracking Video Stream 🏁</h1>
+    <div id="video-container">
+        <img id="video-stream" src="/video_feed" alt="Live Video Stream">
+    </div>
+    <div class="info">
+        <p>Live video processing with real-time bib number detection and race tracking</p>
+        
+        <div class="legend">
+            <h3>Visual Legend</h3>
+            <div class="legend-item">
+                <div class="color-box yellow"></div>
+                <span>Finish Line - Racers crossing from left to right are recorded</span>
+            </div>
+            <div class="legend-item">
+                <div class="color-box blue"></div>
+                <span>Tracked Racers - Each racer has a unique ID and detected bib number</span>
+            </div>
+            <div class="legend-item">
+                <div class="color-box red"></div>
+                <span>Detected Bibs - Raw bib number detections before OCR processing</span>
+            </div>
+        </div>
+        
+        <div class="status">
+            <strong>Stream Status:</strong> Active<br>
+            <strong>Processing:</strong> Real-time object detection, tracking, and OCR<br>
+            <strong>Features:</strong> Finish line detection, live leaderboard updates
+        </div>
+    </div>
+
+    <script>
+        // Add some basic error handling for the video stream
+        const videoStream = document.getElementById('video-stream');
+        
+        videoStream.onerror = function() {
+            console.error('Video stream error');
+            // You could add retry logic here
+        };
+        
+        videoStream.onload = function() {
+            console.log('Video stream loaded successfully');
+        };
+    </script>
+</body>
+</html>

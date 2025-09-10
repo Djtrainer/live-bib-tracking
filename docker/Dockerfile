@@ -67,21 +67,7 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     tesseract-ocr \
     libgdal28 \
-    libgtk-3-0 \
-    libxcb1 \
-    libxcb-xinerama0 \
-    libxcb-randr0 \
-    libxcb-render0 \
-    libxcb-shape0 \
-    libxcb-sync1 \
-    libxcb-xfixes0 \
-    libxcb-icccm4 \
-    libxcb-image0 \
-    libxcb-keysyms1 \
-    libxcb-util1 \
-    xvfb \
-    fluxbox \
-    x11vnc \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
@@ -101,7 +87,12 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 COPY src/api_backend/ ./src/api_backend/
 COPY src/image_processor/ ./src/image_processor/
 COPY config/ ./config/
+COPY viewer.html .
 COPY pyproject.toml .
+
+# Copy entrypoint script and make it executable
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Create necessary directories and set permissions
 RUN mkdir -p /app/data /app/runs /app/models && \
@@ -125,11 +116,12 @@ ENV YOLO_AUTOINSTALL="false"
 ENV PYTHONPATH="/app/src"
 
 # Expose ports
-EXPOSE 8000 5900
-
-# Set default command to start the FastAPI server
-CMD ["python", "-m", "uvicorn", "src.api_backend.local_server:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/api/results')" || exit 1
+    CMD python -c "import requests; requests.get('http://localhost:8001/')" || exit 1
+
+# Set entrypoint and default command
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["--help"]
