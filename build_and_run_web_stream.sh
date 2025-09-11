@@ -151,7 +151,7 @@ run_container() {
         -v "$MODEL_PATH:/app/runs" \
         "$IMAGE_NAME" \
         --video /app/data/raw/race_1080p.mp4 \
-        --model /app/runs/detect/train2/weights/last.pt; then
+        --model /app/runs/detect/yolov8n_bib_detector4/weights/last.pt; then
         
         echo -e "${GREEN}✅ Container started successfully${NC}"
         echo ""

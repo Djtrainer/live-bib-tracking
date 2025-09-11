@@ -60,8 +60,8 @@ if [[ $# -eq 0 ]] || [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     echo -e "${BLUE}📋 Video Inference Script Usage:${NC}"
     echo ""
     echo -e "${YELLOW}Available options for video processing:${NC}"
-    echo "  --video PATH     Path to input video file (default: data/raw/2024_race.MOV)"
-    echo "  --model PATH     Path to trained YOLO model (default: runs/detect/train2/weights/last.pt)"
+    echo "  --video PATH     Path to input video file (default: data/raw/race_1080p.mp4)"
+    echo "  --model PATH     Path to trained YOLO model (default: runs/detect/yolov8n_bib_detector4/weights/last.pt)"
     echo "  --fps INT        Target processing frame rate (default: 8)"
     echo "  --conf FLOAT     YOLO confidence threshold (default: 0.3)"
     echo "  --help           Show this help message"
@@ -115,8 +115,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Set defaults if not specified
-VIDEO_FILE=${VIDEO_FILE:-"data/raw/2024_race.MOV"}
-MODEL_FILE=${MODEL_FILE:-"runs/detect/train2/weights/last.pt"}
+VIDEO_FILE=${VIDEO_FILE:-"data/raw/race_1080p.mp4"}
+MODEL_FILE=${MODEL_FILE:-"runs/detect/yolov8n_bib_detector4/weights/last.pt"}
 
 # Check if files exist
 if [[ ! -f "$VIDEO_FILE" ]]; then

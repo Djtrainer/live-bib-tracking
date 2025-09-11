@@ -153,7 +153,7 @@ def extract_images_from_mov(
 
 if __name__ == "__main__":
     # Example usage
-    video_file = "../data/raw/IMG_0053.MOV"
+    video_file = "../data/raw/race_1080p.mp4"
     output_directory = "../data/processed/extracted_frames"
     
     try:

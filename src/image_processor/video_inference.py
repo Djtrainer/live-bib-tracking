@@ -9,14 +9,13 @@ import time
 from collections import Counter
 import numpy as np
 import requests
-from typing import Generator
-import asyncio
-from fastapi import FastAPI, Response  # Add Request
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Response, Request # Add Request
-# FastAPI imports
+from fastapi import FastAPI, Response, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
 import uvicorn
+from collections import defaultdict
+import asyncio
+
 
 from image_processor.utils import get_logger
 
@@ -24,28 +23,36 @@ logger = get_logger()
 dotenv.load_dotenv()
 app_state = {}
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Code to run on startup
     logger.info("Application startup: FastAPI server ready")
-    
+
     # Initialize processor using environment variables
     try:
         # Get configuration from environment variables
-        video_path_str = os.getenv('VIDEO_PATH', 'data/raw/2024_race.MOV')
-        model_path_str = os.getenv('MODEL_PATH', '/app/runs/detect/train2/weights/last.pt')
-        target_fps = int(os.getenv('TARGET_FPS', '8'))
-        confidence_threshold = float(os.getenv('CONFIDENCE_THRESHOLD', '0.3'))
-        
+        video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
+        model_path_str = os.getenv(
+            "MODEL_PATH", "/app/runs/detect/yolov8n_bib_detector4/weights/last.pt"
+        )
+        target_fps = int(os.getenv("TARGET_FPS", "8"))
+        confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
+
         # Check if video and model files exist
         from pathlib import Path
+
         video_path = Path(video_path_str)
         model_path = Path(model_path_str)
-        
+
         if video_path.exists() and model_path.exists():
-            logger.info(f"Initializing processor with video: {video_path_str}, model: {model_path_str}")
-            logger.info(f"Configuration - FPS: {target_fps}, Confidence: {confidence_threshold}")
-            
+            logger.info(
+                f"Initializing processor with video: {video_path_str}, model: {model_path_str}"
+            )
+            logger.info(
+                f"Configuration - FPS: {target_fps}, Confidence: {confidence_threshold}"
+            )
+
             processor = VideoInferenceProcessor(
                 model_path=model_path_str,
                 video_path=video_path_str,
@@ -55,18 +62,21 @@ async def lifespan(app: FastAPI):
             app_state["processor"] = processor
             logger.info("✅ Video processor initialized successfully during startup!")
         else:
-            logger.warning(f"Video or model file not found. Video: {video_path.exists()}, Model: {model_path.exists()}")
+            logger.warning(
+                f"Video or model file not found. Video: {video_path.exists()}, Model: {model_path.exists()}"
+            )
             logger.warning(f"Video path: {video_path_str}")
             logger.warning(f"Model path: {model_path_str}")
             app_state["processor"] = None
     except Exception as e:
         logger.error(f"Failed to initialize processor during startup: {e}")
         import traceback
+
         logger.error(f"Traceback: {traceback.format_exc()}")
         app_state["processor"] = None
-    
+
     yield
-    
+
     # Code to run on shutdown
     logger.info("Application shutdown: Cleaning up resources.")
     if app_state.get("processor"):
@@ -74,6 +84,7 @@ async def lifespan(app: FastAPI):
             app_state["processor"].cap.release()
         except Exception as e:
             logger.warning(f"Error releasing video capture: {e}")
+
 
 # Attach the lifespan manager to the FastAPI app
 app = FastAPI(lifespan=lifespan, title="Live Bib Tracking Video Stream")
@@ -113,9 +124,7 @@ class VideoInferenceProcessor:
 
         logger.info("Loading models...")
         # This model instance will be used ONLY for tracking and will become stateful
-        self.tracker_model = YOLO(str(self.model_path))
-        # This model instance will be used ONLY for prediction and will remain stateless
-        self.predictor_model = YOLO(str(self.model_path))
+        self.model = YOLO(str(self.model_path))
         logger.info("Models loaded successfully!")
 
         # Initialize EasyOCR reader
@@ -130,14 +139,24 @@ class VideoInferenceProcessor:
         self.original_fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.frame_skip = max(1, int(self.original_fps / self.target_fps))
+        # self.frame_skip = max(1, int(self.original_fps / self.target_fps))
         self.finish_line_x = int(self.frame_width * finish_line_fraction)
+
+        # Dynamic frame skip variables for conditional processing
+        self.base_frame_skip = 50  # Scan mode - low frame rate when scene is empty
+        self.focus_frame_skip = 8  # Focus mode - high frame rate when person detected
+        self.current_frame_skip = self.base_frame_skip  # Start in scan mode
+        self.detection_cooldown_frames = 10  # Frames to stay in focus mode after detection
+        self.cooldown_counter = 0  # Timer to track cooldown
 
         self.inference_interval = 1
         self.last_annotated_frame = None
 
         # Track when processing started for wall time calculations
         self.processing_start_time = None
+
+        # Initialize timing tracking
+        self.timings = defaultdict(float)
 
     def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
         """
@@ -205,270 +224,61 @@ class VideoInferenceProcessor:
         x2, y2 = min(image.shape[1], x2 + padding), min(image.shape[0], y2 + padding)
         return image[y1:y2, x1:x2]
 
-    def check_finish_line_crossings(self, tracked_persons: YOLO) -> None:
+    def check_finish_line_crossings(self, person_id: int, person_box, cap: cv2.VideoCapture) -> None:
         """
-        Checks if any tracked racers have crossed the virtual finish line.
+        Checks if a tracked racer has crossed the virtual finish line.
         """
-        if tracked_persons is None or tracked_persons.boxes.id is None:
-            return
+        # Use the center of the bounding box as the racer's position
+        x1, _, x2, _ = person_box.xyxy[0]
+        current_x_center = (x1 + x2) / 2
 
-        for person_box in tracked_persons.boxes:
-            person_id = int(person_box.id[0])
-            # Use the center of the bounding box as the racer's position
-            x1, _, x2, _ = person_box.xyxy[0]
-            current_x_center = (x1 + x2) / 2
+        history = self.track_history.get(person_id)
+        # Proceed only if the racer is already being tracked and hasn't finished yet
+        if history and history["finish_time_ms"] is None:
+            last_x_center = history.get("last_x_center")
 
-            history = self.track_history.get(person_id)
-            # Proceed only if the racer is already being tracked and hasn't finished yet
-            if history and history["finish_time_ms"] is None:
-                last_x_center = history.get("last_x_center")
-
-                # Check if the racer crossed the line from left to right
-                if (
-                    last_x_center is not None
-                    and last_x_center < self.finish_line_x
-                    and current_x_center >= self.finish_line_x
-                ):
-                    # Racer crossed the line! Record both video timestamp and wall-clock time.
-                    finish_time = self.cap.get(cv2.CAP_PROP_POS_MSEC)
-                    finish_wall_time = time.time()  # Capture current wall-clock time
-                    history["finish_time_ms"] = finish_time
-                    history["finish_wall_time"] = finish_wall_time
-                    logger.info(
-                        f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
-                    )
-
-                    # Send result to local server
-                    final_bib_results = self.determine_final_bibs()
-                    bib_result = final_bib_results.get(person_id)
-
-                    if bib_result:
-                        payload = {
-                            "bibNumber": bib_result["final_bib"],
-                            "finishTime": finish_time,
-                        }
-                        try:
-                            requests.post(
-                                "http://localhost:8000/api/results",
-                                json=payload,
-                                timeout=2,
-                            )
-                            logger.info(
-                                f"Sent finisher data to local UI: Bib #{payload['bibNumber']}"
-                            )
-                        except requests.exceptions.ConnectionError:
-                            logger.warning(
-                                "Could not connect to local UI server. Is it running?"
-                            )
-
-                    self.print_live_leaderboard()
-
-                # Update the last known position for the next frame
-                history["last_x_center"] = current_x_center
-
-    def update_history_hybrid(
-        self, tracked_persons: YOLO, all_detections: YOLO
-    ) -> None:
-        """
-        Updates the track history for racers by associating detected bibs with tracked persons.
-        """
-        if (
-            tracked_persons is None
-            or tracked_persons.boxes.id is None
-            or all_detections is None
-        ):
-            return
-
-        bib_boxes = [box for box in all_detections.boxes if int(box.cls) == 1]
-        if not bib_boxes:
-            return
-
-        for person_box in tracked_persons.boxes:
-            person_id = int(person_box.id[0])
-            px1, py1, px2, py2 = person_box.xyxy[0]
-
-            for bib_box in bib_boxes:
-                bx1, by1, bx2, by2 = bib_box.xyxy[0]
-                if px1 < (bx1 + bx2) / 2 < px2 and py1 < (by1 + by2) / 2 < py2:
-                    if person_id not in self.track_history:
-                        # Initialize with new fields for timing
-                        self.track_history[person_id] = {
-                            "ocr_reads": [],
-                            "last_x_center": None,
-                            "finish_time_ms": None,
-                            "finish_wall_time": None,
-                        }
-                    bib_crop = self.crop_bib_from_prediction(
-                        all_detections.orig_img, bib_box.xyxy[0]
-                    )
-                    if bib_crop.size > 0:
-                        bib_number, ocr_conf = self.extract_bib_with_easyocr(
-                            self.preprocess_for_easyocr(bib_crop)
-                        )
-                        if bib_number and ocr_conf:
-                            self.track_history[person_id]["ocr_reads"].append(
-                                (bib_number, ocr_conf, float(bib_box.conf))
-                            )
-                    break
-
-    def draw_hybrid_predictions(
-        self,
-        image: np.ndarray,
-        tracked_persons,
-        all_detections,
-        scale: float = 1.0,
-    ) -> np.ndarray:
-        """
-        Draws hybrid predictions on the input image, including finish line, detected boxes, and tracked persons.
-        """
-        try:
-            # Validate input image
-            if image is None or image.size == 0:
-                logger.warning("Invalid image provided to draw_hybrid_predictions")
-                return np.zeros((480, 640, 3), dtype=np.uint8)
-
-            annotated_image = image.copy()
-
-            # Draw finish line
-            try:
-                cv2.line(
-                    annotated_image,
-                    (self.finish_line_x, 0),
-                    (self.finish_line_x, self.frame_height),
-                    (0, 255, 255),
-                    3,
-                )
-            except Exception as e:
-                logger.error(f"Error drawing finish line: {e}")
-
-            # Draw bib detection boxes
-            if all_detections and hasattr(all_detections, "boxes"):
-                try:
-                    for box in all_detections.boxes:
-                        if (
-                            hasattr(box, "cls")
-                            and hasattr(box, "xyxy")
-                            and int(box.cls) == 1
-                        ):
-                            try:
-                                x1, y1, x2, y2 = [int(c / scale) for c in box.xyxy[0]]
-                                # Validate coordinates
-                                if (
-                                    0 <= x1 < x2 <= annotated_image.shape[1]
-                                    and 0 <= y1 < y2 <= annotated_image.shape[0]
-                                ):
-                                    cv2.rectangle(
-                                        annotated_image,
-                                        (x1, y1),
-                                        (x2, y2),
-                                        (0, 0, 255),
-                                        2,
-                                    )
-                            except Exception as e:
-                                logger.warning(f"Error drawing bib box: {e}")
-                                continue
-                except Exception as e:
-                    logger.error(f"Error processing bib detections: {e}")
-
-            # Draw tracked persons
+            # Check if the racer crossed the line from left to right
             if (
-                tracked_persons
-                and hasattr(tracked_persons, "boxes")
-                and tracked_persons.boxes.id is not None
+                last_x_center is not None
+                and last_x_center < self.finish_line_x
+                and current_x_center >= self.finish_line_x
             ):
-                try:
-                    for box in tracked_persons.boxes:
-                        try:
-                            if not hasattr(box, "id") or not hasattr(box, "xyxy"):
-                                continue
+                # Racer crossed the line! Record both video timestamp and wall-clock time.
+                finish_time = cap.get(cv2.CAP_PROP_POS_MSEC)
+                finish_wall_time = time.time()  # Capture current wall-clock time
+                history["finish_time_ms"] = finish_time
+                history["finish_wall_time"] = finish_wall_time
+                logger.info(
+                    f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
+                )
 
-                            person_id = int(box.id[0])
-                            x1, y1, x2, y2 = [int(c / scale) for c in box.xyxy[0]]
+                # Send result to local server
+                final_bib_results = self.determine_final_bibs()
+                bib_result = final_bib_results.get(person_id)
 
-                            # Validate coordinates
-                            if not (
-                                0 <= x1 < x2 <= annotated_image.shape[1]
-                                and 0 <= y1 < y2 <= annotated_image.shape[0]
-                            ):
-                                continue
+                if bib_result:
+                    payload = {
+                        "bibNumber": bib_result["final_bib"],
+                        "finishTime": finish_time,
+                    }
+                    try:
+                        requests.post(
+                            "http://localhost:8000/api/results",
+                            json=payload,
+                            timeout=2,
+                        )
+                        logger.info(
+                            f"Sent finisher data to local UI: Bib #{payload['bibNumber']}"
+                        )
+                    except requests.exceptions.ConnectionError:
+                        logger.warning(
+                            "Could not connect to local UI server. Is it running?"
+                        )
 
-                            current_best_read = ""
-                            try:
-                                if (
-                                    person_id in self.track_history
-                                    and self.track_history[person_id]["ocr_reads"]
-                                ):
-                                    reads = [
-                                        r[0]
-                                        for r in self.track_history[person_id][
-                                            "ocr_reads"
-                                        ]
-                                    ]
-                                    if reads:
-                                        current_best_read = Counter(reads).most_common(
-                                            1
-                                        )[0][0]
-                            except Exception as e:
-                                logger.warning(
-                                    f"Error getting best OCR read for person {person_id}: {e}"
-                                )
+                self.print_live_leaderboard()
 
-                            label_text = (
-                                f"Racer ID {person_id} | Bib: {current_best_read}"
-                            )
-
-                            # Draw rectangle
-                            cv2.rectangle(
-                                annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2
-                            )
-
-                            # Draw text with background for better visibility
-                            try:
-                                text_size = cv2.getTextSize(
-                                    label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
-                                )[0]
-                                text_x = max(0, x1)
-                                text_y = max(text_size[1] + 10, y1 - 10)
-
-                                # Draw text background
-                                cv2.rectangle(
-                                    annotated_image,
-                                    (text_x - 5, text_y - text_size[1] - 5),
-                                    (text_x + text_size[0] + 5, text_y + 5),
-                                    (0, 0, 0),
-                                    -1,
-                                )
-
-                                # Draw text
-                                cv2.putText(
-                                    annotated_image,
-                                    label_text,
-                                    (text_x, text_y),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.9,
-                                    (255, 0, 0),
-                                    2,
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Error drawing text for person {person_id}: {e}"
-                                )
-
-                        except Exception as e:
-                            logger.warning(f"Error processing tracked person box: {e}")
-                            continue
-
-                except Exception as e:
-                    logger.error(f"Error processing tracked persons: {e}")
-
-            return annotated_image
-
-        except Exception as e:
-            logger.error(f"Critical error in draw_hybrid_predictions: {e}")
-            # Return original image as fallback
-            return (
-                image if image is not None else np.zeros((480, 640, 3), dtype=np.uint8)
-            )
+            # Update the last known position for the next frame
+            history["last_x_center"] = current_x_center
 
     def determine_final_bibs(self):
         """
@@ -681,160 +491,330 @@ class VideoInferenceProcessor:
 
         return frame
 
+    def draw_predictions(self, frame: np.ndarray, results) -> np.ndarray:
+        """
+        Draws predictions on the input image, including finish line, detected boxes, and tracked persons.
+        """
+        try:
+            # Validate input image
+            if frame is None or frame.size == 0:
+                logger.warning("Invalid image provided to draw_predictions")
+                return np.zeros((480, 640, 3), dtype=np.uint8)
+
+            annotated_image = frame.copy()
+
+            # Draw finish line
+            try:
+                cv2.line(
+                    annotated_image,
+                    (self.finish_line_x, 0),
+                    (self.finish_line_x, self.frame_height),
+                    (0, 255, 255),
+                    3,
+                )
+            except Exception as e:
+                logger.error(f"Error drawing finish line: {e}")
+
+            # Draw detection boxes and tracked persons
+            if results and hasattr(results[0], "boxes") and results[0].boxes is not None:
+                try:
+                    for box in results[0].boxes:
+                        if not hasattr(box, "cls") or not hasattr(box, "xyxy"):
+                            continue
+
+                        cls = int(box.cls)
+                        x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
+
+                        # Validate coordinates
+                        if not (
+                            0 <= x1 < x2 <= annotated_image.shape[1]
+                            and 0 <= y1 < y2 <= annotated_image.shape[0]
+                        ):
+                            continue
+
+                        # Draw bib detection boxes (class 1) in red
+                        if cls == 1:
+                            cv2.rectangle(
+                                annotated_image,
+                                (x1, y1),
+                                (x2, y2),
+                                (0, 0, 255),
+                                2,
+                            )
+
+                        # Draw tracked persons (class 0) in blue with ID and bib info
+                        elif cls == 0 and hasattr(box, "id") and box.id is not None:
+                            person_id = int(box.id[0])
+                            
+                            current_best_read = ""
+                            try:
+                                if (
+                                    person_id in self.track_history
+                                    and self.track_history[person_id]["ocr_reads"]
+                                ):
+                                    reads = [
+                                        r[0]
+                                        for r in self.track_history[person_id]["ocr_reads"]
+                                    ]
+                                    if reads:
+                                        current_best_read = Counter(reads).most_common(1)[0][0]
+                            except Exception as e:
+                                logger.warning(
+                                    f"Error getting best OCR read for person {person_id}: {e}"
+                                )
+
+                            label_text = f"Racer ID {person_id} | Bib: {current_best_read}"
+
+                            # Draw rectangle
+                            cv2.rectangle(
+                                annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2
+                            )
+
+                            # Draw text with background for better visibility
+                            try:
+                                text_size = cv2.getTextSize(
+                                    label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
+                                )[0]
+                                text_x = max(0, x1)
+                                text_y = max(text_size[1] + 10, y1 - 10)
+
+                                # Draw text background
+                                cv2.rectangle(
+                                    annotated_image,
+                                    (text_x - 5, text_y - text_size[1] - 5),
+                                    (text_x + text_size[0] + 5, text_y + 5),
+                                    (0, 0, 0),
+                                    -1,
+                                )
+
+                                # Draw text
+                                cv2.putText(
+                                    annotated_image,
+                                    label_text,
+                                    (text_x, text_y),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.9,
+                                    (255, 0, 0),
+                                    2,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Error drawing text for person {person_id}: {e}"
+                                )
+
+                except Exception as e:
+                    logger.error(f"Error processing detection boxes: {e}")
+
+            return annotated_image
+
+        except Exception as e:
+            logger.error(f"Critical error in draw_predictions: {e}")
+            # Return original image as fallback
+            return (
+                frame if frame is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+            )
+
     def _process_frame(
         self,
         frame: np.ndarray,
         frame_count: int,
         start_time: float,
         cap: cv2.VideoCapture,
+        timings: defaultdict,
     ) -> np.ndarray:
         """
-        Processes a single frame for object detection, tracking, and annotation.
+        Processes a single frame for object detection, tracking, OCR, and annotation.
+        This version uses a single, unified model call for efficiency.
         """
         try:
-            # Validate input frame
-            if frame is None or frame.size == 0:
-                logger.warning(f"Invalid frame at count {frame_count}")
-                return (
-                    frame
-                    if frame is not None
-                    else np.zeros((480, 640, 3), dtype=np.uint8)
-                )
+            # --- 1. Perform a single, unified tracking call for all classes ---
+            t0 = time.time()
+            results = self.model.track(
+                frame,
+                persist=True,
+                tracker="config/custom_tracker.yaml",
+                classes=[0, 1],  # Track both persons (0) and bibs (1)
+                workers=4,
+                verbose=False,
+            )
+            timings["YOLO_Unified_Track"] += time.time() - t0
 
-            if len(frame.shape) != 3 or frame.shape[2] != 3:
-                logger.warning(
-                    f"Unexpected frame shape at count {frame_count}: {frame.shape}"
-                )
-                return frame
+            # --- 1.5. Implement conditional processing logic based on person detection ---
+            person_detected = False
+            if results and results[0].boxes is not None and results[0].boxes.id is not None:
+                # Check if any persons (class 0) were detected
+                for box in results[0].boxes:
+                    if int(box.cls) == 0:  # Person class
+                        person_detected = True
+                        break
 
-            orig_h, orig_w = frame.shape[:2]
-            proc_w = orig_w
-            scale = proc_w / orig_w
-            proc_h = int(orig_h * scale)
-
-            processing_frame = frame
-
-            if frame_count % self.inference_interval == 0:
-                tracked_persons = None
-                all_detections = None
-
-                try:
-                    # Track ONLY persons using the dedicated tracker_model
-                    person_results = self.tracker_model.track(
-                        processing_frame,
-                        persist=True,
-                        tracker="config/custom_tracker.yaml",
-                        classes=[0],
-                        verbose=False,
-                    )
-                    tracked_persons = person_results[0] if person_results else None
-                except Exception as e:
-                    logger.error(
-                        f"Error in person tracking at frame {frame_count}: {e}"
-                    )
-                    tracked_persons = None
-
-                try:
-                    self.check_finish_line_crossings(tracked_persons)
-                except Exception as e:
-                    logger.error(
-                        f"Error checking finish line crossings at frame {frame_count}: {e}"
-                    )
-
-                try:
-                    # Predict ALL objects using the separate, stateless predictor_model
-                    all_detections_results = self.predictor_model.predict(
-                        processing_frame, conf=self.confidence_threshold, verbose=False
-                    )
-                    all_detections = (
-                        all_detections_results[0] if all_detections_results else None
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Error in object detection at frame {frame_count}: {e}"
-                    )
-                    all_detections = None
-
-                try:
-                    # Update history using the new hybrid function
-                    self.update_history_hybrid(tracked_persons, all_detections)
-                except Exception as e:
-                    logger.error(f"Error updating history at frame {frame_count}: {e}")
-
-                try:
-                    # Draw predictions using the new hybrid function
-                    annotated_frame = self.draw_hybrid_predictions(
-                        frame, tracked_persons, all_detections, scale=scale
-                    )
-                    self.last_annotated_frame = annotated_frame
-                    display_frame = annotated_frame
-                except Exception as e:
-                    logger.error(
-                        f"Error drawing predictions at frame {frame_count}: {e}"
-                    )
-                    display_frame = frame
-                    self.last_annotated_frame = frame
-
-                try:
-                    # Add all UI overlays to the frame
-                    display_frame = self.draw_ui_overlays(
-                        display_frame, start_time, cap
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Error drawing UI overlays at frame {frame_count}: {e}"
-                    )
-                    # Continue with frame without overlays
+            # Update frame skip based on detection results
+            if person_detected:
+                # Person detected: switch to focus mode (high frame rate)
+                self.current_frame_skip = self.focus_frame_skip
+                self.cooldown_counter = self.detection_cooldown_frames
             else:
-                if self.last_annotated_frame is not None:
-                    display_frame = self.last_annotated_frame
+                # No person detected: check cooldown
+                if self.cooldown_counter > 0:
+                    # Still in cooldown period, stay in focus mode
+                    self.cooldown_counter -= 1
                 else:
-                    display_frame = frame
+                    # Cooldown expired, switch back to scan mode (low frame rate)
+                    self.current_frame_skip = self.base_frame_skip
 
-            return display_frame
+            # --- 2. Associate Bibs and Perform Smart OCR ---
+            if results and results[0].boxes.id is not None:
+                boxes = results[0].boxes
+
+                # Separate the tracked objects into persons and bibs
+                tracked_persons = {int(b.id): b for b in boxes if int(b.cls) == 0 and b.id is not None}
+                detected_bibs = [b for b in boxes if int(b.cls) == 1]
+
+                for person_id, person_box in tracked_persons.items():
+                    # Initialize history for new racers
+                    if person_id not in self.track_history:
+                        self.track_history[person_id] = {
+                            "ocr_reads": [],
+                            "last_x_center": None,
+                            "finish_time_ms": None,
+                            "finish_wall_time": None,
+                            "final_bib": None,
+                            "final_bib_confidence": 0.0,
+                        }
+
+                    history = self.track_history[person_id]
+
+                    # Check for finish line crossing
+                    self.check_finish_line_crossings(person_id, person_box, cap)
+
+                    # Smart OCR: Skip if we already have a high-confidence bib
+                    if history["final_bib_confidence"] > 0.90:
+                        continue
+
+                    # Associate the closest bib if not yet found
+                    px1, py1, px2, py2 = person_box.xyxy[0]
+                    for bib_box in detected_bibs:
+                        bx1, by1, bx2, by2 = bib_box.xyxy[0]
+                        if px1 < (bx1 + bx2) / 2 < px2 and py1 < (by1 + by2) / 2 < py2:
+                            # Only run OCR if YOLO confidence for the bib is high enough
+                            yolo_bib_conf = float(bib_box.conf)
+                            if yolo_bib_conf > 0.70:
+                                t_ocr = time.time()
+                                bib_crop = self.crop_bib_from_prediction(
+                                    frame, bib_box.xyxy[0]
+                                )
+                                if bib_crop.size > 0:
+                                    bib_number, ocr_conf = (
+                                        self.extract_bib_with_easyocr(
+                                            self.preprocess_for_easyocr(bib_crop)
+                                        )
+                                    )
+                                    if bib_number and ocr_conf:
+                                        history["ocr_reads"].append(
+                                            (bib_number, ocr_conf, yolo_bib_conf)
+                                        )
+                                        # Lock in the bib if confidence is high
+                                        if ocr_conf > history["final_bib_confidence"]:
+                                            history["final_bib"] = bib_number
+                                            history["final_bib_confidence"] = ocr_conf
+                                timings["EasyOCR"] += time.time() - t_ocr
+                            break  # Move to the next person
+
+            # --- 3. Draw Predictions and UI Overlays ---
+            t_draw = time.time()
+            annotated_frame = self.draw_predictions(frame, results)
+            annotated_frame = self.draw_ui_overlays(annotated_frame, start_time, cap)
+            timings["Drawing"] += time.time() - t_draw
+
+            return annotated_frame
 
         except Exception as e:
             logger.error(
-                f"Critical error in _process_frame at frame {frame_count}: {e}"
+                f"Critical error in _process_frame at frame {frame_count}: {e}",
+                exc_info=True,
             )
-            # Return original frame as fallback
-            return (
-                frame if frame is not None else np.zeros((480, 640, 3), dtype=np.uint8)
-            )
+            return frame
 
-    def process_video_generator(self) -> Generator[np.ndarray, None, None]:
+    def _print_timing_report(self):
         """
-        Generator that yields processed video frames for streaming.
-        This replaces the original process_video method for web streaming.
+        Prints a detailed timing report of the video processing performance.
         """
-        frame_count = 0
-        start_time = time.time()
-        self.processing_start_time = start_time
+        logger.info("\n" + "="*60)
+        logger.info("📊 PERFORMANCE TIMING REPORT")
+        logger.info("="*60)
+        
+        total_time = sum(self.timings.values())
+        if total_time > 0:
+            for operation, time_spent in sorted(self.timings.items(), key=lambda x: x[1], reverse=True):
+                percentage = (time_spent / total_time) * 100
+                logger.info(f"{operation:<20}: {time_spent:>8.2f}s ({percentage:>5.1f}%)")
+            
+            logger.info("-" * 60)
+            logger.info(f"{'Total Processing Time':<20}: {total_time:>8.2f}s")
+        else:
+            logger.info("No timing data available")
+        
+        logger.info("="*60)
 
-        try:
-            while True:
-                ret, frame = self.cap.read()
-                if not ret:
-                    break
+    def _generate_final_leaderboard(self):
+        """
+        Generates and prints the final race leaderboard with all finishers.
+        """
+        logger.info("\n" + "🏁"*30)
+        logger.info("🏆 FINAL RACE LEADERBOARD 🏆")
+        logger.info("🏁"*30)
+        
+        current_bib_results = self.determine_final_bibs()
+        
+        leaderboard = []
+        for tracker_id, history_data in self.track_history.items():
+            # Check if this racer has a recorded finish time
+            if history_data and history_data.get("finish_time_ms") is not None:
+                bib_result = current_bib_results.get(tracker_id)
+                bib_number = bib_result["final_bib"] if bib_result else "No Bib"
+                
+                # Calculate elapsed time since script started using actual wall-clock time
+                if (
+                    self.processing_start_time is not None
+                    and history_data.get("finish_wall_time") is not None
+                ):
+                    elapsed_seconds = (
+                        history_data["finish_wall_time"] - self.processing_start_time
+                    )
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    wall_time_str = f"{minutes:02d}:{seconds:02d}"
+                else:
+                    wall_time_str = "N/A"
 
-                if frame_count % self.frame_skip != 0:
-                    frame_count += 1
-                    continue
-
-                # Process the frame
-                display_frame = self._process_frame(
-                    frame, frame_count, start_time, self.cap
+                leaderboard.append(
+                    {
+                        "id": tracker_id,
+                        "bib": bib_number,
+                        "time_ms": history_data["finish_time_ms"],
+                        "wall_time": wall_time_str,
+                    }
                 )
 
-                # Yield the processed frame
-                yield display_frame
-                frame_count += 1
+        leaderboard.sort(key=lambda x: x["time_ms"])
+        
+        if leaderboard:
+            logger.info(f"{'Pos':<4} {'Racer ID':<10} {'Bib #':<8} {'Video Time':<12} {'Elapsed Time':<12}")
+            logger.info("-" * 60)
+            for i, entry in enumerate(leaderboard):
+                total_seconds = entry["time_ms"] / 1000
+                minutes = int(total_seconds // 60)
+                seconds = int(total_seconds % 60)
+                milliseconds = int((total_seconds - int(total_seconds)) * 100)
+                video_time_str = f"{minutes:02d}:{seconds:02d}.{milliseconds:02d}"
 
-        except Exception as e:
-            logger.error(f"Error in video generator: {e}")
-        finally:
-            self.cap.release()
-            logger.info("Video processing completed")
+                logger.info(
+                    f"{i + 1:<4} {entry['id']:<10} {entry['bib']:<8} {video_time_str:<12} {entry['wall_time']:<12}"
+                )
+        else:
+            logger.info("No finishers recorded.")
+        
+        logger.info("🏁"*30)
 
 
 # FastAPI endpoints
@@ -903,34 +883,59 @@ async def video_feed(request: Request):
     try:
         # Get the processor from our state dictionary
         processor = app_state.get("processor")
-        
+
         if processor is None:
             error_msg = "Video processor not initialized. Please ensure the server was started with proper command line arguments."
             logger.error(error_msg)
             return Response(error_msg, status_code=500)
-        
+
         async def generate_frames():
             """Generator function that yields MJPEG frames asynchronously."""
             frame_count = 0
             error_count = 0
             max_errors = 10
+            start_time = time.time()
             
+            # Set processing start time for timing calculations
+            processor.processing_start_time = start_time
+
             try:
                 logger.info("Starting video frame generation...")
-                
-                # Use the processor's generator method
-                for frame in processor.process_video_generator():
+
+                # Main video processing loop
+                while True:
                     try:
-                        # Validate frame
+                        # Read frame from video capture
+                        ret, frame = processor.cap.read()
+                        
+                        if not ret:
+                            logger.info("End of video reached")
+                            break
+                            
                         if frame is None or frame.size == 0:
                             logger.warning(f"Invalid frame at count {frame_count}")
                             continue
-                            
+
+                        # Skip frames based on dynamic frame_skip setting
+                        if frame_count % processor.current_frame_skip != 0:
+                            frame_count += 1
+                            continue
+
+                        # Process the frame using the _process_frame method
+                        processed_frame = processor._process_frame(
+                            frame, frame_count, start_time, processor.cap, processor.timings
+                        )
+
+                        # Validate processed frame
+                        if processed_frame is None or processed_frame.size == 0:
+                            logger.warning(f"Invalid processed frame at count {frame_count}")
+                            continue
+
                         # Encode frame as JPEG
                         ret, buffer = cv2.imencode(
-                            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                            ".jpg", processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
                         )
-                        
+
                         if not ret or buffer is None:
                             logger.warning(f"Failed to encode frame {frame_count}")
                             error_count += 1
@@ -940,7 +945,7 @@ async def video_feed(request: Request):
                             continue
 
                         frame_bytes = buffer.tobytes()
-                        
+
                         if len(frame_bytes) == 0:
                             logger.warning(f"Empty frame bytes at count {frame_count}")
                             continue
@@ -952,7 +957,7 @@ async def video_feed(request: Request):
                         )
 
                         frame_count += 1
-                        
+
                         # Reset error count on successful frame
                         if error_count > 0:
                             error_count = 0
@@ -962,25 +967,49 @@ async def video_feed(request: Request):
 
                     except Exception as frame_error:
                         error_count += 1
-                        logger.error(f"Error processing frame {frame_count}: {frame_error}")
-                        
+                        logger.error(
+                            f"Error processing frame {frame_count}: {frame_error}"
+                        )
+
                         if error_count > max_errors:
-                            logger.error("Too many frame processing errors, stopping stream")
+                            logger.error(
+                                "Too many frame processing errors, stopping stream"
+                            )
                             break
                         continue
 
-                logger.info(f"Video stream ended. Processed {frame_count} frames with {error_count} errors.")
+                logger.info(
+                    f"Video stream ended. Processed {frame_count} frames with {error_count} errors."
+                )
+                
+                # Generate final reports
+                processor._print_timing_report()
+                processor._generate_final_leaderboard()
 
             except Exception as generator_error:
                 logger.error(f"Critical error in video generator: {generator_error}")
                 # Yield an error frame
                 try:
                     error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(error_frame, "Video Processing Error", (50, 240), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                    cv2.putText(error_frame, str(generator_error)[:50], (50, 280), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    
+                    cv2.putText(
+                        error_frame,
+                        "Video Processing Error",
+                        (50, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 0, 255),
+                        2,
+                    )
+                    cv2.putText(
+                        error_frame,
+                        str(generator_error)[:50],
+                        (50, 280),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2,
+                    )
+
                     ret, buffer = cv2.imencode(".jpg", error_frame)
                     if ret:
                         frame_bytes = buffer.tobytes()
@@ -992,10 +1021,9 @@ async def video_feed(request: Request):
                     logger.error(f"Failed to generate error frame: {error_frame_error}")
 
         return StreamingResponse(
-            generate_frames(),
-            media_type="multipart/x-mixed-replace; boundary=frame"
+            generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame"
         )
-        
+
     except Exception as endpoint_error:
         error_msg = f"Error in video_feed endpoint: {str(endpoint_error)}"
         logger.error(error_msg)
@@ -1012,7 +1040,7 @@ def main():
     parser.add_argument(
         "--video",
         type=str,
-        default="data/raw/2024_race.MOV",
+        default="data/raw/race_1080p.mp4",
         help="Path to input video file",
     )
     parser.add_argument(
@@ -1022,7 +1050,7 @@ def main():
         help="Path to trained YOLO model",
     )
     parser.add_argument(
-        "--fps", type=int, default=8, help="Target processing frame rate"
+        "--fps", type=int, default=20, help="Target processing frame rate"
     )
     parser.add_argument(
         "--conf", type=float, default=0.3, help="YOLO confidence threshold"
@@ -1048,15 +1076,19 @@ def main():
         if args.fps <= 0:
             logger.error(f"Invalid FPS value: {args.fps}. Must be greater than 0.")
             return
-            
+
         if not (0.0 <= args.conf <= 1.0):
-            logger.error(f"Invalid confidence threshold: {args.conf}. Must be between 0.0 and 1.0.")
+            logger.error(
+                f"Invalid confidence threshold: {args.conf}. Must be between 0.0 and 1.0."
+            )
             return
-            
+
         if not (1 <= args.port <= 65535):
-            logger.error(f"Invalid port number: {args.port}. Must be between 1 and 65535.")
+            logger.error(
+                f"Invalid port number: {args.port}. Must be between 1 and 65535."
+            )
             return
-            
+
     except Exception as e:
         logger.error(f"Error validating parameters: {e}")
         return
@@ -1065,7 +1097,7 @@ def main():
     try:
         video_path = Path(args.video)
         model_path = Path(args.model)
-        
+
         if not video_path.exists():
             logger.error(f"Video file not found: {args.video}")
             logger.info("Please check the path and ensure the file exists.")
@@ -1075,31 +1107,31 @@ def main():
             logger.error(f"Model file not found: {args.model}")
             logger.info("Please check the path and ensure the model file exists.")
             return
-            
+
         # Check file permissions
         if not video_path.is_file():
             logger.error(f"Video path is not a file: {args.video}")
             return
-            
+
         if not model_path.is_file():
             logger.error(f"Model path is not a file: {args.model}")
             return
-            
+
         # Check file sizes (basic validation)
         video_size = video_path.stat().st_size
         model_size = model_path.stat().st_size
-        
+
         if video_size == 0:
             logger.error(f"Video file is empty: {args.video}")
             return
-            
+
         if model_size == 0:
             logger.error(f"Model file is empty: {args.model}")
             return
-            
-        logger.info(f"Video file size: {video_size / (1024*1024):.1f} MB")
-        logger.info(f"Model file size: {model_size / (1024*1024):.1f} MB")
-        
+
+        logger.info(f"Video file size: {video_size / (1024 * 1024):.1f} MB")
+        logger.info(f"Model file size: {model_size / (1024 * 1024):.1f} MB")
+
     except PermissionError as e:
         logger.error(f"Permission denied accessing files: {e}")
         return
@@ -1114,14 +1146,14 @@ def main():
         logger.info(f"Model: {args.model}")
         logger.info(f"Target FPS: {args.fps}")
         logger.info(f"Confidence threshold: {args.conf}")
-        
+
         processor = VideoInferenceProcessor(
             model_path=args.model,
             video_path=args.video,
             target_fps=args.fps,
             confidence_threshold=args.conf,
         )
-        
+
         # Store processor in app state for the web endpoints
         app_state["processor"] = processor
         logger.info("Video processor initialized successfully!")
@@ -1134,32 +1166,39 @@ def main():
         return
     except ImportError as e:
         logger.error(f"Missing dependency during processor initialization: {e}")
-        logger.info("Please ensure all required packages are installed (ultralytics, easyocr, opencv-python)")
+        logger.info(
+            "Please ensure all required packages are installed (ultralytics, easyocr, opencv-python)"
+        )
         return
     except Exception as e:
         logger.error(f"Unexpected error during processor initialization: {e}")
         logger.error(f"Error type: {type(e).__name__}")
         import traceback
+
         logger.error(f"Traceback: {traceback.format_exc()}")
         return
 
     # Start the FastAPI server with error handling
     try:
         logger.info(f"Starting video stream server on http://{args.host}:{args.port}")
-        logger.info("Open your browser and navigate to the server URL to view the live stream")
+        logger.info(
+            "Open your browser and navigate to the server URL to view the live stream"
+        )
         logger.info("Press Ctrl+C to stop the server")
 
         uvicorn.run(
-            "__main__:app", 
+            "__main__:app",
             host=args.host,
             port=args.port,
             log_level="info",
-            access_log=True
+            access_log=True,
         )
-        
+
     except OSError as e:
         if "Address already in use" in str(e):
-            logger.error(f"Port {args.port} is already in use. Please try a different port.")
+            logger.error(
+                f"Port {args.port} is already in use. Please try a different port."
+            )
         else:
             logger.error(f"Network error starting server: {e}")
         return
@@ -1170,6 +1209,7 @@ def main():
         logger.error(f"Unexpected error starting server: {e}")
         logger.error(f"Error type: {type(e).__name__}")
         import traceback
+
         logger.error(f"Traceback: {traceback.format_exc()}")
         return
     finally:
