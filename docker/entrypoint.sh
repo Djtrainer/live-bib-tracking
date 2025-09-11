@@ -61,7 +61,7 @@ if [[ $# -eq 0 ]] || [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then
     echo ""
     echo -e "${YELLOW}Available options for video processing:${NC}"
     echo "  --video PATH     Path to input video file (default: data/raw/race_1080p.mp4)"
-    echo "  --model PATH     Path to trained YOLO model (default: runs/detect/yolov8n_bib_detector4/weights/last.pt)"
+    echo "  --model PATH     Path to trained YOLO model (default: runs/detect/yolo11_reshuffled_data/weights/last.pt)"
     echo "  --fps INT        Target processing frame rate (default: 8)"
     echo "  --conf FLOAT     YOLO confidence threshold (default: 0.3)"
     echo "  --help           Show this help message"
@@ -116,7 +116,7 @@ done
 
 # Set defaults if not specified
 VIDEO_FILE=${VIDEO_FILE:-"data/raw/race_1080p.mp4"}
-MODEL_FILE=${MODEL_FILE:-"runs/detect/yolov8n_bib_detector4/weights/last.pt"}
+MODEL_FILE=${MODEL_FILE:-"runs/detect/yolo11_reshuffled_data/weights/last.pt"}
 
 # Check if files exist
 if [[ ! -f "$VIDEO_FILE" ]]; then

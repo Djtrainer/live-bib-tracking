@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
         # Get configuration from environment variables
         video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
         model_path_str = os.getenv(
-            "MODEL_PATH", "/app/runs/detect/yolov8n_bib_detector4/weights/last.pt"
+            "MODEL_PATH", "/app/runs/detect/yolo11_reshuffled_data/weights/last.pt"
         )
         target_fps = int(os.getenv("TARGET_FPS", "8"))
         confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
@@ -143,10 +143,10 @@ class VideoInferenceProcessor:
         self.finish_line_x = int(self.frame_width * finish_line_fraction)
 
         # Dynamic frame skip variables for conditional processing
-        self.base_frame_skip = 50  # Scan mode - low frame rate when scene is empty
-        self.focus_frame_skip = 8  # Focus mode - high frame rate when person detected
+        self.base_frame_skip = 20  # Scan mode - low frame rate when scene is empty
+        self.focus_frame_skip = 5  # Focus mode - high frame rate when person detected
         self.current_frame_skip = self.base_frame_skip  # Start in scan mode
-        self.detection_cooldown_frames = 10  # Frames to stay in focus mode after detection
+        self.detection_cooldown_frames = 30  # Frames to stay in focus mode after detection
         self.cooldown_counter = 0  # Timer to track cooldown
 
         self.inference_interval = 1
