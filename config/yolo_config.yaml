@@ -2,5 +2,5 @@ path: data/processed
 train: images/train
 val: images/val
 
-nc: 4  # number of classes
-names: ["person", "bib", "dog", "stroller"]  # class names
+nc: 2  # number of classes
+names: ["person", "bib"] #, "dog", "stroller"]  # class names

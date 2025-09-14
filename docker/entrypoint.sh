@@ -87,6 +87,9 @@ MODEL_FILE=""
 
 # Parse arguments to find video and model paths
 ARGS_TO_PASS=()
+INFERENCE_MODE_ARG="test"
+CAMERA_INDEX_ARG="1"
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         --video)
@@ -96,6 +99,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --model)
             MODEL_FILE="$2"
+            ARGS_TO_PASS+=("$1" "$2")
+            shift 2
+            ;;
+        --inference_mode)
+            INFERENCE_MODE_ARG="$2"
+            ARGS_TO_PASS+=("$1" "$2")
+            shift 2
+            ;;
+        --camera_index)
+            CAMERA_INDEX_ARG="$2"
             ARGS_TO_PASS+=("$1" "$2")
             shift 2
             ;;
@@ -145,7 +158,9 @@ echo ""
 
 # Export arguments as environment variables for the FastAPI app to use
 export VIDEO_PATH="$VIDEO_FILE"
-export MODEL_PATH="$MODEL_FILE"
+export MODEL_PATH="/app/$MODEL_FILE"
+export INFERENCE_MODE="$INFERENCE_MODE_ARG"
+export CAMERA_INDEX="$CAMERA_INDEX_ARG"
 
 # Parse other arguments and export them
 for ((i=0; i<${#ARGS_TO_PASS[@]}; i++)); do
@@ -166,6 +181,8 @@ export CONFIDENCE_THRESHOLD="${CONFIDENCE_THRESHOLD:-0.3}"
 echo -e "${BLUE}Environment variables set:${NC}"
 echo -e "  VIDEO_PATH: $VIDEO_PATH"
 echo -e "  MODEL_PATH: $MODEL_PATH"
+echo -e "  INFERENCE_MODE: $INFERENCE_MODE"
+echo -e "  CAMERA_INDEX: $CAMERA_INDEX"
 echo -e "  TARGET_FPS: $TARGET_FPS"
 echo -e "  CONFIDENCE_THRESHOLD: $CONFIDENCE_THRESHOLD"
 echo ""

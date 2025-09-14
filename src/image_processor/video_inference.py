@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import cv2
 import dotenv
@@ -6,6 +7,7 @@ import easyocr
 from pathlib import Path
 from ultralytics import YOLO
 import time
+import traceback
 from collections import Counter
 import numpy as np
 import requests
@@ -15,7 +17,6 @@ from fastapi.responses import StreamingResponse, HTMLResponse
 import uvicorn
 from collections import defaultdict
 import asyncio
-
 
 from image_processor.utils import get_logger
 
@@ -29,49 +30,78 @@ async def lifespan(app: FastAPI):
     # Code to run on startup
     logger.info("Application startup: FastAPI server ready")
 
-    # Initialize processor using environment variables
+    # Initialize processor using environment variables (for Docker) or command-line args (for direct execution)
     try:
-        # Get configuration from environment variables
-        video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
-        model_path_str = os.getenv(
-            "MODEL_PATH", "/app/runs/detect/yolo11_reshuffled_data/weights/last.pt"
-        )
-        target_fps = int(os.getenv("TARGET_FPS", "8"))
-        confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
-
-        # Check if video and model files exist
-        from pathlib import Path
-
-        video_path = Path(video_path_str)
-        model_path = Path(model_path_str)
-
-        if video_path.exists() and model_path.exists():
-            logger.info(
-                f"Initializing processor with video: {video_path_str}, model: {model_path_str}"
-            )
-            logger.info(
-                f"Configuration - FPS: {target_fps}, Confidence: {confidence_threshold}"
-            )
+        # Check if processor is already initialized (from main() function)
+        if app_state.get("processor") is not None:
+            logger.info("Processor already initialized in main() - skipping lifespan initialization")
+            yield
+            return
+            
+        # Check if we're running via uvicorn (Docker) or direct execution
+        if 'uvicorn' in sys.modules or any('uvicorn' in arg for arg in sys.argv):
+            # Running via uvicorn (Docker) - use environment variables
+            logger.info("Detected uvicorn execution - using environment variables")
+            
+            # Get configuration from environment variables
+            video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
+            model_path_str = os.getenv("MODEL_PATH", "/app/runs/detect/yolo11_reshuffled_data/weights/last.pt")
+            # model_path_str = os.getenv("MODEL_PATH", "runs/detect/yolo11_reshuffled_data/weights/last.pt")
+            target_fps = int(os.getenv("TARGET_FPS", "8"))
+            confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
+            
+            # Check for live mode environment variables
+            inference_mode = os.getenv("INFERENCE_MODE", "test")
+            camera_index = int(os.getenv("CAMERA_INDEX", "1"))
+            
+            logger.info(f"Environment INFERENCE_MODE: {inference_mode}")
+            logger.info(f"Environment CAMERA_INDEX: {camera_index}")
+            
+            # Set video source based on inference mode
+            if inference_mode == 'live':
+                video_source = camera_index
+                logger.info(f"Live Mode: Using camera index {video_source}")
+            else:
+                video_source = video_path_str
+                logger.info(f"Test Mode: Using video file {video_source}")
+            
+            # Validate model file exists
+            model_path = Path(model_path_str)
+            if not model_path.exists():
+                logger.warning(f"Model file not found: {model_path_str}")
+                app_state["processor"] = None
+                yield
+                return
+            
+            # For test mode, validate video file exists
+            if inference_mode == 'test':
+                video_path = Path(video_path_str)
+                if not video_path.exists():
+                    logger.warning(f"Video file not found: {video_path_str}")
+                    app_state["processor"] = None
+                    yield
+                    return
+            
+            logger.info(f"Initializing processor - Mode: {inference_mode}")
+            logger.info(f"Model: {model_path_str}")
+            logger.info(f"Video source: {video_source}")
+            logger.info(f"Target FPS: {target_fps}, Confidence: {confidence_threshold}")
 
             processor = VideoInferenceProcessor(
                 model_path=model_path_str,
-                video_path=video_path_str,
+                video_path=video_source,
                 target_fps=target_fps,
                 confidence_threshold=confidence_threshold,
             )
             app_state["processor"] = processor
             logger.info("✅ Video processor initialized successfully during startup!")
         else:
-            logger.warning(
-                f"Video or model file not found. Video: {video_path.exists()}, Model: {model_path.exists()}"
-            )
-            logger.warning(f"Video path: {video_path_str}")
-            logger.warning(f"Model path: {model_path_str}")
+            # Running directly - processor will be initialized in main()
+            logger.info("Direct execution detected - processor will be initialized in main()")
             app_state["processor"] = None
+            
     except Exception as e:
         logger.error(f"Failed to initialize processor during startup: {e}")
-        import traceback
-
         logger.error(f"Traceback: {traceback.format_exc()}")
         app_state["processor"] = None
 
@@ -99,7 +129,7 @@ class VideoInferenceProcessor:
     def __init__(
         self,
         model_path: str | Path,
-        video_path: str | Path,
+        video_path: str | Path | int,
         target_fps: int = 1,
         confidence_threshold: float = 0,
         finish_line_fraction: float = 0.85,
@@ -109,13 +139,23 @@ class VideoInferenceProcessor:
 
         Args:
             model_path (str | Path): Path to YOLO model weights.
-            video_path (str | Path): Path to input video file.
+            video_path (str | Path | int): Path to input video file or camera index for live mode.
             target_fps (int, optional): Target FPS for processing. Defaults to 1.
             confidence_threshold (float, optional): YOLO detection confidence threshold. Defaults to 0.
             finish_line_fraction (float, optional): Fraction of frame width for finish line. Defaults to 0.85.
         """
         self.model_path = Path(model_path)
-        self.video_path = Path(video_path)
+        
+        # Handle both file paths and camera indices
+        if isinstance(video_path, int):
+            # Live camera mode - store the camera index directly
+            self.video_path = video_path
+            self.is_live_mode = True
+        else:
+            # Test video file mode - convert to Path
+            self.video_path = Path(video_path)
+            self.is_live_mode = False
+            
         self.target_fps = target_fps
         self.confidence_threshold = confidence_threshold
 
@@ -133,9 +173,71 @@ class VideoInferenceProcessor:
         logger.info("EasyOCR reader initialized!")
 
         # Video capture and properties
-        self.cap = cv2.VideoCapture(str(self.video_path))
-        if not self.cap.isOpened():
-            raise ValueError(f"Could not open video file: {self.video_path}")
+        # Handle both file paths and camera indices using the stored video_path
+        if self.is_live_mode:
+            # Live camera mode - video_path is an integer camera index
+            logger.info(f"Attempting to open camera with index: {self.video_path}")
+            
+            # Try different camera backends for better compatibility
+            backends_to_try = [
+                cv2.CAP_V4L2,    # Video4Linux2 (Linux)
+                cv2.CAP_GSTREAMER,  # GStreamer
+                cv2.CAP_ANY,     # Any available backend
+            ]
+            
+            self.cap = None
+            for backend in backends_to_try:
+                try:
+                    logger.info(f"Trying camera backend: {backend}")
+                    cap_test = cv2.VideoCapture(self.video_path, backend)
+                    if cap_test.isOpened():
+                        # Test if we can actually read a frame
+                        ret, frame = cap_test.read()
+                        if ret and frame is not None:
+                            logger.info(f"✅ Successfully opened camera {self.video_path} with backend {backend}")
+                            self.cap = cap_test
+                            break
+                        else:
+                            logger.warning(f"Camera {self.video_path} opened but cannot read frames with backend {backend}")
+                            cap_test.release()
+                    else:
+                        cap_test.release()
+                except Exception as e:
+                    logger.warning(f"Failed to open camera {self.video_path} with backend {backend}: {e}")
+                    continue
+            
+            if self.cap is None or not self.cap.isOpened():
+                # Provide detailed error message with troubleshooting tips
+                error_msg = f"""
+❌ Could not open camera with index: {self.video_path}
+
+🔧 Troubleshooting steps:
+1. Check if camera is connected and not in use by another application
+2. Try different camera indices (0, 1, 2, etc.)
+3. Ensure Docker has camera permissions:
+   - Linux: Add user to 'video' group, use --device=/dev/video0
+   - macOS: Grant camera permissions to Docker/Terminal
+   - Windows: Use --privileged flag
+
+4. Available cameras can be checked with:
+   ls /dev/video* (Linux)
+   
+5. Common camera indices:
+   - 0: Built-in camera
+   - 1: External USB camera (iPhone, webcam)
+   - 2+: Additional cameras
+
+6. If using Docker, ensure proper device mounting:
+   --device=/dev/video0 --device=/dev/video1
+"""
+                logger.error(error_msg)
+                raise ValueError(f"Could not open camera with index: {self.video_path}")
+        else:
+            # Test video file mode - video_path is a Path object
+            logger.info(f"Opening video file: {self.video_path}")
+            self.cap = cv2.VideoCapture(str(self.video_path))
+            if not self.cap.isOpened():
+                raise ValueError(f"Could not open video file: {self.video_path}")
         self.original_fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -143,8 +245,8 @@ class VideoInferenceProcessor:
         self.finish_line_x = int(self.frame_width * finish_line_fraction)
 
         # Dynamic frame skip variables for conditional processing
-        self.base_frame_skip = 20  # Scan mode - low frame rate when scene is empty
-        self.focus_frame_skip = 5  # Focus mode - high frame rate when person detected
+        self.base_frame_skip = 1  # Scan mode - low frame rate when scene is empty
+        self.focus_frame_skip = 1  # Focus mode - high frame rate when person detected
         self.current_frame_skip = self.base_frame_skip  # Start in scan mode
         self.detection_cooldown_frames = 30  # Frames to stay in focus mode after detection
         self.cooldown_counter = 0  # Timer to track cooldown
@@ -916,15 +1018,48 @@ async def video_feed(request: Request):
                             logger.warning(f"Invalid frame at count {frame_count}")
                             continue
 
-                        # Skip frames based on dynamic frame_skip setting
-                        if frame_count % processor.current_frame_skip != 0:
+                        # For live mode, we need to check for detections to update frame skip
+                        # before applying the skip logic
+                        should_process_frame = (frame_count % processor.current_frame_skip == 0)
+                        
+                        if should_process_frame:
+                            # Process the frame using the _process_frame method
+                            processed_frame = processor._process_frame(
+                                frame, frame_count, start_time, processor.cap, processor.timings
+                            )
+                        else:
+                            # For skipped frames, we still need to run a quick detection check
+                            # to update the dynamic frame skip logic for live mode
+                            if processor.is_live_mode:
+                                # Quick detection check without full processing
+                                results = processor.model.track(
+                                    frame,
+                                    persist=True,
+                                    tracker="config/custom_tracker.yaml",
+                                    classes=[0],  # Only check for persons
+                                    workers=1,
+                                    verbose=False,
+                                )
+                                
+                                # Update frame skip based on detection results
+                                person_detected = False
+                                if results and results[0].boxes is not None:
+                                    for box in results[0].boxes:
+                                        if int(box.cls) == 0:  # Person class
+                                            person_detected = True
+                                            break
+                                
+                                if person_detected:
+                                    processor.current_frame_skip = processor.focus_frame_skip
+                                    processor.cooldown_counter = processor.detection_cooldown_frames
+                                else:
+                                    if processor.cooldown_counter > 0:
+                                        processor.cooldown_counter -= 1
+                                    else:
+                                        processor.current_frame_skip = processor.base_frame_skip
+                            
                             frame_count += 1
                             continue
-
-                        # Process the frame using the _process_frame method
-                        processed_frame = processor._process_frame(
-                            frame, frame_count, start_time, processor.cap, processor.timings
-                        )
 
                         # Validate processed frame
                         if processed_frame is None or processed_frame.size == 0:
@@ -1061,6 +1196,18 @@ def main():
     parser.add_argument(
         "--port", type=int, default=8001, help="Port to bind the server to"
     )
+    parser.add_argument(
+        "--inference_mode",
+        choices=['test', 'live'],
+        default='test',
+        help='Set the inference mode to use a test video file or a live camera stream.'
+    )
+    parser.add_argument(
+        "--camera_index",
+        type=int,
+        default=1,
+        help='The index of the camera to use for live mode (e.g., 0 for built-in, 1 for iPhone).'
+    )
 
     try:
         args = parser.parse_args()
@@ -1070,6 +1217,14 @@ def main():
     except Exception as e:
         logger.error(f"Unexpected error parsing arguments: {e}")
         return
+
+    # Set video source based on inference mode
+    if args.inference_mode == 'live':
+        video_source = args.camera_index
+        logger.info(f"Live Mode: Using camera index {video_source}")
+    else:  # test mode
+        video_source = args.video
+        logger.info(f"Test Mode: Using video file {video_source}")
 
     # Validate input parameters
     try:
@@ -1093,44 +1248,49 @@ def main():
         logger.error(f"Error validating parameters: {e}")
         return
 
-    # Validate input files exist
+    # Validate input files exist (skip video validation for live mode)
     try:
-        video_path = Path(args.video)
         model_path = Path(args.model)
-
-        if not video_path.exists():
-            logger.error(f"Video file not found: {args.video}")
-            logger.info("Please check the path and ensure the file exists.")
-            return
 
         if not model_path.exists():
             logger.error(f"Model file not found: {args.model}")
             logger.info("Please check the path and ensure the model file exists.")
             return
 
-        # Check file permissions
-        if not video_path.is_file():
-            logger.error(f"Video path is not a file: {args.video}")
-            return
-
         if not model_path.is_file():
             logger.error(f"Model path is not a file: {args.model}")
             return
 
-        # Check file sizes (basic validation)
-        video_size = video_path.stat().st_size
+        # Check model file size (basic validation)
         model_size = model_path.stat().st_size
-
-        if video_size == 0:
-            logger.error(f"Video file is empty: {args.video}")
-            return
 
         if model_size == 0:
             logger.error(f"Model file is empty: {args.model}")
             return
 
-        logger.info(f"Video file size: {video_size / (1024 * 1024):.1f} MB")
         logger.info(f"Model file size: {model_size / (1024 * 1024):.1f} MB")
+
+        # Only validate video file for test mode
+        if args.inference_mode == 'test':
+            video_path = Path(args.video)
+
+            if not video_path.exists():
+                logger.error(f"Video file not found: {args.video}")
+                logger.info("Please check the path and ensure the file exists.")
+                return
+
+            if not video_path.is_file():
+                logger.error(f"Video path is not a file: {args.video}")
+                return
+
+            # Check video file size (basic validation)
+            video_size = video_path.stat().st_size
+
+            if video_size == 0:
+                logger.error(f"Video file is empty: {args.video}")
+                return
+
+            logger.info(f"Video file size: {video_size / (1024 * 1024):.1f} MB")
 
     except PermissionError as e:
         logger.error(f"Permission denied accessing files: {e}")
@@ -1142,21 +1302,27 @@ def main():
     # Initialize the video processor with comprehensive error handling
     try:
         logger.info("Initializing video processor...")
-        logger.info(f"Video: {args.video}")
+        if args.inference_mode == 'live':
+            logger.info(f"Live Mode - Camera Index: {video_source}")
+        else:
+            logger.info(f"Test Mode - Video File: {video_source}")
         logger.info(f"Model: {args.model}")
         logger.info(f"Target FPS: {args.fps}")
         logger.info(f"Confidence threshold: {args.conf}")
 
         processor = VideoInferenceProcessor(
             model_path=args.model,
-            video_path=args.video,
+            video_path=video_source,
             target_fps=args.fps,
             confidence_threshold=args.conf,
         )
 
         # Store processor in app state for the web endpoints
         app_state["processor"] = processor
-        logger.info("Video processor initialized successfully!")
+        if args.inference_mode == 'live':
+            logger.info("✅ Video processor initialized successfully in Live Mode!")
+        else:
+            logger.info("✅ Video processor initialized successfully in Test Mode!")
 
     except FileNotFoundError as e:
         logger.error(f"File not found during processor initialization: {e}")
@@ -1173,8 +1339,7 @@ def main():
     except Exception as e:
         logger.error(f"Unexpected error during processor initialization: {e}")
         logger.error(f"Error type: {type(e).__name__}")
-        import traceback
-
+        
         logger.error(f"Traceback: {traceback.format_exc()}")
         return
 
@@ -1208,7 +1373,6 @@ def main():
     except Exception as e:
         logger.error(f"Unexpected error starting server: {e}")
         logger.error(f"Error type: {type(e).__name__}")
-        import traceback
 
         logger.error(f"Traceback: {traceback.format_exc()}")
         return

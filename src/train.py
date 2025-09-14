@@ -13,9 +13,9 @@ def train_model():
     print("Starting model training...")
     model.train(
         data='config/yolo_config.yaml',  # Path to your dataset yaml file
-        epochs=100,                      # Number of training epochs (e.g., 50-100)
+        epochs=200,                      # Number of training epochs (e.g., 50-100)
         # imgsz=640,                      # Image size for training
-        name='yolo11_reshuffled_data'     # Name for the output folder
+        name='yolo11_new_data'     # Name for the output folder
     )
     print("Training complete!")
     print("Model and results saved in the 'runs/detect/' directory.")
