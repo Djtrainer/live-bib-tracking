@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 PORT=8001
 
 # Default paths (can be overridden with environment variables)
-MODEL_PATH=${MODEL_PATH:-"$(pwd)/runs/detect/yolo11_reshuffled_data/weights/last.pt"}
+MODEL_PATH=${MODEL_PATH:-"$(pwd)/runs/detect/yolo11_new_data/weights/last.pt"}
 CAMERA_INDEX=${CAMERA_INDEX:-1}
 
 echo -e "${BLUE}🏃‍♂️ Live Bib Tracking - Native macOS Live Camera Feed 📹${NC}"
@@ -30,7 +30,7 @@ print_usage() {
     echo ""
     echo -e "${YELLOW}Options:${NC}"
     echo "  -h, --help       Show this help message"
-    echo "  -m, --model      Path to model file (default: ./runs/detect/yolo11_reshuffled_data/weights/last.pt)"
+    echo "  -m, --model      Path to model file (default: ./runs/detect/yolo11_new_data/weights/last.pt)"
     echo "  -c, --camera     Camera index (default: 1, iPhone; 0 for built-in)"
     echo "  -p, --port       Port to bind server to (default: 8001)"
     echo ""

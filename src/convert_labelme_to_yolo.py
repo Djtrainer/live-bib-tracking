@@ -92,14 +92,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--json_dir",
         type=str,
-        default="data/processed/labels_json/val",
+        default="data/processed/labels_json/train",
         required=False,
         help="Path to the directory containing LabelMe JSON files.",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="data/processed/labels/val",
+        default="data/processed/labels/train",
         required=False,
         help="Path to the directory to save the output YOLO .txt files.",
     )
