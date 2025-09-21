@@ -23,7 +23,9 @@ const Index = () => {
     const fetchFinishers = async () => {
       try {
         setLoading(true);
-        const response = await fetch('/api/results');
+        // Use environment variable for API base URL, fallback to relative path
+        const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '';
+        const response = await fetch(`${apiBaseUrl}/api/results`);
         const result = await response.json();
         
         if (result.success && result.data) {
@@ -43,8 +45,8 @@ const Index = () => {
     fetchFinishers();
 
     // Set up WebSocket connection for real-time updates
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL || `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    const wsUrl = `${wsBaseUrl}/ws`;
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
@@ -58,7 +60,8 @@ const Index = () => {
         
         if (message.action === 'reload') {
           // Reload all data when instructed (for delete/reorder operations)
-          const response = await fetch('/api/results');
+          const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '';
+          const response = await fetch(`${apiBaseUrl}/api/results`);
           const result = await response.json();
           
           if (result.success && result.data) {

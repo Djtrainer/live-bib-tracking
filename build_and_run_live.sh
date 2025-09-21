@@ -177,7 +177,7 @@ run_container() {
     fi
     
     # Check if the specific model file exists
-    MODEL_FILE="$MODEL_PATH/detect/yolo11_new_data/weights/last.pt"
+    MODEL_FILE="$MODEL_PATH/detect/yolo11_white_bibs/weights/last.pt"
     if [[ -f "$MODEL_FILE" ]]; then
         echo -e "${GREEN}✅ Model file found: $MODEL_FILE${NC}"
         MODEL_SIZE=$(stat -f%z "$MODEL_FILE" 2>/dev/null || stat -c%s "$MODEL_FILE" 2>/dev/null || echo "0")
@@ -251,7 +251,7 @@ run_container() {
         "$IMAGE_NAME" \
         --inference_mode live \
         --camera_index "$CAMERA_INDEX" \
-        --model /app/runs/detect/yolo11_new_data/weights/last.pt; then
+        --model /app/runs/detect/yolo11_white_bibs/weights/last.pt; then
         
         echo -e "${GREEN}✅ Container started successfully${NC}"
         echo ""

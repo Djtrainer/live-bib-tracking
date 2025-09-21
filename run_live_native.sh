@@ -17,10 +17,11 @@ NC='\033[0m' # No Color
 PORT=8001
 
 # Default paths (can be overridden with environment variables)
-MODEL_PATH=${MODEL_PATH:-"$(pwd)/runs/detect/yolo11_new_data/weights/last.pt"}
+MODEL_PATH=${MODEL_PATH:-"$(pwd)/runs/detect/yolo11_white_bibs/weights/last.pt"}
 CAMERA_INDEX=${CAMERA_INDEX:-1}
+VIDEO_PATH=""
 
-echo -e "${BLUE}🏃‍♂️ Live Bib Tracking - Native macOS Live Camera Feed 📹${NC}"
+echo -e "${BLUE}🏃‍♂️ Live Bib Tracking - Native macOS Processing 📹${NC}"
 echo "=============================================================="
 
 # Function to print usage
@@ -30,8 +31,9 @@ print_usage() {
     echo ""
     echo -e "${YELLOW}Options:${NC}"
     echo "  -h, --help       Show this help message"
-    echo "  -m, --model      Path to model file (default: ./runs/detect/yolo11_new_data/weights/last.pt)"
+    echo "  -m, --model      Path to model file (default: ./runs/detect/yolo11_white_bibs/weights/last.pt)"
     echo "  -c, --camera     Camera index (default: 1, iPhone; 0 for built-in)"
+    echo "  -v, --video      Path to video file for testing (overrides camera)"
     echo "  -p, --port       Port to bind server to (default: 8001)"
     echo ""
     echo -e "${YELLOW}Environment Variables:${NC}"
@@ -46,7 +48,9 @@ print_usage() {
     echo -e "${YELLOW}Examples:${NC}"
     echo "  $0                                    # Use iPhone camera (index 1)"
     echo "  $0 -c 0                              # Use built-in camera"
+    echo "  $0 -v test_race.mp4                  # Process video file"
     echo "  $0 -m /path/to/model.pt -c 1         # Custom model with iPhone"
+    echo "  $0 -v /path/to/video.mp4 -m /path/to/model.pt  # Custom model with video"
     echo "  CAMERA_INDEX=0 MODEL_PATH=/path/to/model.pt $0"
 }
 
@@ -63,6 +67,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -c|--camera)
             CAMERA_INDEX="$2"
+            shift 2
+            ;;
+        -v|--video)
+            VIDEO_PATH="$2"
             shift 2
             ;;
         -p|--port)
@@ -85,17 +93,27 @@ fi
 
 # Convert relative paths to absolute paths
 MODEL_PATH=$(realpath "$MODEL_PATH" 2>/dev/null || echo "$MODEL_PATH")
+if [[ -n "$VIDEO_PATH" ]]; then
+    VIDEO_PATH=$(realpath "$VIDEO_PATH" 2>/dev/null || echo "$VIDEO_PATH")
+fi
 
 echo -e "${BLUE}Configuration:${NC}"
 echo "  Model Path: $MODEL_PATH"
-echo "  Camera Index: $CAMERA_INDEX"
 echo "  Port: $PORT"
-if [[ "$CAMERA_INDEX" == "0" ]]; then
-    echo "  Camera Type: Built-in camera (MacBook)"
-elif [[ "$CAMERA_INDEX" == "1" ]]; then
-    echo "  Camera Type: External camera (iPhone/USB)"
+
+if [[ -n "$VIDEO_PATH" ]]; then
+    echo "  Input Source: Video file"
+    echo "  Video Path: $VIDEO_PATH"
 else
-    echo "  Camera Type: Camera device $CAMERA_INDEX"
+    echo "  Input Source: Live camera"
+    echo "  Camera Index: $CAMERA_INDEX"
+    if [[ "$CAMERA_INDEX" == "0" ]]; then
+        echo "  Camera Type: Built-in camera (MacBook)"
+    elif [[ "$CAMERA_INDEX" == "1" ]]; then
+        echo "  Camera Type: External camera (iPhone/USB)"
+    else
+        echo "  Camera Type: Camera device $CAMERA_INDEX"
+    fi
 fi
 echo ""
 
@@ -127,7 +145,7 @@ check_python_env() {
 check_dependencies() {
     echo -e "${YELLOW}📦 Checking required packages...${NC}"
     
-    REQUIRED_PACKAGES=("opencv-python" "ultralytics" "easyocr" "fastapi" "uvicorn" "numpy" "requests")
+    REQUIRED_PACKAGES=("cv2" "ultralytics" "easyocr" "fastapi" "uvicorn" "numpy" "requests")
     MISSING_PACKAGES=()
     
     for package in "${REQUIRED_PACKAGES[@]}"; do
@@ -238,8 +256,8 @@ run_live_tracking() {
     echo -e "${YELLOW}💡 Press Ctrl+C to stop the server${NC}"
     echo ""
     
-    # Run the video inference script directly
-    python3 src/image_processor/video_inference.py \
+    # Run the local server script directly
+    python3 src/api_backend/local_server.py \
         --inference_mode live \
         --camera_index "$CAMERA_INDEX" \
         --model "$MODEL_PATH" \

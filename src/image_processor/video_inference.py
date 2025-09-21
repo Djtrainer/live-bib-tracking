@@ -280,7 +280,7 @@ class VideoInferenceProcessor:
                     }
                     try:
                         requests.post(
-                            "http://localhost:8000/api/results",
+                            "http://localhost:8001/api/results",
                             json=payload,
                             timeout=2,
                         )
@@ -854,17 +854,3 @@ class VideoInferenceProcessor:
             logger.info("No finishers recorded.")
 
         logger.info("🏁" * 30)
-
-
-# This module is now a reusable library.
-# The FastAPI server functionality has been moved to src/api_backend/local_server.py
-# To use this module, import the VideoInferenceProcessor class:
-#
-# from image_processor.video_inference import VideoInferenceProcessor
-#
-# processor = VideoInferenceProcessor(
-#     model_path="path/to/model.pt",
-#     video_path="path/to/video.mp4",  # or camera index for live mode
-#     target_fps=8,
-#     confidence_threshold=0.3
-# )

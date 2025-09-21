@@ -1,23 +1,24 @@
+import argparse
+import asyncio
+import json
 import os
 import sys
-import argparse
-import dotenv
-from pathlib import Path
 import time
 import traceback
-import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, HTMLResponse
-from typing import List, Dict, Any
-import json
+from pathlib import Path
+from typing import Any, Dict, List
+
+import dotenv
 import numpy as np
 import uvicorn
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
-from image_processor.video_inference import VideoInferenceProcessor
 from image_processor.utils import get_logger
+from image_processor.video_inference import VideoInferenceProcessor
 
 logger = get_logger()
 dotenv.load_dotenv()
@@ -47,7 +48,7 @@ async def lifespan(app: FastAPI):
             # Get configuration from environment variables
             video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
             model_path_str = os.getenv(
-                "MODEL_PATH", "/app/runs/detect/yolo11_new_data/weights/last.pt"
+                "MODEL_PATH", "/app/runs/detect/yolo11_white_bibs/weights/last.pt"
             )
             target_fps = int(os.getenv("TARGET_FPS", "8"))
             confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
@@ -564,14 +565,21 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # Mount the frontend dist directory to serve static files (index.html, etc.)
 # Use different paths for development vs production (Docker)
+static_dir = None
 if os.path.exists("../frontend/dist"):
     # Development mode - running from src/api_backend
     static_dir = "../frontend/dist"
-else:
+elif os.path.exists("frontend/dist"):
     # Production mode - running from Docker container
     static_dir = "frontend/dist"
 
-app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+# Only mount static files if the directory exists
+if static_dir and os.path.exists(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    logger.info(f"Mounted static files from: {static_dir}")
+else:
+    logger.warning("Frontend dist directory not found - static files will not be served")
+    logger.info("The server will still provide API endpoints and video streaming")
 
 
 def main():
@@ -610,7 +618,7 @@ def main():
     parser.add_argument(
         "--camera_index",
         type=int,
-        default=1,
+        default=0,
         help="The index of the camera to use for live mode (e.g., 0 for built-in, 1 for iPhone).",
     )
 

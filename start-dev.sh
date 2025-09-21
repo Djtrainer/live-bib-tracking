@@ -12,22 +12,58 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Default camera index (can be overridden)
+CAMERA_INDEX=${CAMERA_INDEX:-1}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -c|--camera)
+            CAMERA_INDEX="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  -c, --camera     Camera index (0=built-in, 1=external/iPhone)"
+            echo "  -h, --help       Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0               # Use external camera (default)"
+            echo "  $0 -c 0          # Use built-in camera"
+            echo "  $0 -c 1          # Use external camera/iPhone"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use -h or --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 echo -e "${BLUE}🚀 Live Bib Tracking - Hybrid Development Setup${NC}"
 echo "=============================================================="
 echo -e "${YELLOW}Frontend: Docker Container (port 5173)${NC}"
 echo -e "${YELLOW}Backend:  Native macOS (port 8001)${NC}"
+echo -e "${YELLOW}Camera:   Index $CAMERA_INDEX${NC}"
+if [[ "$CAMERA_INDEX" == "0" ]]; then
+    echo -e "${YELLOW}          (Built-in MacBook camera)${NC}"
+elif [[ "$CAMERA_INDEX" == "1" ]]; then
+    echo -e "${YELLOW}          (External camera/iPhone)${NC}"
+fi
 echo ""
 
-# Function to cleanup on exit
+# Function to cleanup manually (not automatic)
 cleanup() {
     echo -e "\n${YELLOW}🧹 Cleaning up...${NC}"
     echo -e "${BLUE}Stopping frontend container...${NC}"
-    docker-compose down
+    docker compose down
     echo -e "${GREEN}✅ Cleanup complete${NC}"
 }
 
-# Set trap to cleanup on script exit
-trap cleanup EXIT INT TERM
+# Note: No automatic cleanup trap - containers will remain running
 
 # Function to check if Docker is running
 check_docker() {
@@ -67,18 +103,18 @@ start_frontend() {
     echo -e "${BLUE}Building and starting frontend with Docker Compose...${NC}"
     
     # Build and start the frontend container in detached mode
-    docker-compose up -d --build
+    docker compose up -d --build
     
     # Wait a moment for the container to start
     sleep 3
     
     # Check if container is running
-    if docker-compose ps | grep -q "Up"; then
+    if docker compose ps | grep -q "Up"; then
         echo -e "${GREEN}✅ Frontend container started successfully${NC}"
         echo -e "${BLUE}🌐 Frontend available at: http://localhost:5173${NC}"
     else
         echo -e "${RED}❌ Failed to start frontend container${NC}"
-        docker-compose logs
+        docker compose logs
         exit 1
     fi
 }
@@ -86,7 +122,7 @@ start_frontend() {
 # Function to start backend natively
 start_backend() {
     echo -e "${YELLOW}🐍 Starting backend natively...${NC}"
-    echo -e "${BLUE}Running native backend script...${NC}"
+    echo -e "${BLUE}Running native backend script in background...${NC}"
     
     # Check if the native backend script exists
     if [[ ! -f "run_live_native.sh" ]]; then
@@ -97,13 +133,28 @@ start_backend() {
     # Make sure the script is executable
     chmod +x run_live_native.sh
     
-    # Run the native backend script
+    # Run the native backend script in background
     echo -e "${BLUE}🌐 Backend will be available at: http://localhost:8001${NC}"
-    echo -e "${YELLOW}💡 Press Ctrl+C to stop both frontend and backend${NC}"
+    echo -e "${YELLOW}💡 Backend will run in the background${NC}"
     echo ""
     
-    # Execute the backend script (this will block until stopped)
-    ./run_live_native.sh
+    # Execute the backend script with camera index in background
+    nohup ./run_live_native.sh -c "$CAMERA_INDEX" > backend.log 2>&1 &
+    
+    # Store the PID for reference
+    BACKEND_PID=$!
+    echo -e "${GREEN}✅ Backend started with PID: $BACKEND_PID${NC}"
+    
+    # Wait a moment to check if backend started successfully
+    sleep 3
+    
+    # Check if the process is still running
+    if kill -0 "$BACKEND_PID" 2>/dev/null; then
+        echo -e "${GREEN}✅ Backend is running successfully${NC}"
+    else
+        echo -e "${RED}❌ Backend failed to start. Check backend.log for details${NC}"
+        exit 1
+    fi
 }
 
 # Function to show status
@@ -134,5 +185,21 @@ echo ""
 
 show_status
 
-# Start backend (this will block)
+# Start backend (runs in background)
 start_backend
+
+# Final status and instructions
+echo ""
+echo -e "${GREEN}🎉 Both services are now running in the background!${NC}"
+echo ""
+echo -e "${BLUE}📱 Frontend:${NC} http://localhost:5173 (Docker container)"
+echo -e "${BLUE}🔧 Backend:${NC} http://localhost:8001 (Native process, PID: $BACKEND_PID)"
+echo ""
+echo -e "${YELLOW}📋 Management Commands:${NC}"
+echo -e "${BLUE}  Check frontend status:${NC} docker compose ps"
+echo -e "${BLUE}  Stop frontend:${NC} docker compose down"
+echo -e "${BLUE}  Check backend logs:${NC} tail -f backend.log"
+echo -e "${BLUE}  Stop backend:${NC} kill $BACKEND_PID"
+echo -e "${BLUE}  Stop both:${NC} docker compose down && kill $BACKEND_PID"
+echo ""
+echo -e "${YELLOW}💡 Backend logs are saved to: backend.log${NC}"

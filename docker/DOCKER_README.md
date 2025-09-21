@@ -45,7 +45,7 @@ docker run --rm live-bib-tracking
 ```bash
 docker run --rm \
   -v /Users/dantrainer/projects/live-bib-tracking/data:/app/data \
-  -v /Users/dantrainer/projects/live-bib-tracking/runs/detect/yolo11_new_data/weights:/app/models \
+  -v /Users/dantrainer/projects/live-bib-tracking/runs/detect/yolo11_white_bibs/weights:/app/models \
   live-bib-tracking \
   python src/image_processor/video_inference.py \
   --video /app/data/raw/2024_race.MOV \
