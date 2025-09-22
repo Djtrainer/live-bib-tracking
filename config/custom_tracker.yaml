@@ -1,13 +1,10 @@
-# custom_tracker.yaml
-# Complete and correct version. Please replace the entire file content with this.
-
 tracker_type: bytetrack
 
 # ByteTrack settings
 track_high_thresh: 0.3  # Lowered to help initiate tracks on less confident detections
 track_low_thresh: 0.1
 new_track_thresh: 0.4
-track_buffer: 60        # Increased to give the tracker more "memory"
+track_buffer: 90        # Increased to give the tracker more "memory"
 match_thresh: 0.8
 
 # CMC MOT Challenge settings

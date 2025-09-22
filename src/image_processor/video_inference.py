@@ -153,17 +153,7 @@ class VideoInferenceProcessor:
         self.original_fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        # self.frame_skip = max(1, int(self.original_fps / self.target_fps))
-        self.finish_line_x = int(self.frame_width * finish_line_fraction)
-
-        # Dynamic frame skip variables for conditional processing
-        self.base_frame_skip = 1  # Scan mode - low frame rate when scene is empty
-        self.focus_frame_skip = 1  # Focus mode - high frame rate when person detected
-        self.current_frame_skip = self.base_frame_skip  # Start in scan mode
-        self.detection_cooldown_frames = (
-            30  # Frames to stay in focus mode after detection
-        )
-        self.cooldown_counter = 0  # Timer to track cooldown
+        self.finish_zone_start_x = int(self.frame_width * finish_line_fraction)
 
         self.inference_interval = 1
         self.last_annotated_frame = None
@@ -247,30 +237,27 @@ class VideoInferenceProcessor:
         self, person_id: int, person_box, cap: cv2.VideoCapture
     ) -> None:
         """
-        Checks if a tracked racer has crossed the virtual finish line.
+        Checks if a tracked racer has entered the finish zone.
+        Records their time the first moment they enter the zone.
         """
         # Use the center of the bounding box as the racer's position
         x1, _, x2, _ = person_box.xyxy[0]
-        current_x_center = (x1 + x2) / 2
+        racer_position = (x1 + x2) / 2
 
         history = self.track_history.get(person_id)
-        # Proceed only if the racer is already being tracked and hasn't finished yet
-        if history and history["finish_time_ms"] is None:
-            last_x_center = history.get("last_x_center")
-
-            # Check if the racer crossed the line from left to right
-            if (
-                last_x_center is not None
-                and last_x_center < self.finish_line_x
-                and current_x_center >= self.finish_line_x
-            ):
-                # Racer crossed the line! Record both video timestamp and wall-clock time.
+        # Proceed only if the racer is being tracked and hasn't finished yet
+        if history and not history["has_finished"]:
+            # Check if the racer has entered the finish zone
+            if racer_position >= self.finish_zone_start_x:
+                # Racer entered the finish zone! Record both video timestamp and wall-clock time.
                 finish_time = cap.get(cv2.CAP_PROP_POS_MSEC)
                 finish_wall_time = time.time()  # Capture current wall-clock time
                 history["finish_time_ms"] = finish_time
                 history["finish_wall_time"] = finish_wall_time
+                history["has_finished"] = True  # Set flag to prevent recording again
+                
                 logger.info(
-                    f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
+                    f"Racer ID {person_id} entered finish zone at {finish_time / 1000:.2f}s"
                 )
 
                 # Get the final bib result for this racer
@@ -303,9 +290,6 @@ class VideoInferenceProcessor:
                             logger.error(f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}")
 
                 self.print_live_leaderboard()
-
-            # Update the last known position for the next frame
-            history["last_x_center"] = current_x_center
 
     def determine_final_bibs(self):
         """
@@ -530,17 +514,17 @@ class VideoInferenceProcessor:
 
             annotated_image = frame.copy()
 
-            # Draw finish line
+            # Draw finish zone line
             try:
                 cv2.line(
                     annotated_image,
-                    (self.finish_line_x, 0),
-                    (self.finish_line_x, self.frame_height),
+                    (self.finish_zone_start_x, 0),
+                    (self.finish_zone_start_x, self.frame_height),
                     (0, 255, 255),
                     3,
                 )
             except Exception as e:
-                logger.error(f"Error drawing finish line: {e}")
+                logger.error(f"Error drawing finish zone line: {e}")
 
             # Draw detection boxes and tracked persons
             if (
@@ -676,33 +660,6 @@ class VideoInferenceProcessor:
             )
             timings["YOLO_Unified_Track"] += time.time() - t0
 
-            # --- 1.5. Implement conditional processing logic based on person detection ---
-            person_detected = False
-            if (
-                results
-                and results[0].boxes is not None
-                and results[0].boxes.id is not None
-            ):
-                # Check if any persons (class 0) were detected
-                for box in results[0].boxes:
-                    if int(box.cls) == 0:  # Person class
-                        person_detected = True
-                        break
-
-            # Update frame skip based on detection results
-            if person_detected:
-                # Person detected: switch to focus mode (high frame rate)
-                self.current_frame_skip = self.focus_frame_skip
-                self.cooldown_counter = self.detection_cooldown_frames
-            else:
-                # No person detected: check cooldown
-                if self.cooldown_counter > 0:
-                    # Still in cooldown period, stay in focus mode
-                    self.cooldown_counter -= 1
-                else:
-                    # Cooldown expired, switch back to scan mode (low frame rate)
-                    self.current_frame_skip = self.base_frame_skip
-
             # --- 2. Associate Bibs and Perform Smart OCR ---
             if results and results[0].boxes.id is not None:
                 boxes = results[0].boxes
@@ -723,6 +680,7 @@ class VideoInferenceProcessor:
                             "finish_wall_time": None,
                             "final_bib": None,
                             "final_bib_confidence": 0.0,
+                            "has_finished": False,
                         }
 
                     history = self.track_history[person_id]
