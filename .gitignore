@@ -18,3 +18,4 @@ deployment_instructions.md
 data_lite.zip
 models.zip
 src/image_processor/direct_connect_phone.md
+*.log

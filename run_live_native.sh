@@ -197,6 +197,74 @@ check_model() {
     echo -e "${GREEN}✅ Model file found: $MODEL_PATH (${MODEL_SIZE_MB}MB)${NC}"
 }
 
+# Function to check video file
+check_video() {
+    echo -e "${YELLOW}🎬 Checking video file...${NC}"
+    
+    if [[ ! -f "$VIDEO_PATH" ]]; then
+        echo -e "${RED}❌ Video file not found: $VIDEO_PATH${NC}"
+        echo -e "${BLUE}💡 Make sure the video file exists and the path is correct${NC}"
+        exit 1
+    fi
+    
+    # Check file size
+    VIDEO_SIZE=$(stat -f%z "$VIDEO_PATH" 2>/dev/null || echo "0")
+    if [[ "$VIDEO_SIZE" -eq 0 ]]; then
+        echo -e "${RED}❌ Video file is empty: $VIDEO_PATH${NC}"
+        exit 1
+    fi
+    
+    VIDEO_SIZE_MB=$((VIDEO_SIZE / 1024 / 1024))
+    echo -e "${GREEN}✅ Video file found: $VIDEO_PATH (${VIDEO_SIZE_MB}MB)${NC}"
+    
+    # Test video file access with OpenCV
+    VIDEO_TEST=$(python3 -c "
+import cv2
+import sys
+
+try:
+    cap = cv2.VideoCapture('$VIDEO_PATH')
+    if cap.isOpened():
+        ret, frame = cap.read()
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        if ret and frame is not None:
+            print(f'SUCCESS:{frame_count}:{fps:.2f}')
+        else:
+            print('OPEN_BUT_NO_FRAME')
+    else:
+        print('CANNOT_OPEN')
+except Exception as e:
+    print(f'ERROR: {e}')
+" 2>/dev/null)
+
+    if [[ "$VIDEO_TEST" =~ ^SUCCESS:([0-9]+):([0-9.]+)$ ]]; then
+        FRAME_COUNT="${BASH_REMATCH[1]}"
+        VIDEO_FPS="${BASH_REMATCH[2]}"
+        DURATION=$(python3 -c "print(f'{int($FRAME_COUNT / $VIDEO_FPS // 60):02d}:{int($FRAME_COUNT / $VIDEO_FPS % 60):02d}')")
+        echo -e "${GREEN}✅ Video is readable: ${FRAME_COUNT} frames, ${VIDEO_FPS} FPS, ${DURATION} duration${NC}"
+    else
+        case "$VIDEO_TEST" in
+            "OPEN_BUT_NO_FRAME")
+                echo -e "${RED}❌ Video file opens but cannot read frames${NC}"
+                echo -e "${BLUE}💡 The video file may be corrupted or in an unsupported format${NC}"
+                exit 1
+                ;;
+            "CANNOT_OPEN")
+                echo -e "${RED}❌ Cannot open video file${NC}"
+                echo -e "${BLUE}💡 Check if the video format is supported by OpenCV${NC}"
+                exit 1
+                ;;
+            *)
+                echo -e "${RED}❌ Video test failed: $VIDEO_TEST${NC}"
+                echo -e "${BLUE}💡 The video file may be corrupted or in an unsupported format${NC}"
+                exit 1
+                ;;
+        esac
+    fi
+}
+
 # Function to check camera access
 check_camera() {
     echo -e "${YELLOW}📹 Checking camera access...${NC}"
@@ -246,25 +314,43 @@ except Exception as e:
     echo -e "${BLUE}   3. If using VS Code integrated terminal, grant VS Code camera access${NC}"
 }
 
-# Function to run the live tracking
-run_live_tracking() {
-    echo -e "${YELLOW}🚀 Starting live bib tracking...${NC}"
+# Function to run the processing
+run_processing() {
+    echo -e "${YELLOW}🚀 Starting bib tracking processing...${NC}"
     echo -e "${BLUE}🌐 Server will be available at: http://localhost:$PORT${NC}"
-    echo -e "${BLUE}📹 Using camera index: $CAMERA_INDEX${NC}"
     echo -e "${BLUE}🤖 Using model: $MODEL_PATH${NC}"
-    echo ""
-    echo -e "${YELLOW}💡 Press Ctrl+C to stop the server${NC}"
-    echo ""
     
-    # Run the local server script directly
-    python3 src/api_backend/local_server.py \
-        --inference_mode live \
-        --camera_index "$CAMERA_INDEX" \
-        --model "$MODEL_PATH" \
-        --host 0.0.0.0 \
-        --port "$PORT" \
-        --fps 20 \
-        --conf 0.3
+    if [[ -n "$VIDEO_PATH" ]]; then
+        echo -e "${BLUE}🎬 Processing video file: $VIDEO_PATH${NC}"
+        echo ""
+        echo -e "${YELLOW}💡 Press Ctrl+C to stop the server${NC}"
+        echo ""
+        
+        # Run with video file (test mode)
+        python3 src/api_backend/local_server.py \
+            --inference_mode test \
+            --video "$VIDEO_PATH" \
+            --model "$MODEL_PATH" \
+            --host 0.0.0.0 \
+            --port "$PORT" \
+            --fps 20 \
+            --conf 0.3
+    else
+        echo -e "${BLUE}📹 Using camera index: $CAMERA_INDEX${NC}"
+        echo ""
+        echo -e "${YELLOW}💡 Press Ctrl+C to stop the server${NC}"
+        echo ""
+        
+        # Run with live camera
+        python3 src/api_backend/local_server.py \
+            --inference_mode live \
+            --camera_index "$CAMERA_INDEX" \
+            --model "$MODEL_PATH" \
+            --host 0.0.0.0 \
+            --port "$PORT" \
+            --fps 20 \
+            --conf 0.3
+    fi
 }
 
 # Main execution
@@ -280,10 +366,15 @@ echo ""
 check_model
 echo ""
 
-check_camera
+# Check input source (video file or camera)
+if [[ -n "$VIDEO_PATH" ]]; then
+    check_video
+else
+    check_camera
+fi
 echo ""
 
 echo -e "${GREEN}✅ All checks passed!${NC}"
 echo ""
 
-run_live_tracking
+run_processing

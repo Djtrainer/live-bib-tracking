@@ -14,6 +14,7 @@ NC='\033[0m' # No Color
 
 # Default camera index (can be overridden)
 CAMERA_INDEX=${CAMERA_INDEX:-1}
+VIDEO_PATH=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -22,17 +23,23 @@ while [[ $# -gt 0 ]]; do
             CAMERA_INDEX="$2"
             shift 2
             ;;
+        -v|--video)
+            VIDEO_PATH="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  -c, --camera     Camera index (0=built-in, 1=external/iPhone)"
+            echo "  -v, --video      Path to video file for testing (overrides camera)"
             echo "  -h, --help       Show this help message"
             echo ""
             echo "Examples:"
             echo "  $0               # Use external camera (default)"
             echo "  $0 -c 0          # Use built-in camera"
             echo "  $0 -c 1          # Use external camera/iPhone"
+            echo "  $0 -v test_race.mp4  # Process video file"
             exit 0
             ;;
         *)
@@ -47,11 +54,17 @@ echo -e "${BLUE}🚀 Live Bib Tracking - Hybrid Development Setup${NC}"
 echo "=============================================================="
 echo -e "${YELLOW}Frontend: Docker Container (port 5173)${NC}"
 echo -e "${YELLOW}Backend:  Native macOS (port 8001)${NC}"
-echo -e "${YELLOW}Camera:   Index $CAMERA_INDEX${NC}"
-if [[ "$CAMERA_INDEX" == "0" ]]; then
-    echo -e "${YELLOW}          (Built-in MacBook camera)${NC}"
-elif [[ "$CAMERA_INDEX" == "1" ]]; then
-    echo -e "${YELLOW}          (External camera/iPhone)${NC}"
+
+if [[ -n "$VIDEO_PATH" ]]; then
+    echo -e "${YELLOW}Input:    Video file${NC}"
+    echo -e "${YELLOW}          $VIDEO_PATH${NC}"
+else
+    echo -e "${YELLOW}Input:    Live camera (Index $CAMERA_INDEX)${NC}"
+    if [[ "$CAMERA_INDEX" == "0" ]]; then
+        echo -e "${YELLOW}          (Built-in MacBook camera)${NC}"
+    elif [[ "$CAMERA_INDEX" == "1" ]]; then
+        echo -e "${YELLOW}          (External camera/iPhone)${NC}"
+    fi
 fi
 echo ""
 
@@ -138,8 +151,12 @@ start_backend() {
     echo -e "${YELLOW}💡 Backend will run in the background${NC}"
     echo ""
     
-    # Execute the backend script with camera index in background
-    nohup ./run_live_native.sh -c "$CAMERA_INDEX" > backend.log 2>&1 &
+    # Execute the backend script with appropriate arguments in background
+    if [[ -n "$VIDEO_PATH" ]]; then
+        nohup ./run_live_native.sh -v "$VIDEO_PATH" > backend.log 2>&1 &
+    else
+        nohup ./run_live_native.sh -c "$CAMERA_INDEX" > backend.log 2>&1 &
+    fi
     
     # Store the PID for reference
     BACKEND_PID=$!

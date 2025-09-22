@@ -38,6 +38,7 @@ class VideoInferenceProcessor:
         target_fps: int = 1,
         confidence_threshold: float = 0,
         finish_line_fraction: float = 0.85,
+        result_callback=None,
     ):
         """
         Initializes the VideoInferenceProcessor for live bib tracking.
@@ -172,6 +173,9 @@ class VideoInferenceProcessor:
 
         # Initialize timing tracking
         self.timings = defaultdict(float)
+        
+        # Callback function for when racers finish
+        self.result_callback = result_callback
 
     def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
         """
@@ -269,28 +273,27 @@ class VideoInferenceProcessor:
                     f"Racer ID {person_id} finished at {finish_time / 1000:.2f}s"
                 )
 
-                # Send result to local server
+                # Get the final bib result for this racer
                 final_bib_results = self.determine_final_bibs()
                 bib_result = final_bib_results.get(person_id)
 
                 if bib_result:
-                    payload = {
-                        "bibNumber": bib_result["final_bib"],
-                        "finishTime": finish_time,
-                    }
-                    try:
-                        requests.post(
-                            "http://localhost:8001/api/results",
-                            json=payload,
-                            timeout=2,
-                        )
-                        logger.info(
-                            f"Sent finisher data to local UI: Bib #{payload['bibNumber']}"
-                        )
-                    except requests.exceptions.ConnectionError:
-                        logger.warning(
-                            "Could not connect to local UI server. Is it running?"
-                        )
+                    logger.info(
+                        f"Racer finished: Bib #{bib_result['final_bib']} at {finish_time/1000:.2f}s"
+                    )
+                    
+                    # Call the callback function to notify the server
+                    if self.result_callback:
+                        try:
+                            payload = {
+                                "bibNumber": bib_result['final_bib'],
+                                "finishTime": finish_time,
+                                "racerName": f"Racer {person_id}"
+                            }
+                            self.result_callback(payload)
+                            logger.info(f"Sent finisher data via callback: Bib #{payload['bibNumber']}")
+                        except Exception as e:
+                            logger.error(f"Error calling result callback: {e}")
 
                 self.print_live_leaderboard()
 

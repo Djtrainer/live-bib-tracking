@@ -723,11 +723,39 @@ def main():
         logger.info(f"Target FPS: {args.fps}")
         logger.info(f"Confidence threshold: {args.conf}")
 
+        # Define callback function to handle race results
+        def result_callback(finisher_data):
+            """Callback function called when a racer finishes"""
+            try:
+                # Add a unique ID for admin UI purposes
+                finisher_data["id"] = str(finisher_data["bibNumber"])
+                
+                # Add to race results
+                race_results.append(finisher_data)
+                
+                # Schedule the WebSocket broadcast to run in the event loop
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Create a task to broadcast the message
+                        asyncio.create_task(
+                            manager.broadcast(json.dumps({"type": "add", "data": finisher_data}))
+                        )
+                except RuntimeError:
+                    # If no event loop is running, we can't broadcast
+                    logger.warning("No event loop available for WebSocket broadcast")
+                
+                logger.info(f"Added finisher via callback: Bib #{finisher_data['bibNumber']}")
+            except Exception as e:
+                logger.error(f"Error in result callback: {e}")
+
         processor = VideoInferenceProcessor(
             model_path=args.model,
             video_path=video_source,
             target_fps=args.fps,
             confidence_threshold=args.conf,
+            result_callback=result_callback,
         )
 
         # Store processor in app state for the web endpoints
