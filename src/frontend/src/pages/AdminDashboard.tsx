@@ -8,10 +8,12 @@ import { formatTime } from '../lib/utils';
 
 interface Finisher {
   id: string;
-  rank: number;
+  rank: number | null;
   bibNumber: string;
   racerName: string;
-  finishTime: number;
+  finishTime: number | null;
+  gender?: string;
+  team?: string;
   isEditing?: boolean;
 }
 
@@ -19,8 +21,16 @@ export default function AdminDashboard() {
   const [finishers, setFinishers] = useState<Finisher[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [newFinisher, setNewFinisher] = useState({ bibNumber: '', racerName: '', finishTime: '' });
+  const [newFinisher, setNewFinisher] = useState({ 
+    bibNumber: '', 
+    racerName: '', 
+    finishTime: '', 
+    gender: '', 
+    team: '' 
+  });
   const [showAddForm, setShowAddForm] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string>('');
+  const [isUploading, setIsUploading] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -112,18 +122,27 @@ export default function AdminDashboard() {
 
   const handleAddFinisher = async () => {
     if (!newFinisher.bibNumber || !newFinisher.racerName || !newFinisher.finishTime) {
-      alert('Please fill in all fields');
+      alert('Please fill in all required fields');
       return;
     }
 
     try {
-      const newRank = finishers.length > 0 ? Math.max(...finishers.map(f => f.rank)) + 1 : 1;
-      const finisher = {
+      const rankedFinishers = finishers.filter(f => f.rank !== null);
+      const newRank = rankedFinishers.length > 0 ? Math.max(...rankedFinishers.map(f => f.rank!)) + 1 : 1;
+      const finisher: any = {
         bibNumber: newFinisher.bibNumber,
         racerName: newFinisher.racerName,
         finishTime: newFinisher.finishTime,
         rank: newRank,
       };
+
+      // Add optional fields if provided
+      if (newFinisher.gender && newFinisher.gender.trim()) {
+        finisher.gender = newFinisher.gender.trim();
+      }
+      if (newFinisher.team && newFinisher.team.trim()) {
+        finisher.team = newFinisher.team.trim();
+      }
 
       const response = await fetch('/api/results', {
         method: 'POST',
@@ -137,7 +156,13 @@ export default function AdminDashboard() {
       
       if (result.success) {
         setFinishers(prev => [...prev, result.data]);
-        setNewFinisher({ bibNumber: '', racerName: '', finishTime: '' });
+        setNewFinisher({ 
+          bibNumber: '', 
+          racerName: '', 
+          finishTime: '', 
+          gender: '', 
+          team: '' 
+        });
         setShowAddForm(false);
       } else {
         console.error('Failed to add finisher:', result);
@@ -146,6 +171,105 @@ export default function AdminDashboard() {
     } catch (error) {
       console.error('Error adding finisher:', error);
       alert('Error adding finisher. Please try again.');
+    }
+  };
+
+  const handleDownloadCSV = () => {
+    // Create CSV headers
+    const headers = 'Rank,Bib Number,Racer Name,Finish Time\n';
+    
+    // Convert finishers data to CSV rows
+    const csvRows = finishers.map(finisher => {
+      const formattedTime = typeof finisher.finishTime === 'number' 
+        ? formatTime(finisher.finishTime) 
+        : finisher.finishTime;
+      
+      return `${finisher.rank},"${finisher.bibNumber}","${finisher.racerName}","${formattedTime}"`;
+    }).join('\n');
+    
+    // Combine headers and data
+    const csvContent = headers + csvRows;
+    
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    
+    // Create filename with current date
+    const today = new Date();
+    const dateString = today.getFullYear() + '-' + 
+      String(today.getMonth() + 1).padStart(2, '0') + '-' + 
+      String(today.getDate()).padStart(2, '0');
+    const filename = `race_results_${dateString}.csv`;
+    
+    // Set up download link
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.style.display = 'none';
+    
+    // Trigger download
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Clean up the URL object
+    URL.revokeObjectURL(link.href);
+  };
+
+  const handleRosterUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.endsWith('.csv')) {
+      alert('Please select a CSV file');
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadStatus('');
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch('/api/roster/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        let statusMessage = `✅ ${result.message}`;
+        
+        if (result.uploaded_count > 0) {
+          statusMessage += `\n📝 ${result.uploaded_count} new racers added`;
+        }
+        if (result.updated_count > 0) {
+          statusMessage += `\n🔄 ${result.updated_count} existing racers updated`;
+        }
+        
+        if (result.errors && result.errors.length > 0) {
+          statusMessage += `\n\n⚠️ ${result.errors.length} errors occurred:\n${result.errors.join('\n')}`;
+        }
+        
+        setUploadStatus(statusMessage);
+        
+        // Refresh the finishers list
+        const refreshResponse = await fetch('/api/results');
+        const refreshResult = await refreshResponse.json();
+        if (refreshResult.success && refreshResult.data) {
+          setFinishers(refreshResult.data);
+        }
+      } else {
+        setUploadStatus(`❌ Upload failed: ${result.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error uploading roster:', error);
+      setUploadStatus(`❌ Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsUploading(false);
+      // Clear the file input
+      event.target.value = '';
     }
   };
 
@@ -210,12 +334,14 @@ export default function AdminDashboard() {
           {isEditing ? (
             <input
               type="text"
-              defaultValue={typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : finisher.finishTime}
+              defaultValue={typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : (finisher.finishTime || '')}
               className="form-input w-24 text-center"
               onBlur={(e) => handleSave(finisher.id, { finishTime: e.target.value })}
             />
           ) : (
-            typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : finisher.finishTime
+            finisher.finishTime ? 
+              (typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : finisher.finishTime) :
+              <span className="text-muted-foreground">Not finished</span>
           )}
         </td>
         <td 
@@ -285,6 +411,46 @@ export default function AdminDashboard() {
           />
         </div>
 
+        {/* Roster Management */}
+        <div className="bg-card border border-border rounded-lg p-6 mb-6">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="material-icon text-primary">upload_file</span>
+            <h2 className="text-xl font-semibold">Roster Management</h2>
+          </div>
+          <p className="text-muted-foreground mb-4">
+            Upload a CSV file to pre-register all race participants. The CSV should contain headers: bibNumber, racerName, gender (optional), team (optional).
+          </p>
+          
+          <div className="flex items-center gap-4 mb-4">
+            <div className="flex-1">
+              <input
+                type="file"
+                accept=".csv"
+                onChange={handleRosterUpload}
+                disabled={isUploading}
+                className="form-input"
+                id="roster-upload"
+              />
+            </div>
+            <button
+              onClick={() => document.getElementById('roster-upload')?.click()}
+              disabled={isUploading}
+              className="btn-primary"
+            >
+              <span className="material-icon">
+                {isUploading ? 'hourglass_empty' : 'upload'}
+              </span>
+              {isUploading ? 'Uploading...' : 'Upload Roster'}
+            </button>
+          </div>
+
+          {uploadStatus && (
+            <div className="bg-muted/50 border border-border rounded-lg p-4">
+              <pre className="text-sm whitespace-pre-wrap">{uploadStatus}</pre>
+            </div>
+          )}
+        </div>
+
         {/* Actions */}
         <div className="flex items-center gap-4 mb-6">
           <button
@@ -294,15 +460,22 @@ export default function AdminDashboard() {
             <span className="material-icon">add</span>
             Add Finisher
           </button>
+          <button
+            onClick={handleDownloadCSV}
+            className="btn-primary"
+          >
+            <span className="material-icon">download</span>
+            Download CSV
+          </button>
         </div>
 
         {/* Add Form */}
         {showAddForm && (
           <div className="bg-card border border-border rounded-lg p-6 mb-6">
             <h3 className="text-lg font-semibold mb-4">Add New Finisher</h3>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-4">
               <div>
-                <label className="block text-sm font-medium mb-2">Bib Number</label>
+                <label className="block text-sm font-medium mb-2">Bib Number *</label>
                 <input
                   type="text"
                   value={newFinisher.bibNumber}
@@ -312,7 +485,7 @@ export default function AdminDashboard() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-2">Racer Name</label>
+                <label className="block text-sm font-medium mb-2">Racer Name *</label>
                 <input
                   type="text"
                   value={newFinisher.racerName}
@@ -322,13 +495,35 @@ export default function AdminDashboard() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-2">Finish Time</label>
+                <label className="block text-sm font-medium mb-2">Finish Time *</label>
                 <input
                   type="text"
                   value={newFinisher.finishTime}
                   onChange={(e) => setNewFinisher(prev => ({ ...prev, finishTime: e.target.value }))}
                   className="form-input"
                   placeholder="e.g., 2:30:45"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Gender</label>
+                <select
+                  value={newFinisher.gender}
+                  onChange={(e) => setNewFinisher(prev => ({ ...prev, gender: e.target.value }))}
+                  className="form-input"
+                >
+                  <option value="">Select...</option>
+                  <option value="M">Male</option>
+                  <option value="W">Female</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium mb-2">Team</label>
+                <input
+                  type="text"
+                  value={newFinisher.team}
+                  onChange={(e) => setNewFinisher(prev => ({ ...prev, team: e.target.value }))}
+                  className="form-input"
+                  placeholder="e.g., Team Phoenix"
                 />
               </div>
               <div className="flex items-end gap-2">
@@ -342,6 +537,7 @@ export default function AdminDashboard() {
                 </button>
               </div>
             </div>
+            <p className="text-sm text-muted-foreground">* Required fields</p>
           </div>
         )}
 

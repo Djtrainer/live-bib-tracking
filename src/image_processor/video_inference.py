@@ -290,10 +290,17 @@ class VideoInferenceProcessor:
                                 "finishTime": finish_time,
                                 "racerName": f"Racer {person_id}"
                             }
+                            logger.info(f"🔍 DEBUG: About to send finisher data via callback")
+                            logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
+                            logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
+                            logger.info(f"🔍 DEBUG: Finish Time: {payload['finishTime']} ms")
+                            logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
+                            
                             self.result_callback(payload)
-                            logger.info(f"Sent finisher data via callback: Bib #{payload['bibNumber']}")
+                            logger.info(f"✅ DEBUG: Successfully sent finisher data via callback: Bib #{payload['bibNumber']}")
                         except Exception as e:
-                            logger.error(f"Error calling result callback: {e}")
+                            logger.error(f"❌ DEBUG: Error calling result callback: {e}")
+                            logger.error(f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}")
 
                 self.print_live_leaderboard()
 
