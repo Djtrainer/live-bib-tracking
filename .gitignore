@@ -12,3 +12,10 @@ src/extract_images.py
 notebooks/*
 README_video*
 .env
+ec2_instructions.md
+deployment_instructions.md
+*.pem
+data_lite.zip
+models.zip
+src/image_processor/direct_connect_phone.md
+*.log

@@ -1,0 +1,114 @@
+# Git and version control
+.git
+.gitignore
+.gitattributes
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Documentation and README files
+README*.md
+*.md
+docs/
+*.txt
+!requirements.txt
+
+# Data and model files (typically large)
+data/
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.avi
+*.mov
+*.MOV
+*.pt
+*.pth
+*.onnx
+*.h5
+*.pkl
+*.pickle
+
+# Training and experiment outputs
+runs/
+logs/
+wandb/
+mlruns/
+.wandb/
+
+# Jupyter notebooks
+notebooks/
+*.ipynb
+.ipynb_checkpoints/
+
+# Test files
+tests/
+test_*.py
+*_test.py
+
+# Configuration files that shouldn't be in container
+.env
+*.pem
+*.key
+*.crt
+*.p12
+
+# Deployment and infrastructure files
+deployment_instructions.md
+ec2_instructions.md
+docker-compose*.yml
+kubernetes/
+helm/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Local development files
+.local/
+.cache/
