@@ -14,13 +14,17 @@ interface Finisher {
   finishTime: number | null;
   gender?: string;
   team?: string;
-  isEditing?: boolean;
+}
+
+interface EditingCell {
+  id: string;
+  field: 'bibNumber' | 'racerName' | 'finishTime';
 }
 
 export default function AdminDashboard() {
   const [finishers, setFinishers] = useState<Finisher[]>([]);
   const [loading, setLoading] = useState(true);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
   const [newFinisher, setNewFinisher] = useState({ 
     bibNumber: '', 
     racerName: '', 
@@ -62,32 +66,33 @@ export default function AdminDashboard() {
     fetchFinishers();
   }, [navigate]);
 
-  const handleEdit = (id: string) => {
-    setEditingId(id);
+  const handleCellDoubleClick = (id: string, field: 'bibNumber' | 'racerName' | 'finishTime') => {
+    setEditingCell({ id, field });
   };
 
-  const handleSave = async (id: string, updatedData: Partial<Finisher>) => {
+  const handleCellSave = async (id: string, field: string, value: string) => {
     try {
       const finisher = finishers.find(f => f.id === id);
       if (!finisher) return;
 
-      const updatedFinisher = { ...finisher, ...updatedData };
-      
+      // Prepare the update data
+      const updateData: any = {};
+      updateData[field] = value;
+
       const response = await fetch(`/api/results/${id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(updatedFinisher),
+        body: JSON.stringify(updateData),
       });
 
       const result = await response.json();
       
       if (result.success) {
-        // Instead of just updating local state, refresh all data from backend
-        // This ensures we get the merged roster data if bib number was changed
+        // Refresh all data from backend to get merged roster data if bib number was changed
         await fetchFinishers();
-        setEditingId(null);
+        setEditingCell(null);
       } else {
         console.error('Failed to update finisher:', result);
         alert('Failed to update finisher. Please try again.');
@@ -96,6 +101,16 @@ export default function AdminDashboard() {
       console.error('Error updating finisher:', error);
       alert('Error updating finisher. Please try again.');
     }
+  };
+
+  const handleCellKeyPress = (e: React.KeyboardEvent, id: string, field: string, value: string) => {
+    if (e.key === 'Enter') {
+      handleCellSave(id, field, value);
+    }
+  };
+
+  const handleCellBlur = (id: string, field: string, value: string) => {
+    handleCellSave(id, field, value);
   };
 
   const handleDelete = async (id: string) => {
@@ -287,7 +302,9 @@ export default function AdminDashboard() {
   ];
 
   const renderRow = (finisher: Finisher, index: number, columns: any[]) => {
-    const isEditing = editingId === finisher.id;
+    const isEditingBib = editingCell?.id === finisher.id && editingCell?.field === 'bibNumber';
+    const isEditingName = editingCell?.id === finisher.id && editingCell?.field === 'racerName';
+    const isEditingTime = editingCell?.id === finisher.id && editingCell?.field === 'finishTime';
     
     return (
       <tr key={finisher.id}>
@@ -298,45 +315,57 @@ export default function AdminDashboard() {
           {finisher.rank}
         </td>
         <td 
-          className={`text-${columns[1].align} font-mono font-medium`}
+          className={`text-${columns[1].align} font-mono font-medium cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[1].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'bibNumber')}
+          title="Double-click to edit"
         >
-          {isEditing ? (
+          {isEditingBib ? (
             <input
               type="text"
               defaultValue={finisher.bibNumber}
               className="form-input w-20 text-center"
-              onBlur={(e) => handleSave(finisher.id, { bibNumber: e.target.value })}
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'bibNumber', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'bibNumber', e.target.value)}
             />
           ) : (
             finisher.bibNumber
           )}
         </td>
         <td 
-          className={`text-${columns[2].align} font-mono font-medium`}
+          className={`text-${columns[2].align} font-mono font-medium cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[2].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'racerName')}
+          title="Double-click to edit"
         >
-          {isEditing ? (
+          {isEditingName ? (
             <input
               type="text"
               defaultValue={finisher.racerName}
               className="form-input w-full"
-              onBlur={(e) => handleSave(finisher.id, { racerName: e.target.value })}
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'racerName', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'racerName', e.target.value)}
             />
           ) : (
             finisher.racerName
           )}
         </td>
         <td 
-          className={`text-${columns[3].align} font-mono`}
+          className={`text-${columns[3].align} font-mono cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[3].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'finishTime')}
+          title="Double-click to edit"
         >
-          {isEditing ? (
+          {isEditingTime ? (
             <input
               type="text"
               defaultValue={typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : (finisher.finishTime || '')}
               className="form-input w-24 text-center"
-              onBlur={(e) => handleSave(finisher.id, { finishTime: e.target.value })}
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'finishTime', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'finishTime', e.target.value)}
             />
           ) : (
             finisher.finishTime ? 
@@ -349,20 +378,6 @@ export default function AdminDashboard() {
           style={{ width: columns[4].width }}
         >
           <div className="flex items-center justify-center gap-1">
-            {isEditing ? (
-              <IconButton
-                icon="check"
-                onClick={() => setEditingId(null)}
-                title="Save changes"
-                variant="success"
-              />
-            ) : (
-              <IconButton
-                icon="edit"
-                onClick={() => handleEdit(finisher.id)}
-                title="Edit entry"
-              />
-            )}
             <IconButton
               icon="delete"
               onClick={() => handleDelete(finisher.id)}
@@ -409,46 +424,6 @@ export default function AdminDashboard() {
             value={new Date().toLocaleTimeString()} 
             icon="schedule"
           />
-        </div>
-
-        {/* Roster Management */}
-        <div className="bg-card border border-border rounded-lg p-6 mb-6">
-          <div className="flex items-center gap-2 mb-4">
-            <span className="material-icon text-primary">upload_file</span>
-            <h2 className="text-xl font-semibold">Roster Management</h2>
-          </div>
-          <p className="text-muted-foreground mb-4">
-            Upload a CSV file to pre-register all race participants. The CSV should contain headers: bibNumber, racerName, gender (optional), team (optional).
-          </p>
-          
-          <div className="flex items-center gap-4 mb-4">
-            <div className="flex-1">
-              <input
-                type="file"
-                accept=".csv"
-                onChange={handleRosterUpload}
-                disabled={isUploading}
-                className="form-input"
-                id="roster-upload"
-              />
-            </div>
-            <button
-              onClick={() => document.getElementById('roster-upload')?.click()}
-              disabled={isUploading}
-              className="btn-primary"
-            >
-              <span className="material-icon">
-                {isUploading ? 'hourglass_empty' : 'upload'}
-              </span>
-              {isUploading ? 'Uploading...' : 'Upload Roster'}
-            </button>
-          </div>
-
-          {uploadStatus && (
-            <div className="bg-muted/50 border border-border rounded-lg p-4">
-              <pre className="text-sm whitespace-pre-wrap">{uploadStatus}</pre>
-            </div>
-          )}
         </div>
 
         {/* Actions */}
@@ -542,7 +517,7 @@ export default function AdminDashboard() {
         )}
 
         {/* Results Table */}
-        <div className="bg-card rounded-lg border border-border p-6">
+        <div className="bg-card rounded-lg border border-border p-6 mb-6">
           <div className="flex items-center gap-2 mb-6">
             <span className="material-icon text-primary">manage_accounts</span>
             <h2 className="text-xl font-semibold">Manage Results</h2>
@@ -554,6 +529,46 @@ export default function AdminDashboard() {
             renderRow={renderRow}
             emptyMessage="No finishers added yet. Add the first finisher to get started."
           />
+        </div>
+
+        {/* Roster Management */}
+        <div className="bg-card border border-border rounded-lg p-6 mb-6">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="material-icon text-primary">upload_file</span>
+            <h2 className="text-xl font-semibold">Roster Management</h2>
+          </div>
+          <p className="text-muted-foreground mb-4">
+            Upload a CSV file to pre-register all race participants. The CSV should contain headers: bibNumber, racerName, gender (optional), team (optional).
+          </p>
+          
+          <div className="flex items-center gap-4 mb-4">
+            <div className="flex-1">
+              <input
+                type="file"
+                accept=".csv"
+                onChange={handleRosterUpload}
+                disabled={isUploading}
+                className="form-input"
+                id="roster-upload"
+              />
+            </div>
+            <button
+              onClick={() => document.getElementById('roster-upload')?.click()}
+              disabled={isUploading}
+              className="btn-primary"
+            >
+              <span className="material-icon">
+                {isUploading ? 'hourglass_empty' : 'upload'}
+              </span>
+              {isUploading ? 'Uploading...' : 'Upload Roster'}
+            </button>
+          </div>
+
+          {uploadStatus && (
+            <div className="bg-muted/50 border border-border rounded-lg p-4">
+              <pre className="text-sm whitespace-pre-wrap">{uploadStatus}</pre>
+            </div>
+          )}
         </div>
       </div>
     </Layout>

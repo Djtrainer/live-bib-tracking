@@ -282,6 +282,20 @@ const Index = () => {
           />
         </div>
 
+        {/* Category Leaderboards */}
+        <div className="mb-8">
+          <div className="flex items-center gap-2 mb-6">
+            <span className="material-icon text-primary">emoji_events</span>
+            <h2 className="text-xl font-semibold">Category Leaders</h2>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {renderCategoryCard("Top 3 Men", "male", topMen, 'individual')}
+            {renderCategoryCard("Top 3 Women", "female", topWomen, 'individual')}
+            {renderCategoryCard("Top 3 Teams", "groups", topTeams, 'team')}
+          </div>
+        </div>
+
         {/* Results Table */}
         <div className="bg-card rounded-lg border border-border p-6 mb-8">
           <div className="flex items-center gap-2 mb-6">
@@ -295,20 +309,6 @@ const Index = () => {
             renderRow={renderRow}
             emptyMessage="No finishers yet. Results will appear as runners cross the finish line."
           />
-        </div>
-
-        {/* Category Leaderboards */}
-        <div className="mb-8">
-          <div className="flex items-center gap-2 mb-6">
-            <span className="material-icon text-primary">emoji_events</span>
-            <h2 className="text-xl font-semibold">Category Leaders</h2>
-          </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {renderCategoryCard("Top 3 Men", "male", topMen, 'individual')}
-            {renderCategoryCard("Top 3 Women", "female", topWomen, 'individual')}
-            {renderCategoryCard("Top 3 Teams", "groups", topTeams, 'team')}
-          </div>
         </div>
 
         {/* Footer */}

@@ -145,6 +145,11 @@ manager = ConnectionManager()
 # This will store the results while the server is running
 race_results: List[Dict[str, Any]] = []
 
+# --- Original Roster Data (Source of Truth) ---
+# This stores the original, immutable roster data uploaded via CSV
+# This should NEVER be modified after upload - it's our source of truth for lookups
+original_roster: Dict[str, Dict[str, Any]] = {}  # Key: bibNumber, Value: racer data
+
 # --- FastAPI App ---
 app = FastAPI(lifespan=lifespan, title="Live Bib Tracking - Unified Server")
 
@@ -509,6 +514,23 @@ async def upload_roster(file: UploadFile = File(...)):
         race_results.clear()
         race_results.extend(existing_data.values())
         
+        # CRITICAL: Update the original_roster dictionary (source of truth)
+        # This preserves the original roster data for future lookups
+        original_roster.clear()
+        for racer in existing_data.values():
+            # Only store racers who haven't finished yet as original roster entries
+            # This preserves the original roster data for bib number lookups
+            if racer.get("finishTime") is None:
+                original_roster[racer["bibNumber"]] = {
+                    "bibNumber": racer["bibNumber"],
+                    "racerName": racer["racerName"],
+                    "gender": racer.get("gender"),
+                    "team": racer.get("team"),
+                }
+        
+        logger.info(f"🔍 DEBUG: Updated original_roster with {len(original_roster)} entries")
+        logger.info(f"🔍 DEBUG: Original roster bib numbers: {list(original_roster.keys())}")
+        
         # Sort the results to maintain proper order (finished racers first, then by bib number)
         def sort_key(x):
             # First sort by whether they've finished (finished racers first)
@@ -688,9 +710,10 @@ async def update_finish_time(finish_data: Dict[str, Any]):
 
 @app.put("/api/results/{finisher_id}")
 async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
-    """Endpoint to update an existing finisher."""
+    """Endpoint to update an existing finisher with immutable roster lookup."""
     logger.info(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
     logger.info(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
+    logger.info(f"🔍 DEBUG: Original roster has {len(original_roster)} entries: {list(original_roster.keys())}")
 
     if "finishTime" in finisher_data and isinstance(finisher_data["finishTime"], str):
         time_ms = time_string_to_milliseconds(finisher_data["finishTime"])
@@ -719,77 +742,79 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
             
             # Check if bibNumber has been changed
             original_bib = finisher.get("bibNumber", "")
-            new_bib = finisher_data.get("bibNumber", "")
+            new_bib = finisher_data.get("bibNumber", original_bib)  # Use original if not provided
+            bib_changed = new_bib != original_bib
             
-            logger.info(f"🔍 DEBUG: Original bib: '{original_bib}', New bib: '{new_bib}'")
+            logger.info(f"🔍 DEBUG: Original bib: '{original_bib}', New bib: '{new_bib}', Changed: {bib_changed}")
             
-            if new_bib and new_bib != original_bib:
-                logger.info(f"🔍 DEBUG: Bib number changed from '{original_bib}' to '{new_bib}' - performing roster lookup")
+            # CRITICAL FIX: Use immutable original_roster for lookup instead of race_results
+            roster_racer = None
+            if new_bib in original_roster:
+                # Found in original roster - this is our source of truth!
+                roster_racer = original_roster[new_bib].copy()  # Make a copy to avoid mutation
+                logger.info(f"✅ DEBUG: Found in original_roster for bib #{new_bib}: {roster_racer}")
+            else:
+                logger.info(f"🔍 DEBUG: Bib #{new_bib} not found in original_roster")
+            
+            if roster_racer:
+                # Create new finisher object by merging roster data with existing finish data
+                merged_data = {
+                    "id": finisher_id,  # Keep the original ID
+                    "bibNumber": new_bib,
+                    "racerName": roster_racer.get("racerName", f"Racer #{new_bib}"),
+                    "finishTime": finisher.get("finishTime"),  # Preserve original finish time
+                    "rank": finisher.get("rank"),  # Preserve original rank
+                }
                 
-                # Look up the new bib number in the roster to get full racer information
-                roster_racer = None
-                for racer in race_results:
-                    if racer["bibNumber"] == new_bib and racer.get("finishTime") is None:
-                        # Found a pre-registered racer with this bib number who hasn't finished yet
-                        roster_racer = racer
-                        logger.info(f"✅ DEBUG: Found roster entry for bib #{new_bib}: {roster_racer}")
-                        break
+                # Add optional fields from roster if available
+                if "gender" in roster_racer and roster_racer["gender"]:
+                    merged_data["gender"] = roster_racer["gender"]
+                if "team" in roster_racer and roster_racer["team"]:
+                    merged_data["team"] = roster_racer["team"]
                 
-                if roster_racer:
-                    # Merge roster data with the existing finish time and rank
-                    merged_data = {
-                        "id": finisher_id,  # Keep the original ID
-                        "bibNumber": new_bib,
-                        "racerName": roster_racer.get("racerName", finisher_data.get("racerName", f"Racer #{new_bib}")),
-                        "finishTime": finisher.get("finishTime"),  # Preserve original finish time
-                        "rank": finisher.get("rank"),  # Preserve original rank
-                    }
-                    
-                    # Add optional fields from roster if available
-                    if "gender" in roster_racer:
-                        merged_data["gender"] = roster_racer["gender"]
-                    if "team" in roster_racer:
-                        merged_data["team"] = roster_racer["team"]
-                    
-                    # Override with any explicitly provided data from the update request
-                    for key, value in finisher_data.items():
-                        if key not in ["id"] and value is not None:
+                # Override with any explicitly provided data from the update request
+                # But prioritize roster data for name unless explicitly overridden
+                for key, value in finisher_data.items():
+                    if key not in ["id"] and value is not None:
+                        if key == "racerName" and value.strip():
+                            # Only override racerName if explicitly provided and not empty
                             merged_data[key] = value
-                    
-                    logger.info(f"🔍 DEBUG: Merged data: {merged_data}")
-                    
-                    # Update the finisher with merged data
-                    race_results[i] = merged_data
-                    
-                    # Remove the original roster entry to avoid duplicates
-                    race_results = [r for r in race_results if not (r["bibNumber"] == new_bib and r.get("finishTime") is None)]
-                    
-                    # Update the global race_results
-                    globals()['race_results'] = race_results
-                    
-                    logger.info(f"✅ DEBUG: Successfully merged roster data for bib #{new_bib}")
-                    
-                    # Broadcast the update to all connected WebSocket clients
-                    await manager.broadcast(
-                        json.dumps({"type": "update", "data": merged_data})
-                    )
-                    
-                    return {"success": True, "data": merged_data}
+                        elif key != "racerName":
+                            # For other fields, use the provided value
+                            merged_data[key] = value
+                
+                logger.info(f"🔍 DEBUG: Merged data from original roster: {merged_data}")
+                
+                # Update the finisher with merged data (IMMUTABLE - no roster mutation)
+                race_results[i] = merged_data
+                
+                logger.info(f"✅ DEBUG: Successfully merged roster data for bib #{new_bib}")
+                
+                # If bib number changed, broadcast reload to ensure all clients get fresh data
+                if bib_changed:
+                    logger.info(f"🔍 DEBUG: Bib number changed - broadcasting reload signal")
+                    await manager.broadcast(json.dumps({"action": "reload"}))
                 else:
-                    logger.info(f"🔍 DEBUG: No roster entry found for bib #{new_bib} - proceeding with regular update")
-            
-            # Regular update (no bib change or no roster match)
-            finisher_data["id"] = finisher_id
-            race_results[i] = finisher_data
-            
-            logger.info(f"🔍 DEBUG: Updated finisher with regular data: {finisher_data}")
+                    # Regular update broadcast
+                    await manager.broadcast(json.dumps({"type": "update", "data": merged_data}))
+                
+                return {"success": True, "data": merged_data}
+            else:
+                logger.info(f"🔍 DEBUG: No roster entry found for bib #{new_bib} - proceeding with regular update")
+                
+                # Regular update (no roster match) - just update the provided fields
+                updated_data = finisher.copy()  # Start with existing data
+                updated_data.update(finisher_data)  # Update with provided data
+                updated_data["id"] = finisher_id  # Ensure ID is preserved
+                
+                race_results[i] = updated_data
+                
+                logger.info(f"🔍 DEBUG: Updated finisher with regular data: {updated_data}")
 
-            # Broadcast the update to all connected WebSocket clients
-            await manager.broadcast(
-                json.dumps({"type": "update", "data": finisher_data})
-            )
+                # Broadcast the update to all connected WebSocket clients
+                await manager.broadcast(json.dumps({"type": "update", "data": updated_data}))
 
-            return {"success": True, "data": finisher_data}
+                return {"success": True, "data": updated_data}
 
     return {"success": False, "message": "Finisher not found"}
 
