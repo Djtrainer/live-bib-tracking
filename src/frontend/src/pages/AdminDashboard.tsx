@@ -33,31 +33,31 @@ export default function AdminDashboard() {
   const [isUploading, setIsUploading] = useState(false);
   const navigate = useNavigate();
 
+  // Fetch finishers data from backend
+  const fetchFinishers = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch('/api/results');
+      const result = await response.json();
+      
+      if (result.success && result.data) {
+        setFinishers(result.data);
+      } else {
+        console.error('Failed to fetch results:', result);
+      }
+    } catch (error) {
+      console.error('Error fetching finishers:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     // Check authentication
     if (!sessionStorage.getItem('isAdmin')) {
       navigate('/admin');
       return;
     }
-
-    // Fetch finishers data from backend
-    const fetchFinishers = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch('/api/results');
-        const result = await response.json();
-        
-        if (result.success && result.data) {
-          setFinishers(result.data);
-        } else {
-          console.error('Failed to fetch results:', result);
-        }
-      } catch (error) {
-        console.error('Error fetching finishers:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
 
     fetchFinishers();
   }, [navigate]);
@@ -84,9 +84,9 @@ export default function AdminDashboard() {
       const result = await response.json();
       
       if (result.success) {
-        setFinishers(prev => prev.map(f => 
-          f.id === id ? { ...f, ...updatedData } : f
-        ));
+        // Instead of just updating local state, refresh all data from backend
+        // This ensures we get the merged roster data if bib number was changed
+        await fetchFinishers();
         setEditingId(null);
       } else {
         console.error('Failed to update finisher:', result);

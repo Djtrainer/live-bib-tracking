@@ -9,16 +9,15 @@ The FastAPI server functionality has been moved to src/api_backend/local_server.
 """
 
 import os
+import time
+from collections import Counter, defaultdict
+from pathlib import Path
+
 import cv2
 import dotenv
 import easyocr
-from pathlib import Path
-from ultralytics import YOLO
-import time
-from collections import Counter
 import numpy as np
-import requests
-from collections import defaultdict
+from ultralytics import YOLO
 
 from image_processor.utils import get_logger
 
@@ -277,7 +276,7 @@ class VideoInferenceProcessor:
                                 "finishTime": finish_time,
                                 "racerName": f"Racer {person_id}"
                             }
-                            logger.info(f"🔍 DEBUG: About to send finisher data via callback")
+                            logger.info("🔍 DEBUG: About to send finisher data via callback")
                             logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
                             logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
                             logger.info(f"🔍 DEBUG: Finish Time: {payload['finishTime']} ms")
@@ -287,6 +286,31 @@ class VideoInferenceProcessor:
                             logger.info(f"✅ DEBUG: Successfully sent finisher data via callback: Bib #{payload['bibNumber']}")
                         except Exception as e:
                             logger.error(f"❌ DEBUG: Error calling result callback: {e}")
+                            logger.error(f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}")
+                else:
+                    # No bib number found - send finisher with placeholder bib
+                    logger.info(
+                        f"Racer finished: No readable bib number for Racer ID {person_id} at {finish_time/1000:.2f}s"
+                    )
+                    
+                    # Call the callback function to notify the server with placeholder bib
+                    if self.result_callback:
+                        try:
+                            payload = {
+                                "bibNumber": f"Unknown-{person_id}",  # Use tracker ID as placeholder
+                                "finishTime": finish_time,
+                                "racerName": f"Racer {person_id}"
+                            }
+                            logger.info("🔍 DEBUG: About to send 'No Bib' finisher data via callback")
+                            logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
+                            logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
+                            logger.info(f"🔍 DEBUG: Finish Time: {payload['finishTime']} ms")
+                            logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
+                            
+                            self.result_callback(payload)
+                            logger.info(f"✅ DEBUG: Successfully sent 'No Bib' finisher data via callback: {payload['bibNumber']}")
+                        except Exception as e:
+                            logger.error(f"❌ DEBUG: Error calling result callback for 'No Bib' finisher: {e}")
                             logger.error(f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}")
 
                 self.print_live_leaderboard()
@@ -308,12 +332,13 @@ class VideoInferenceProcessor:
             if not filtered_reads:
                 continue
             scores = {}
-
             for bib_num, ocr_conf, yolo_conf in filtered_reads:
-                score = ocr_conf * yolo_conf
+                # The score for each vote is its confidence
+                score = ocr_conf
+                # Add the score to the total for that bib number
                 scores[bib_num] = scores.get(bib_num, 0) + score
-
-            # Find the bib number with the highest total score
+            
+            # 3. Find the bib number with the highest total score
             if scores:
                 most_likely_bib = max(scores, key=scores.get)
                 final_results[tracker_id] = {
@@ -710,14 +735,19 @@ class VideoInferenceProcessor:
                                             self.preprocess_for_easyocr(bib_crop)
                                         )
                                     )
+                                    
+                                    # Add detailed OCR logging for every attempt
                                     if bib_number and ocr_conf:
+                                        logger.info(f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Confidence: {ocr_conf:.2f})")
+                                        
                                         history["ocr_reads"].append(
                                             (bib_number, ocr_conf, yolo_bib_conf)
                                         )
-                                        # Lock in the bib if confidence is high
-                                        if ocr_conf > history["final_bib_confidence"]:
-                                            history["final_bib"] = bib_number
-                                            history["final_bib_confidence"] = ocr_conf
+                                        # # Lock in the bib if confidence is high
+                                        # if ocr_conf > history["final_bib_confidence"]:
+                                        #     history["final_bib"] = bib_number
+                                        #     history["final_bib_confidence"] = ocr_conf
+
                                 timings["EasyOCR"] += time.time() - t_ocr
                             break  # Move to the next person
 

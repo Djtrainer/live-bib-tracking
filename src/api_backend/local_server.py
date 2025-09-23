@@ -273,60 +273,14 @@ async def video_feed(request: Request):
                             logger.warning(f"Invalid frame at count {frame_count}")
                             continue
 
-                        # For live mode, we need to check for detections to update frame skip
-                        # before applying the skip logic
-                        should_process_frame = (
-                            frame_count % processor.current_frame_skip == 0
+                        # Process every frame (no frame skipping)
+                        processed_frame = processor._process_frame(
+                            frame,
+                            frame_count,
+                            start_time,
+                            processor.cap,
+                            processor.timings,
                         )
-
-                        if should_process_frame:
-                            # Process the frame using the _process_frame method
-                            processed_frame = processor._process_frame(
-                                frame,
-                                frame_count,
-                                start_time,
-                                processor.cap,
-                                processor.timings,
-                            )
-                        else:
-                            # For skipped frames, we still need to run a quick detection check
-                            # to update the dynamic frame skip logic for live mode
-                            if processor.is_live_mode:
-                                # Quick detection check without full processing
-                                results = processor.model.track(
-                                    frame,
-                                    persist=True,
-                                    tracker="config/custom_tracker.yaml",
-                                    classes=[0],  # Only check for persons
-                                    workers=1,
-                                    verbose=False,
-                                )
-
-                                # Update frame skip based on detection results
-                                person_detected = False
-                                if results and results[0].boxes is not None:
-                                    for box in results[0].boxes:
-                                        if int(box.cls) == 0:  # Person class
-                                            person_detected = True
-                                            break
-
-                                if person_detected:
-                                    processor.current_frame_skip = (
-                                        processor.focus_frame_skip
-                                    )
-                                    processor.cooldown_counter = (
-                                        processor.detection_cooldown_frames
-                                    )
-                                else:
-                                    if processor.cooldown_counter > 0:
-                                        processor.cooldown_counter -= 1
-                                    else:
-                                        processor.current_frame_skip = (
-                                            processor.base_frame_skip
-                                        )
-
-                            frame_count += 1
-                            continue
 
                         # Validate processed frame
                         if processed_frame is None or processed_frame.size == 0:
@@ -556,7 +510,21 @@ async def upload_roster(file: UploadFile = File(...)):
         race_results.extend(existing_data.values())
         
         # Sort the results to maintain proper order (finished racers first, then by bib number)
-        race_results.sort(key=lambda x: (x.get("finishTime") is None, x.get("finishTime") or float('inf'), int(x["bibNumber"])))
+        def sort_key(x):
+            # First sort by whether they've finished (finished racers first)
+            has_finished = x.get("finishTime") is None
+            # Then by finish time (if they've finished)
+            finish_time = x.get("finishTime") or float('inf')
+            # Finally by bib number, handling non-numeric bibs like "Unknown-1"
+            try:
+                bib_sort_key = int(x["bibNumber"])
+            except (ValueError, TypeError):
+                # For non-numeric bibs (like "Unknown-1"), sort them after numeric bibs
+                bib_sort_key = float('inf')
+            
+            return (has_finished, finish_time, bib_sort_key)
+        
+        race_results.sort(key=sort_key)
         
         # Broadcast roster update to all connected clients
         await manager.broadcast(json.dumps({"action": "reload"}))
@@ -721,7 +689,8 @@ async def update_finish_time(finish_data: Dict[str, Any]):
 @app.put("/api/results/{finisher_id}")
 async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
     """Endpoint to update an existing finisher."""
-    print(f"Updating finisher {finisher_id} with data: {finisher_data}")
+    logger.info(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
+    logger.info(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
 
     if "finishTime" in finisher_data and isinstance(finisher_data["finishTime"], str):
         time_ms = time_string_to_milliseconds(finisher_data["finishTime"])
@@ -746,9 +715,74 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
     # Find the finisher by ID
     for i, finisher in enumerate(race_results):
         if finisher["id"] == finisher_id:
-            # Update the finisher data
+            logger.info(f"🔍 DEBUG: Found finisher at index {i}: {finisher}")
+            
+            # Check if bibNumber has been changed
+            original_bib = finisher.get("bibNumber", "")
+            new_bib = finisher_data.get("bibNumber", "")
+            
+            logger.info(f"🔍 DEBUG: Original bib: '{original_bib}', New bib: '{new_bib}'")
+            
+            if new_bib and new_bib != original_bib:
+                logger.info(f"🔍 DEBUG: Bib number changed from '{original_bib}' to '{new_bib}' - performing roster lookup")
+                
+                # Look up the new bib number in the roster to get full racer information
+                roster_racer = None
+                for racer in race_results:
+                    if racer["bibNumber"] == new_bib and racer.get("finishTime") is None:
+                        # Found a pre-registered racer with this bib number who hasn't finished yet
+                        roster_racer = racer
+                        logger.info(f"✅ DEBUG: Found roster entry for bib #{new_bib}: {roster_racer}")
+                        break
+                
+                if roster_racer:
+                    # Merge roster data with the existing finish time and rank
+                    merged_data = {
+                        "id": finisher_id,  # Keep the original ID
+                        "bibNumber": new_bib,
+                        "racerName": roster_racer.get("racerName", finisher_data.get("racerName", f"Racer #{new_bib}")),
+                        "finishTime": finisher.get("finishTime"),  # Preserve original finish time
+                        "rank": finisher.get("rank"),  # Preserve original rank
+                    }
+                    
+                    # Add optional fields from roster if available
+                    if "gender" in roster_racer:
+                        merged_data["gender"] = roster_racer["gender"]
+                    if "team" in roster_racer:
+                        merged_data["team"] = roster_racer["team"]
+                    
+                    # Override with any explicitly provided data from the update request
+                    for key, value in finisher_data.items():
+                        if key not in ["id"] and value is not None:
+                            merged_data[key] = value
+                    
+                    logger.info(f"🔍 DEBUG: Merged data: {merged_data}")
+                    
+                    # Update the finisher with merged data
+                    race_results[i] = merged_data
+                    
+                    # Remove the original roster entry to avoid duplicates
+                    race_results = [r for r in race_results if not (r["bibNumber"] == new_bib and r.get("finishTime") is None)]
+                    
+                    # Update the global race_results
+                    globals()['race_results'] = race_results
+                    
+                    logger.info(f"✅ DEBUG: Successfully merged roster data for bib #{new_bib}")
+                    
+                    # Broadcast the update to all connected WebSocket clients
+                    await manager.broadcast(
+                        json.dumps({"type": "update", "data": merged_data})
+                    )
+                    
+                    return {"success": True, "data": merged_data}
+                else:
+                    logger.info(f"🔍 DEBUG: No roster entry found for bib #{new_bib} - proceeding with regular update")
+            
+            # Regular update (no bib change or no roster match)
             finisher_data["id"] = finisher_id
             race_results[i] = finisher_data
+            
+            logger.info(f"🔍 DEBUG: Updated finisher with regular data: {finisher_data}")
 
             # Broadcast the update to all connected WebSocket clients
             await manager.broadcast(
