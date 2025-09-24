@@ -268,18 +268,18 @@ class VideoInferenceProcessor:
                         f"Racer finished: Bib #{bib_result['final_bib']} at {finish_time/1000:.2f}s"
                     )
                     
-                    # Call the callback function to notify the server
+                    # Call the callback function to notify the server with wall-clock time
                     if self.result_callback:
                         try:
                             payload = {
                                 "bibNumber": bib_result['final_bib'],
-                                "finishTime": finish_time,
+                                "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
                                 "racerName": f"Racer {person_id}"
                             }
                             logger.info("🔍 DEBUG: About to send finisher data via callback")
                             logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
                             logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(f"🔍 DEBUG: Finish Time: {payload['finishTime']} ms")
+                            logger.info(f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)")
                             logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
                             
                             self.result_callback(payload)
@@ -293,18 +293,18 @@ class VideoInferenceProcessor:
                         f"Racer finished: No readable bib number for Racer ID {person_id} at {finish_time/1000:.2f}s"
                     )
                     
-                    # Call the callback function to notify the server with placeholder bib
+                    # Call the callback function to notify the server with placeholder bib and wall-clock time
                     if self.result_callback:
                         try:
                             payload = {
                                 "bibNumber": f"Unknown-{person_id}",  # Use tracker ID as placeholder
-                                "finishTime": finish_time,
+                                "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
                                 "racerName": f"Racer {person_id}"
                             }
                             logger.info("🔍 DEBUG: About to send 'No Bib' finisher data via callback")
                             logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
                             logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(f"🔍 DEBUG: Finish Time: {payload['finishTime']} ms")
+                            logger.info(f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)")
                             logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
                             
                             self.result_callback(payload)

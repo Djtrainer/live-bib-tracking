@@ -4,7 +4,8 @@ import Layout from '@/components/Layout';
 import StatusChip from '@/components/StatusChip';
 import DataTable from '@/components/DataTable';
 import IconButton from '@/components/IconButton';
-import { formatTime } from '../lib/utils'; 
+import RaceClock from '@/components/RaceClock';
+import { formatTime } from '../lib/utils';
 
 interface Finisher {
   id: string;
@@ -64,6 +65,48 @@ export default function AdminDashboard() {
     }
 
     fetchFinishers();
+
+    // Set up WebSocket connection for real-time updates (DEBUG VERSION)
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    const ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+      console.log('✅ WebSocket connection opened - AdminDashboard.tsx');
+      console.log('🔗 WebSocket URL:', wsUrl);
+      console.log('🔗 WebSocket readyState:', ws.readyState);
+    };
+    
+    ws.onmessage = async (event) => {
+      console.log('📨 Raw WebSocket message received in AdminDashboard.tsx:', event.data);
+      try {
+        const message = JSON.parse(event.data);
+        console.log('✅ Parsed WebSocket message in AdminDashboard.tsx:', message);
+        console.log('📋 Message type:', message.type || message.action || 'unknown');
+        
+        if (message.action === 'reload') {
+          console.log('🔄 Reloading finishers data due to reload action');
+          await fetchFinishers();
+        } else if (message.type === 'add' || message.type === 'update') {
+          console.log('🔄 Processing add/update message:', message.data);
+          await fetchFinishers(); // Refresh all data to stay in sync
+        }
+      } catch (error) {
+        console.error('❌ Error processing WebSocket message in AdminDashboard:', error);
+      }
+    };
+    
+    ws.onclose = () => {
+      console.log('❌ WebSocket connection closed - AdminDashboard.tsx');
+    };
+    
+    ws.onerror = (error) => {
+      console.error('❌ WebSocket error in AdminDashboard:', error);
+    };
+
+    return () => {
+      ws.close();
+    };
   }, [navigate]);
 
   const handleCellDoubleClick = (id: string, field: 'bibNumber' | 'racerName' | 'finishTime') => {
@@ -424,6 +467,19 @@ export default function AdminDashboard() {
             value={new Date().toLocaleTimeString()} 
             icon="schedule"
           />
+        </div>
+
+        {/* Race Clock Controls */}
+        <div className="bg-card border border-border rounded-lg p-6 mb-6">
+          <div className="flex items-center gap-2 mb-4">
+            <span className="material-icon text-primary">timer</span>
+            <h2 className="text-xl font-semibold">Official Race Clock</h2>
+          </div>
+          <p className="text-muted-foreground mb-4">
+            Control the official race clock. All finish times will be calculated relative to when you start the race clock.
+          </p>
+          
+          <RaceClock showControls={true} className="mb-4" />
         </div>
 
         {/* Actions */}

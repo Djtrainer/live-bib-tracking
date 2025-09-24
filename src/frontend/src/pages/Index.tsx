@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import Layout from '@/components/Layout';
 import StatusChip from '@/components/StatusChip';
 import DataTable from '@/components/DataTable';
-import { formatTime } from '../lib/utils'; 
+import RaceClock from '@/components/RaceClock';
+import { formatTime } from '../lib/utils';
 
 interface Finisher {
   id: string;
@@ -118,13 +119,17 @@ const Index = () => {
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      console.log('WebSocket connected to leaderboard');
+      console.log('✅ WebSocket connection opened - Index.tsx');
+      console.log('🔗 WebSocket URL:', wsUrl);
+      console.log('🔗 WebSocket readyState:', ws.readyState);
     };
     
     ws.onmessage = async (event) => {
+      console.log('📨 Raw WebSocket message received in Index.tsx:', event.data);
       try {
         const message = JSON.parse(event.data);
-        console.log('Received WebSocket message:', message);
+        console.log('✅ Parsed WebSocket message in Index.tsx:', message);
+        console.log('📋 Message type:', message.type || message.action || 'unknown');
         
         if (message.action === 'reload') {
           // Reload all data when instructed (for delete/reorder operations)
@@ -256,8 +261,18 @@ const Index = () => {
       <div className="container mx-auto px-4 py-8">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-3xl font-bold mb-2">2025 Slay Sarcoma Race Results</h1>
-          <p className="text-muted-foreground">Live race results updated in real-time</p>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-3xl font-bold mb-2">2025 Slay Sarcoma Race Results</h1>
+              <p className="text-muted-foreground">Live race results updated in real-time</p>
+            </div>
+            <div className="text-right">
+              <div className="mb-2">
+                <span className="text-sm text-muted-foreground">Official Race Time</span>
+              </div>
+              <RaceClock showControls={false} />
+            </div>
+          </div>
         </div>
 
         {/* Stats */}
