@@ -19,23 +19,17 @@ interface Finisher {
 
 interface EditingCell {
   id: string;
-  field: 'bibNumber' | 'racerName' | 'finishTime';
+  field: 'bibNumber' | 'racerName' | 'finishTime' | 'gender' | 'team';
 }
 
 export default function AdminDashboard() {
   const [finishers, setFinishers] = useState<Finisher[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
-  const [newFinisher, setNewFinisher] = useState({ 
-    bibNumber: '', 
-    racerName: '', 
-    finishTime: '', 
-    gender: '', 
-    team: '' 
-  });
-  const [showAddForm, setShowAddForm] = useState(false);
+  // Removed newFinisher and showAddForm state - no longer needed for one-click add
   const [uploadStatus, setUploadStatus] = useState<string>('');
   const [isUploading, setIsUploading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'setup' | 'live'>('setup');
   const navigate = useNavigate();
 
   // Fetch finishers data from backend
@@ -109,7 +103,7 @@ export default function AdminDashboard() {
     };
   }, [navigate]);
 
-  const handleCellDoubleClick = (id: string, field: 'bibNumber' | 'racerName' | 'finishTime') => {
+  const handleCellDoubleClick = (id: string, field: 'bibNumber' | 'racerName' | 'finishTime' | 'gender' | 'team') => {
     setEditingCell({ id, field });
   };
 
@@ -179,28 +173,31 @@ export default function AdminDashboard() {
   };
 
   const handleAddFinisher = async () => {
-    if (!newFinisher.bibNumber || !newFinisher.racerName || !newFinisher.finishTime) {
-      alert('Please fill in all required fields');
-      return;
-    }
-
     try {
-      const rankedFinishers = finishers.filter(f => f.rank !== null);
-      const newRank = rankedFinishers.length > 0 ? Math.max(...rankedFinishers.map(f => f.rank!)) + 1 : 1;
-      const finisher: any = {
-        bibNumber: newFinisher.bibNumber,
-        racerName: newFinisher.racerName,
-        finishTime: newFinisher.finishTime,
-        rank: newRank,
-      };
+      // Generate unique placeholder bib number
+      const existingUnknownBibs = finishers
+        .map(f => f.bibNumber)
+        .filter(bib => bib.startsWith('Unknown-'))
+        .map(bib => parseInt(bib.split('-')[1]) || 0)
+        .sort((a, b) => b - a); // Sort descending to get highest number first
+      
+      const nextUnknownNumber = existingUnknownBibs.length > 0 ? existingUnknownBibs[0] + 1 : 1;
+      const placeholderBib = `Unknown-${nextUnknownNumber}`;
+      
+      // Capture current race time from the official race clock
+      const currentWallTime = Date.now() / 1000; // Current time in seconds (Unix timestamp)
+      
+      console.log('🔍 One-click add finisher:', {
+        placeholderBib,
+        currentWallTime,
+        timestamp: new Date().toISOString()
+      });
 
-      // Add optional fields if provided
-      if (newFinisher.gender && newFinisher.gender.trim()) {
-        finisher.gender = newFinisher.gender.trim();
-      }
-      if (newFinisher.team && newFinisher.team.trim()) {
-        finisher.team = newFinisher.team.trim();
-      }
+      const finisher = {
+        bibNumber: placeholderBib,
+        racerName: `Racer ${placeholderBib}`,
+        wallClockTime: currentWallTime, // Send wall-clock time to backend
+      };
 
       const response = await fetch('/api/results', {
         method: 'POST',
@@ -213,18 +210,11 @@ export default function AdminDashboard() {
       const result = await response.json();
       
       if (result.success) {
-        setFinishers(prev => [...prev, result.data]);
-        setNewFinisher({ 
-          bibNumber: '', 
-          racerName: '', 
-          finishTime: '', 
-          gender: '', 
-          team: '' 
-        });
-        setShowAddForm(false);
+        console.log('✅ Successfully added one-click finisher:', result.data);
+        // Data will be updated via WebSocket, no need to manually update state
       } else {
         console.error('Failed to add finisher:', result);
-        alert('Failed to add finisher. Please try again.');
+        alert(`Failed to add finisher: ${result.message || 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Error adding finisher:', error);
@@ -339,8 +329,10 @@ export default function AdminDashboard() {
   const columns = [
     { key: 'rank', title: 'Rank', width: '80px', align: 'center' as const },
     { key: 'bibNumber', title: 'Bib #', width: '100px', align: 'center' as const },
-    { key: 'racerName', title: 'Racer Name', width: '200px', align: 'left' as const },
+    { key: 'racerName', title: 'Racer Name', width: '180px', align: 'left' as const },
     { key: 'finishTime', title: 'Finish Time', width: '120px', align: 'center' as const },
+    { key: 'gender', title: 'Gender', width: '80px', align: 'center' as const },
+    { key: 'team', title: 'Team', width: '150px', align: 'left' as const },
     { key: 'actions', title: 'Actions', width: '120px', align: 'center' as const },
   ];
 
@@ -348,6 +340,8 @@ export default function AdminDashboard() {
     const isEditingBib = editingCell?.id === finisher.id && editingCell?.field === 'bibNumber';
     const isEditingName = editingCell?.id === finisher.id && editingCell?.field === 'racerName';
     const isEditingTime = editingCell?.id === finisher.id && editingCell?.field === 'finishTime';
+    const isEditingGender = editingCell?.id === finisher.id && editingCell?.field === 'gender';
+    const isEditingTeam = editingCell?.id === finisher.id && editingCell?.field === 'team';
     
     return (
       <tr key={finisher.id}>
@@ -417,8 +411,53 @@ export default function AdminDashboard() {
           )}
         </td>
         <td 
-          className={`text-${columns[4].align}`}
+          className={`text-${columns[4].align} cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[4].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'gender')}
+          title="Double-click to edit"
+        >
+          {isEditingGender ? (
+            <select
+              defaultValue={finisher.gender || ''}
+              className="form-input w-16 text-center"
+              autoFocus
+              onKeyPress={(e) => {
+                if (e.key === 'Enter') {
+                  handleCellKeyPress(e, finisher.id, 'gender', (e.target as HTMLSelectElement).value);
+                }
+              }}
+              onBlur={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
+            >
+              <option value="">-</option>
+              <option value="M">M</option>
+              <option value="W">W</option>
+            </select>
+          ) : (
+            <span className="font-mono">{finisher.gender || '-'}</span>
+          )}
+        </td>
+        <td 
+          className={`text-${columns[5].align} cursor-pointer hover:bg-muted/50 transition-colors`}
+          style={{ width: columns[5].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'team')}
+          title="Double-click to edit"
+        >
+          {isEditingTeam ? (
+            <input
+              type="text"
+              defaultValue={finisher.team || ''}
+              className="form-input w-full"
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'team', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'team', e.target.value)}
+            />
+          ) : (
+            <span className="font-mono">{finisher.team || '-'}</span>
+          )}
+        </td>
+        <td 
+          className={`text-${columns[6].align}`}
+          style={{ width: columns[6].width }}
         >
           <div className="flex items-center justify-center gap-1">
             <IconButton
@@ -469,163 +508,144 @@ export default function AdminDashboard() {
           />
         </div>
 
-        {/* Race Clock Controls */}
-        <div className="bg-card border border-border rounded-lg p-6 mb-6">
-          <div className="flex items-center gap-2 mb-4">
-            <span className="material-icon text-primary">timer</span>
-            <h2 className="text-xl font-semibold">Official Race Clock</h2>
+        {/* Tabbed Navigation */}
+        <div className="mb-8">
+          <div className="border-b border-border">
+            <nav className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('setup')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'setup'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span className="material-icon text-sm">settings</span>
+                  Race Setup
+                </span>
+              </button>
+              <button
+                onClick={() => setActiveTab('live')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'live'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span className="material-icon text-sm">live_tv</span>
+                  Live Management
+                </span>
+              </button>
+            </nav>
           </div>
-          <p className="text-muted-foreground mb-4">
-            Control the official race clock. All finish times will be calculated relative to when you start the race clock.
-          </p>
-          
-          <RaceClock showControls={true} className="mb-4" />
         </div>
 
-        {/* Actions */}
-        <div className="flex items-center gap-4 mb-6">
-          <button
-            onClick={() => setShowAddForm(!showAddForm)}
-            className="btn-primary"
-          >
-            <span className="material-icon">add</span>
-            Add Finisher
-          </button>
-          <button
-            onClick={handleDownloadCSV}
-            className="btn-primary"
-          >
-            <span className="material-icon">download</span>
-            Download CSV
-          </button>
-        </div>
-
-        {/* Add Form */}
-        {showAddForm && (
-          <div className="bg-card border border-border rounded-lg p-6 mb-6">
-            <h3 className="text-lg font-semibold mb-4">Add New Finisher</h3>
-            <div className="grid grid-cols-1 md:grid-cols-6 gap-4 mb-4">
-              <div>
-                <label className="block text-sm font-medium mb-2">Bib Number *</label>
-                <input
-                  type="text"
-                  value={newFinisher.bibNumber}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, bibNumber: e.target.value }))}
-                  className="form-input"
-                  placeholder="e.g., 123"
-                />
+        {/* Tab Content */}
+        {activeTab === 'setup' && (
+          <div className="space-y-6">
+            {/* Race Clock Controls */}
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-icon text-primary">timer</span>
+                <h2 className="text-xl font-semibold">Official Race Clock</h2>
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Racer Name *</label>
-                <input
-                  type="text"
-                  value={newFinisher.racerName}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, racerName: e.target.value }))}
-                  className="form-input"
-                  placeholder="e.g., John Doe"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Finish Time *</label>
-                <input
-                  type="text"
-                  value={newFinisher.finishTime}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, finishTime: e.target.value }))}
-                  className="form-input"
-                  placeholder="e.g., 2:30:45"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Gender</label>
-                <select
-                  value={newFinisher.gender}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, gender: e.target.value }))}
-                  className="form-input"
-                >
-                  <option value="">Select...</option>
-                  <option value="M">Male</option>
-                  <option value="W">Female</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Team</label>
-                <input
-                  type="text"
-                  value={newFinisher.team}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, team: e.target.value }))}
-                  className="form-input"
-                  placeholder="e.g., Team Phoenix"
-                />
-              </div>
-              <div className="flex items-end gap-2">
-                <button onClick={handleAddFinisher} className="btn-primary">
-                  <span className="material-icon">save</span>
-                  Save
-                </button>
-                <button onClick={() => setShowAddForm(false)} className="btn-ghost">
-                  <span className="material-icon">close</span>
-                  Cancel
-                </button>
-              </div>
+              <p className="text-muted-foreground mb-4">
+                Control the official race clock. All finish times will be calculated relative to when you start the race clock.
+              </p>
+              
+              <RaceClock showControls={true} className="mb-4" />
             </div>
-            <p className="text-sm text-muted-foreground">* Required fields</p>
+
+            {/* Roster Management */}
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-icon text-primary">upload_file</span>
+                <h2 className="text-xl font-semibold">Roster Management</h2>
+              </div>
+              <p className="text-muted-foreground mb-4">
+                Upload a CSV file to pre-register all race participants. The CSV should contain headers: bibNumber, racerName, gender (optional), team (optional).
+              </p>
+              
+              <div className="flex items-center gap-4 mb-4">
+                <div className="flex-1">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleRosterUpload}
+                    disabled={isUploading}
+                    className="form-input"
+                    id="roster-upload"
+                  />
+                </div>
+                <button
+                  onClick={() => document.getElementById('roster-upload')?.click()}
+                  disabled={isUploading}
+                  className="btn-primary"
+                >
+                  <span className="material-icon">
+                    {isUploading ? 'hourglass_empty' : 'upload'}
+                  </span>
+                  {isUploading ? 'Uploading...' : 'Upload Roster'}
+                </button>
+              </div>
+
+              {uploadStatus && (
+                <div className="bg-muted/50 border border-border rounded-lg p-4">
+                  <pre className="text-sm whitespace-pre-wrap">{uploadStatus}</pre>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Results Table */}
-        <div className="bg-card rounded-lg border border-border p-6 mb-6">
-          <div className="flex items-center gap-2 mb-6">
-            <span className="material-icon text-primary">manage_accounts</span>
-            <h2 className="text-xl font-semibold">Manage Results</h2>
-          </div>
-          
-          <DataTable
-            columns={columns}
-            data={finishers}
-            renderRow={renderRow}
-            emptyMessage="No finishers added yet. Add the first finisher to get started."
-          />
-        </div>
+        {activeTab === 'live' && (
+          <div className="space-y-6">
+            {/* Live Management Header with Clock and Actions */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={handleAddFinisher}
+                  className="btn-primary"
+                  title="Instantly add a finisher with current race time"
+                >
+                  <span className="material-icon">add</span>
+                  Add Finisher
+                </button>
+                <button
+                  onClick={handleDownloadCSV}
+                  className="btn-primary"
+                >
+                  <span className="material-icon">download</span>
+                  Download CSV
+                </button>
+              </div>
+              
+              <div className="text-right">
+                <div className="mb-2">
+                  <span className="text-sm text-muted-foreground">Official Race Time</span>
+                </div>
+                <RaceClock showControls={false} />
+              </div>
+            </div>
 
-        {/* Roster Management */}
-        <div className="bg-card border border-border rounded-lg p-6 mb-6">
-          <div className="flex items-center gap-2 mb-4">
-            <span className="material-icon text-primary">upload_file</span>
-            <h2 className="text-xl font-semibold">Roster Management</h2>
-          </div>
-          <p className="text-muted-foreground mb-4">
-            Upload a CSV file to pre-register all race participants. The CSV should contain headers: bibNumber, racerName, gender (optional), team (optional).
-          </p>
-          
-          <div className="flex items-center gap-4 mb-4">
-            <div className="flex-1">
-              <input
-                type="file"
-                accept=".csv"
-                onChange={handleRosterUpload}
-                disabled={isUploading}
-                className="form-input"
-                id="roster-upload"
+            {/* Results Table */}
+            <div className="bg-card rounded-lg border border-border p-6">
+              <div className="flex items-center gap-2 mb-6">
+                <span className="material-icon text-primary">manage_accounts</span>
+                <h2 className="text-xl font-semibold">Manage Results</h2>
+              </div>
+              
+              <DataTable
+                columns={columns}
+                data={finishers}
+                renderRow={renderRow}
+                emptyMessage="No finishers added yet. Click 'Add Finisher' to capture the first racer crossing the finish line."
               />
             </div>
-            <button
-              onClick={() => document.getElementById('roster-upload')?.click()}
-              disabled={isUploading}
-              className="btn-primary"
-            >
-              <span className="material-icon">
-                {isUploading ? 'hourglass_empty' : 'upload'}
-              </span>
-              {isUploading ? 'Uploading...' : 'Upload Roster'}
-            </button>
           </div>
-
-          {uploadStatus && (
-            <div className="bg-muted/50 border border-border rounded-lg p-4">
-              <pre className="text-sm whitespace-pre-wrap">{uploadStatus}</pre>
-            </div>
-          )}
-        </div>
+        )}
       </div>
     </Layout>
   );

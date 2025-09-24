@@ -30,7 +30,7 @@ const Index = () => {
   // Category-specific leaderboards
   const [topMen, setTopMen] = useState<Finisher[]>([]);
   const [topWomen, setTopWomen] = useState<Finisher[]>([]);
-  const [topTeams, setTopTeams] = useState<TeamScore[]>([]);
+  const [teamData, setTeamData] = useState<Map<string, Finisher[]>>(new Map());
 
   // Function to calculate category leaderboards
   const calculateCategoryLeaderboards = (finishersData: Finisher[]) => {
@@ -48,10 +48,9 @@ const Index = () => {
       .slice(0, 3);
     setTopWomen(women);
 
-    // Calculate team scores
+    // Group finishers by team (NEW: Dynamic team grouping)
     const teamMap = new Map<string, Finisher[]>();
     
-    // Group finishers by team
     finishersData.forEach(finisher => {
       if (finisher.team && finisher.team.trim()) {
         const teamName = finisher.team.trim();
@@ -62,29 +61,12 @@ const Index = () => {
       }
     });
 
-    // Calculate team scores (sum of top 3 fastest runners per team)
-    const teamScores: TeamScore[] = [];
+    // Sort each team's finishers by finish time
     teamMap.forEach((runners, teamName) => {
-      if (runners.length >= 3) {
-        // Sort runners by finish time and take top 3
-        const sortedRunners = runners.sort((a, b) => a.finishTime - b.finishTime);
-        const top3Runners = sortedRunners.slice(0, 3);
-        const totalTime = top3Runners.reduce((sum, runner) => sum + runner.finishTime, 0);
-        
-        teamScores.push({
-          teamName,
-          totalTime,
-          runners: top3Runners
-        });
-      }
+      runners.sort((a, b) => a.finishTime - b.finishTime);
     });
 
-    // Sort teams by total time and take top 3
-    const sortedTeams = teamScores
-      .sort((a, b) => a.totalTime - b.totalTime)
-      .slice(0, 3);
-    
-    setTopTeams(sortedTeams);
+    setTeamData(teamMap);
   };
 
   useEffect(() => {
@@ -243,7 +225,11 @@ const Index = () => {
                     : formatTime((item as TeamScore).totalTime)
                   }
                 </div>
-                {type === 'team' && (
+                {type === 'individual' ? (
+                  <div className="text-xs text-muted-foreground">
+                    Overall #{(item as Finisher).rank || 'N/A'}
+                  </div>
+                ) : (
                   <div className="text-xs text-muted-foreground">
                     Combined time
                   </div>
@@ -304,26 +290,81 @@ const Index = () => {
             <h2 className="text-xl font-semibold">Category Leaders</h2>
           </div>
           
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
             {renderCategoryCard("Top 3 Men", "male", topMen, 'individual')}
             {renderCategoryCard("Top 3 Women", "female", topWomen, 'individual')}
-            {renderCategoryCard("Top 3 Teams", "groups", topTeams, 'team')}
           </div>
         </div>
 
-        {/* Results Table */}
-        <div className="bg-card rounded-lg border border-border p-6 mb-8">
+        {/* Dynamic Team Leaderboards */}
+        {teamData.size > 0 && (
+          <div className="mb-8">
+            <div className="flex items-center gap-2 mb-6">
+              <span className="material-icon text-primary">groups</span>
+              <h2 className="text-xl font-semibold">Team Results</h2>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {Array.from(teamData.entries()).map(([teamName, runners]) => (
+                <div key={teamName} className="bg-card rounded-lg border border-border p-6">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="material-icon text-primary">group</span>
+                    <h3 className="text-lg font-semibold">{teamName}</h3>
+                  </div>
+                  
+                  {runners.length === 0 ? (
+                    <p className="text-muted-foreground text-sm">No finishers yet</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {runners.slice(0, 3).map((runner, index) => (
+                        <div key={runner.id} className="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
+                          <div className="flex items-center gap-3">
+                            <div className="flex items-center justify-center w-8 h-8 bg-primary text-primary-foreground rounded-full text-sm font-bold">
+                              {index + 1}
+                            </div>
+                            <div>
+                              <div className="font-medium">{runner.racerName || 'N/A'}</div>
+                              <div className="text-sm text-muted-foreground">Bib #{runner.bibNumber}</div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-mono font-medium">
+                              {formatTime(runner.finishTime)}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              Overall #{runner.rank || 'N/A'}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {runners.length > 3 && (
+                        <div className="text-center text-sm text-muted-foreground pt-2">
+                          +{runners.length - 3} more team member{runners.length - 3 !== 1 ? 's' : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Live Results */}
+        <div className="mb-8">
           <div className="flex items-center gap-2 mb-6">
             <span className="material-icon text-primary">leaderboard</span>
             <h2 className="text-xl font-semibold">Live Results</h2>
           </div>
           
-          <DataTable
-            columns={columns}
-            data={finishers}
-            renderRow={renderRow}
-            emptyMessage="No finishers yet. Results will appear as runners cross the finish line."
-          />
+          <div className="bg-card rounded-lg border border-border p-6">
+            <DataTable
+              columns={columns}
+              data={finishers}
+              renderRow={renderRow}
+              emptyMessage="No finishers yet. Results will appear as runners cross the finish line."
+            />
+          </div>
         </div>
 
         {/* Footer */}
