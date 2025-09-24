@@ -4,24 +4,52 @@ import Layout from '@/components/Layout';
 import StatusChip from '@/components/StatusChip';
 import DataTable from '@/components/DataTable';
 import IconButton from '@/components/IconButton';
-import { formatTime } from '../lib/utils'; 
+import RaceClock from '@/components/RaceClock';
+import { formatTime } from '../lib/utils';
 
 interface Finisher {
   id: string;
-  rank: number;
+  rank: number | null;
   bibNumber: string;
   racerName: string;
-  finishTime: number;
-  isEditing?: boolean;
+  finishTime: number | null;
+  gender?: string;
+  team?: string;
+}
+
+interface EditingCell {
+  id: string;
+  field: 'bibNumber' | 'racerName' | 'finishTime' | 'gender' | 'team';
 }
 
 export default function AdminDashboard() {
   const [finishers, setFinishers] = useState<Finisher[]>([]);
   const [loading, setLoading] = useState(true);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [newFinisher, setNewFinisher] = useState({ bibNumber: '', racerName: '', finishTime: '' });
-  const [showAddForm, setShowAddForm] = useState(false);
+  const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
+  // Removed newFinisher and showAddForm state - no longer needed for one-click add
+  const [uploadStatus, setUploadStatus] = useState<string>('');
+  const [isUploading, setIsUploading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'setup' | 'live'>('setup');
   const navigate = useNavigate();
+
+  // Fetch finishers data from backend
+  const fetchFinishers = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch('/api/results');
+      const result = await response.json();
+      
+      if (result.success && result.data) {
+        setFinishers(result.data);
+      } else {
+        console.error('Failed to fetch results:', result);
+      }
+    } catch (error) {
+      console.error('Error fetching finishers:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     // Check authentication
@@ -30,54 +58,78 @@ export default function AdminDashboard() {
       return;
     }
 
-    // Fetch finishers data from backend
-    const fetchFinishers = async () => {
+    fetchFinishers();
+
+    // Set up WebSocket connection for real-time updates (DEBUG VERSION)
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    const ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+      console.log('✅ WebSocket connection opened - AdminDashboard.tsx');
+      console.log('🔗 WebSocket URL:', wsUrl);
+      console.log('🔗 WebSocket readyState:', ws.readyState);
+    };
+    
+    ws.onmessage = async (event) => {
+      console.log('📨 Raw WebSocket message received in AdminDashboard.tsx:', event.data);
       try {
-        setLoading(true);
-        const response = await fetch('/api/results');
-        const result = await response.json();
+        const message = JSON.parse(event.data);
+        console.log('✅ Parsed WebSocket message in AdminDashboard.tsx:', message);
+        console.log('📋 Message type:', message.type || message.action || 'unknown');
         
-        if (result.success && result.data) {
-          setFinishers(result.data);
-        } else {
-          console.error('Failed to fetch results:', result);
+        if (message.action === 'reload') {
+          console.log('🔄 Reloading finishers data due to reload action');
+          await fetchFinishers();
+        } else if (message.type === 'add' || message.type === 'update') {
+          console.log('🔄 Processing add/update message:', message.data);
+          await fetchFinishers(); // Refresh all data to stay in sync
         }
       } catch (error) {
-        console.error('Error fetching finishers:', error);
-      } finally {
-        setLoading(false);
+        console.error('❌ Error processing WebSocket message in AdminDashboard:', error);
       }
     };
+    
+    ws.onclose = () => {
+      console.log('❌ WebSocket connection closed - AdminDashboard.tsx');
+    };
+    
+    ws.onerror = (error) => {
+      console.error('❌ WebSocket error in AdminDashboard:', error);
+    };
 
-    fetchFinishers();
+    return () => {
+      ws.close();
+    };
   }, [navigate]);
 
-  const handleEdit = (id: string) => {
-    setEditingId(id);
+  const handleCellDoubleClick = (id: string, field: 'bibNumber' | 'racerName' | 'finishTime' | 'gender' | 'team') => {
+    setEditingCell({ id, field });
   };
 
-  const handleSave = async (id: string, updatedData: Partial<Finisher>) => {
+  const handleCellSave = async (id: string, field: string, value: string) => {
     try {
       const finisher = finishers.find(f => f.id === id);
       if (!finisher) return;
 
-      const updatedFinisher = { ...finisher, ...updatedData };
-      
+      // Prepare the update data
+      const updateData: any = {};
+      updateData[field] = value;
+
       const response = await fetch(`/api/results/${id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(updatedFinisher),
+        body: JSON.stringify(updateData),
       });
 
       const result = await response.json();
       
       if (result.success) {
-        setFinishers(prev => prev.map(f => 
-          f.id === id ? { ...f, ...updatedData } : f
-        ));
-        setEditingId(null);
+        // Refresh all data from backend to get merged roster data if bib number was changed
+        await fetchFinishers();
+        setEditingCell(null);
       } else {
         console.error('Failed to update finisher:', result);
         alert('Failed to update finisher. Please try again.');
@@ -86,6 +138,16 @@ export default function AdminDashboard() {
       console.error('Error updating finisher:', error);
       alert('Error updating finisher. Please try again.');
     }
+  };
+
+  const handleCellKeyPress = (e: React.KeyboardEvent, id: string, field: string, value: string) => {
+    if (e.key === 'Enter') {
+      handleCellSave(id, field, value);
+    }
+  };
+
+  const handleCellBlur = (id: string, field: string, value: string) => {
+    handleCellSave(id, field, value);
   };
 
   const handleDelete = async (id: string) => {
@@ -111,18 +173,30 @@ export default function AdminDashboard() {
   };
 
   const handleAddFinisher = async () => {
-    if (!newFinisher.bibNumber || !newFinisher.racerName || !newFinisher.finishTime) {
-      alert('Please fill in all fields');
-      return;
-    }
-
     try {
-      const newRank = finishers.length > 0 ? Math.max(...finishers.map(f => f.rank)) + 1 : 1;
+      // Generate unique placeholder bib number
+      const existingUnknownBibs = finishers
+        .map(f => f.bibNumber)
+        .filter(bib => bib.startsWith('Unknown-'))
+        .map(bib => parseInt(bib.split('-')[1]) || 0)
+        .sort((a, b) => b - a); // Sort descending to get highest number first
+      
+      const nextUnknownNumber = existingUnknownBibs.length > 0 ? existingUnknownBibs[0] + 1 : 1;
+      const placeholderBib = `Unknown-${nextUnknownNumber}`;
+      
+      // Capture current race time from the official race clock
+      const currentWallTime = Date.now() / 1000; // Current time in seconds (Unix timestamp)
+      
+      console.log('🔍 One-click add finisher:', {
+        placeholderBib,
+        currentWallTime,
+        timestamp: new Date().toISOString()
+      });
+
       const finisher = {
-        bibNumber: newFinisher.bibNumber,
-        racerName: newFinisher.racerName,
-        finishTime: newFinisher.finishTime,
-        rank: newRank,
+        bibNumber: placeholderBib,
+        racerName: `Racer ${placeholderBib}`,
+        wallClockTime: currentWallTime, // Send wall-clock time to backend
       };
 
       const response = await fetch('/api/results', {
@@ -136,16 +210,114 @@ export default function AdminDashboard() {
       const result = await response.json();
       
       if (result.success) {
-        setFinishers(prev => [...prev, result.data]);
-        setNewFinisher({ bibNumber: '', racerName: '', finishTime: '' });
-        setShowAddForm(false);
+        console.log('✅ Successfully added one-click finisher:', result.data);
+        // Data will be updated via WebSocket, no need to manually update state
       } else {
         console.error('Failed to add finisher:', result);
-        alert('Failed to add finisher. Please try again.');
+        alert(`Failed to add finisher: ${result.message || 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Error adding finisher:', error);
       alert('Error adding finisher. Please try again.');
+    }
+  };
+
+  const handleDownloadCSV = () => {
+    // Create CSV headers
+    const headers = 'Rank,Bib Number,Racer Name,Finish Time\n';
+    
+    // Convert finishers data to CSV rows
+    const csvRows = finishers.map(finisher => {
+      const formattedTime = typeof finisher.finishTime === 'number' 
+        ? formatTime(finisher.finishTime) 
+        : finisher.finishTime;
+      
+      return `${finisher.rank},"${finisher.bibNumber}","${finisher.racerName}","${formattedTime}"`;
+    }).join('\n');
+    
+    // Combine headers and data
+    const csvContent = headers + csvRows;
+    
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    
+    // Create filename with current date
+    const today = new Date();
+    const dateString = today.getFullYear() + '-' + 
+      String(today.getMonth() + 1).padStart(2, '0') + '-' + 
+      String(today.getDate()).padStart(2, '0');
+    const filename = `race_results_${dateString}.csv`;
+    
+    // Set up download link
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.style.display = 'none';
+    
+    // Trigger download
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Clean up the URL object
+    URL.revokeObjectURL(link.href);
+  };
+
+  const handleRosterUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!file.name.endsWith('.csv')) {
+      alert('Please select a CSV file');
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadStatus('');
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch('/api/roster/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const result = await response.json();
+
+      if (result.success) {
+        let statusMessage = `✅ ${result.message}`;
+        
+        if (result.uploaded_count > 0) {
+          statusMessage += `\n📝 ${result.uploaded_count} new racers added`;
+        }
+        if (result.updated_count > 0) {
+          statusMessage += `\n🔄 ${result.updated_count} existing racers updated`;
+        }
+        
+        if (result.errors && result.errors.length > 0) {
+          statusMessage += `\n\n⚠️ ${result.errors.length} errors occurred:\n${result.errors.join('\n')}`;
+        }
+        
+        setUploadStatus(statusMessage);
+        
+        // Refresh the finishers list
+        const refreshResponse = await fetch('/api/results');
+        const refreshResult = await refreshResponse.json();
+        if (refreshResult.success && refreshResult.data) {
+          setFinishers(refreshResult.data);
+        }
+      } else {
+        setUploadStatus(`❌ Upload failed: ${result.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error uploading roster:', error);
+      setUploadStatus(`❌ Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsUploading(false);
+      // Clear the file input
+      event.target.value = '';
     }
   };
 
@@ -157,13 +329,19 @@ export default function AdminDashboard() {
   const columns = [
     { key: 'rank', title: 'Rank', width: '80px', align: 'center' as const },
     { key: 'bibNumber', title: 'Bib #', width: '100px', align: 'center' as const },
-    { key: 'racerName', title: 'Racer Name', width: '200px', align: 'left' as const },
+    { key: 'racerName', title: 'Racer Name', width: '180px', align: 'left' as const },
     { key: 'finishTime', title: 'Finish Time', width: '120px', align: 'center' as const },
+    { key: 'gender', title: 'Gender', width: '80px', align: 'center' as const },
+    { key: 'team', title: 'Team', width: '150px', align: 'left' as const },
     { key: 'actions', title: 'Actions', width: '120px', align: 'center' as const },
   ];
 
   const renderRow = (finisher: Finisher, index: number, columns: any[]) => {
-    const isEditing = editingId === finisher.id;
+    const isEditingBib = editingCell?.id === finisher.id && editingCell?.field === 'bibNumber';
+    const isEditingName = editingCell?.id === finisher.id && editingCell?.field === 'racerName';
+    const isEditingTime = editingCell?.id === finisher.id && editingCell?.field === 'finishTime';
+    const isEditingGender = editingCell?.id === finisher.id && editingCell?.field === 'gender';
+    const isEditingTeam = editingCell?.id === finisher.id && editingCell?.field === 'team';
     
     return (
       <tr key={finisher.id}>
@@ -174,69 +352,114 @@ export default function AdminDashboard() {
           {finisher.rank}
         </td>
         <td 
-          className={`text-${columns[1].align} font-mono font-medium`}
+          className={`text-${columns[1].align} font-mono font-medium cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[1].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'bibNumber')}
+          title="Double-click to edit"
         >
-          {isEditing ? (
+          {isEditingBib ? (
             <input
               type="text"
               defaultValue={finisher.bibNumber}
               className="form-input w-20 text-center"
-              onBlur={(e) => handleSave(finisher.id, { bibNumber: e.target.value })}
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'bibNumber', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'bibNumber', e.target.value)}
             />
           ) : (
             finisher.bibNumber
           )}
         </td>
         <td 
-          className={`text-${columns[2].align} font-mono font-medium`}
+          className={`text-${columns[2].align} font-mono font-medium cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[2].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'racerName')}
+          title="Double-click to edit"
         >
-          {isEditing ? (
+          {isEditingName ? (
             <input
               type="text"
               defaultValue={finisher.racerName}
               className="form-input w-full"
-              onBlur={(e) => handleSave(finisher.id, { racerName: e.target.value })}
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'racerName', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'racerName', e.target.value)}
             />
           ) : (
             finisher.racerName
           )}
         </td>
         <td 
-          className={`text-${columns[3].align} font-mono`}
+          className={`text-${columns[3].align} font-mono cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[3].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'finishTime')}
+          title="Double-click to edit"
         >
-          {isEditing ? (
+          {isEditingTime ? (
             <input
               type="text"
-              defaultValue={typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : finisher.finishTime}
+              defaultValue={typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : (finisher.finishTime || '')}
               className="form-input w-24 text-center"
-              onBlur={(e) => handleSave(finisher.id, { finishTime: e.target.value })}
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'finishTime', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'finishTime', e.target.value)}
             />
           ) : (
-            typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : finisher.finishTime
+            finisher.finishTime ? 
+              (typeof finisher.finishTime === 'number' ? formatTime(finisher.finishTime) : finisher.finishTime) :
+              <span className="text-muted-foreground">Not finished</span>
           )}
         </td>
         <td 
-          className={`text-${columns[4].align}`}
+          className={`text-${columns[4].align} cursor-pointer hover:bg-muted/50 transition-colors`}
           style={{ width: columns[4].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'gender')}
+          title="Double-click to edit"
+        >
+          {isEditingGender ? (
+            <select
+              defaultValue={finisher.gender || ''}
+              className="form-input w-16 text-center"
+              autoFocus
+              onKeyPress={(e) => {
+                if (e.key === 'Enter') {
+                  handleCellKeyPress(e, finisher.id, 'gender', (e.target as HTMLSelectElement).value);
+                }
+              }}
+              onBlur={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
+            >
+              <option value="">-</option>
+              <option value="M">M</option>
+              <option value="W">W</option>
+            </select>
+          ) : (
+            <span className="font-mono">{finisher.gender || '-'}</span>
+          )}
+        </td>
+        <td 
+          className={`text-${columns[5].align} cursor-pointer hover:bg-muted/50 transition-colors`}
+          style={{ width: columns[5].width }}
+          onDoubleClick={() => handleCellDoubleClick(finisher.id, 'team')}
+          title="Double-click to edit"
+        >
+          {isEditingTeam ? (
+            <input
+              type="text"
+              defaultValue={finisher.team || ''}
+              className="form-input w-full"
+              autoFocus
+              onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'team', (e.target as HTMLInputElement).value)}
+              onBlur={(e) => handleCellBlur(finisher.id, 'team', e.target.value)}
+            />
+          ) : (
+            <span className="font-mono">{finisher.team || '-'}</span>
+          )}
+        </td>
+        <td 
+          className={`text-${columns[6].align}`}
+          style={{ width: columns[6].width }}
         >
           <div className="flex items-center justify-center gap-1">
-            {isEditing ? (
-              <IconButton
-                icon="check"
-                onClick={() => setEditingId(null)}
-                title="Save changes"
-                variant="success"
-              />
-            ) : (
-              <IconButton
-                icon="edit"
-                onClick={() => handleEdit(finisher.id)}
-                title="Edit entry"
-              />
-            )}
             <IconButton
               icon="delete"
               onClick={() => handleDelete(finisher.id)}
@@ -285,80 +508,144 @@ export default function AdminDashboard() {
           />
         </div>
 
-        {/* Actions */}
-        <div className="flex items-center gap-4 mb-6">
-          <button
-            onClick={() => setShowAddForm(!showAddForm)}
-            className="btn-primary"
-          >
-            <span className="material-icon">add</span>
-            Add Finisher
-          </button>
+        {/* Tabbed Navigation */}
+        <div className="mb-8">
+          <div className="border-b border-border">
+            <nav className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('setup')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'setup'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span className="material-icon text-sm">settings</span>
+                  Race Setup
+                </span>
+              </button>
+              <button
+                onClick={() => setActiveTab('live')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'live'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <span className="material-icon text-sm">live_tv</span>
+                  Live Management
+                </span>
+              </button>
+            </nav>
+          </div>
         </div>
 
-        {/* Add Form */}
-        {showAddForm && (
-          <div className="bg-card border border-border rounded-lg p-6 mb-6">
-            <h3 className="text-lg font-semibold mb-4">Add New Finisher</h3>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div>
-                <label className="block text-sm font-medium mb-2">Bib Number</label>
-                <input
-                  type="text"
-                  value={newFinisher.bibNumber}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, bibNumber: e.target.value }))}
-                  className="form-input"
-                  placeholder="e.g., 123"
-                />
+        {/* Tab Content */}
+        {activeTab === 'setup' && (
+          <div className="space-y-6">
+            {/* Race Clock Controls */}
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-icon text-primary">timer</span>
+                <h2 className="text-xl font-semibold">Official Race Clock</h2>
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Racer Name</label>
-                <input
-                  type="text"
-                  value={newFinisher.racerName}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, racerName: e.target.value }))}
-                  className="form-input"
-                  placeholder="e.g., John Doe"
-                />
+              <p className="text-muted-foreground mb-4">
+                Control the official race clock. All finish times will be calculated relative to when you start the race clock.
+              </p>
+              
+              <RaceClock showControls={true} className="mb-4" />
+            </div>
+
+            {/* Roster Management */}
+            <div className="bg-card border border-border rounded-lg p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-icon text-primary">upload_file</span>
+                <h2 className="text-xl font-semibold">Roster Management</h2>
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">Finish Time</label>
-                <input
-                  type="text"
-                  value={newFinisher.finishTime}
-                  onChange={(e) => setNewFinisher(prev => ({ ...prev, finishTime: e.target.value }))}
-                  className="form-input"
-                  placeholder="e.g., 2:30:45"
-                />
-              </div>
-              <div className="flex items-end gap-2">
-                <button onClick={handleAddFinisher} className="btn-primary">
-                  <span className="material-icon">save</span>
-                  Save
+              <p className="text-muted-foreground mb-4">
+                Upload a CSV file to pre-register all race participants. The CSV should contain headers: bibNumber, racerName, gender (optional), team (optional).
+              </p>
+              
+              <div className="flex items-center gap-4 mb-4">
+                <div className="flex-1">
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleRosterUpload}
+                    disabled={isUploading}
+                    className="form-input"
+                    id="roster-upload"
+                  />
+                </div>
+                <button
+                  onClick={() => document.getElementById('roster-upload')?.click()}
+                  disabled={isUploading}
+                  className="btn-primary"
+                >
+                  <span className="material-icon">
+                    {isUploading ? 'hourglass_empty' : 'upload'}
+                  </span>
+                  {isUploading ? 'Uploading...' : 'Upload Roster'}
                 </button>
-                <button onClick={() => setShowAddForm(false)} className="btn-ghost">
-                  <span className="material-icon">close</span>
-                  Cancel
-                </button>
               </div>
+
+              {uploadStatus && (
+                <div className="bg-muted/50 border border-border rounded-lg p-4">
+                  <pre className="text-sm whitespace-pre-wrap">{uploadStatus}</pre>
+                </div>
+              )}
             </div>
           </div>
         )}
 
-        {/* Results Table */}
-        <div className="bg-card rounded-lg border border-border p-6">
-          <div className="flex items-center gap-2 mb-6">
-            <span className="material-icon text-primary">manage_accounts</span>
-            <h2 className="text-xl font-semibold">Manage Results</h2>
+        {activeTab === 'live' && (
+          <div className="space-y-6">
+            {/* Live Management Header with Clock and Actions */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={handleAddFinisher}
+                  className="btn-primary"
+                  title="Instantly add a finisher with current race time"
+                >
+                  <span className="material-icon">add</span>
+                  Add Finisher
+                </button>
+                <button
+                  onClick={handleDownloadCSV}
+                  className="btn-primary"
+                >
+                  <span className="material-icon">download</span>
+                  Download CSV
+                </button>
+              </div>
+              
+              <div className="text-right">
+                <div className="mb-2">
+                  <span className="text-sm text-muted-foreground">Official Race Time</span>
+                </div>
+                <RaceClock showControls={false} />
+              </div>
+            </div>
+
+            {/* Results Table */}
+            <div className="bg-card rounded-lg border border-border p-6">
+              <div className="flex items-center gap-2 mb-6">
+                <span className="material-icon text-primary">manage_accounts</span>
+                <h2 className="text-xl font-semibold">Manage Results</h2>
+              </div>
+              
+              <DataTable
+                columns={columns}
+                data={finishers}
+                renderRow={renderRow}
+                emptyMessage="No finishers added yet. Click 'Add Finisher' to capture the first racer crossing the finish line."
+              />
+            </div>
           </div>
-          
-          <DataTable
-            columns={columns}
-            data={finishers}
-            renderRow={renderRow}
-            emptyMessage="No finishers added yet. Add the first finisher to get started."
-          />
-        </div>
+        )}
       </div>
     </Layout>
   );
