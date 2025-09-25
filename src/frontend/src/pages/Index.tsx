@@ -186,32 +186,37 @@ const Index = () => {
   );
 
   const renderCategoryCard = (title: string, icon: string, data: Finisher[] | TeamScore[], type: 'individual' | 'team') => (
-    <div className="bg-card rounded-lg border border-border p-6">
-      <div className="flex items-center gap-2 mb-4">
-        <span className="material-icon text-primary">{icon}</span>
-        <h3 className="text-lg font-semibold">{title}</h3>
+    <div className="race-card">
+      <div className="flex items-center gap-3 mb-6">
+        <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-primary/10 border border-primary/20">
+          <span className="material-icon text-primary">{icon}</span>
+        </div>
+        <h3 className="text-xl font-bold">{title}</h3>
       </div>
       
       {data.length === 0 ? (
-        <p className="text-muted-foreground text-sm">No results yet</p>
+        <div className="flex flex-col items-center gap-3 py-8">
+          <span className="material-icon text-4xl text-muted-foreground opacity-50">hourglass_empty</span>
+          <p className="text-muted-foreground font-medium">No results yet</p>
+        </div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {data.map((item, index) => (
-            <div key={index} className="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center justify-center w-8 h-8 bg-primary text-primary-foreground rounded-full text-sm font-bold">
+            <div key={index} className="flex items-center justify-between p-4 bg-surface-elevated rounded-lg border border-border transition-all hover:bg-surface-hover">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center justify-center w-10 h-10 bg-gradient-primary text-primary-foreground rounded-lg text-sm font-bold shadow-md">
                   {index + 1}
                 </div>
                 <div>
                   {type === 'individual' ? (
                     <>
-                      <div className="font-medium">{(item as Finisher).racerName || 'N/A'}</div>
-                      <div className="text-sm text-muted-foreground">Bib #{(item as Finisher).bibNumber}</div>
+                      <div className="font-semibold text-foreground">{(item as Finisher).racerName || 'N/A'}</div>
+                      <div className="text-sm text-muted-foreground font-medium">Bib #{(item as Finisher).bibNumber}</div>
                     </>
                   ) : (
                     <>
-                      <div className="font-medium">{(item as TeamScore).teamName}</div>
-                      <div className="text-sm text-muted-foreground">
+                      <div className="font-semibold text-foreground">{(item as TeamScore).teamName}</div>
+                      <div className="text-sm text-muted-foreground font-medium">
                         {(item as TeamScore).runners.map(r => `#${r.bibNumber}`).join(', ')}
                       </div>
                     </>
@@ -219,18 +224,18 @@ const Index = () => {
                 </div>
               </div>
               <div className="text-right">
-                <div className="font-mono font-medium">
+                <div className="font-mono font-bold text-lg text-foreground">
                   {type === 'individual' 
                     ? formatTime((item as Finisher).finishTime)
                     : formatTime((item as TeamScore).totalTime)
                   }
                 </div>
                 {type === 'individual' ? (
-                  <div className="text-xs text-muted-foreground">
+                  <div className="text-xs text-muted-foreground font-medium">
                     Overall #{(item as Finisher).rank || 'N/A'}
                   </div>
                 ) : (
-                  <div className="text-xs text-muted-foreground">
+                  <div className="text-xs text-muted-foreground font-medium">
                     Combined time
                   </div>
                 )}
@@ -245,24 +250,31 @@ const Index = () => {
   return (
     <Layout>
       <div className="container mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h1 className="text-3xl font-bold mb-2">2025 Slay Sarcoma Race Results</h1>
-              <p className="text-muted-foreground">Live race results updated in real-time</p>
-            </div>
-            <div className="text-right">
-              <div className="mb-2">
-                <span className="text-sm text-muted-foreground">Official Race Time</span>
+        {/* Hero Header */}
+        <div className="mb-12">
+          <div className="race-card">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center justify-center w-16 h-16 rounded-xl bg-primary/10 border border-primary/20">
+                  <span className="material-icon text-3xl text-primary">emoji_events</span>
+                </div>
+                <div>
+                  <h1 className="text-4xl font-bold mb-2 text-gradient">2025 Slay Sarcoma Race</h1>
+                  <p className="text-muted-foreground text-lg">Live results updated in real-time</p>
+                </div>
               </div>
-              <RaceClock showControls={false} />
+              <div className="text-right">
+                <div className="mb-3">
+                  <span className="text-sm text-muted-foreground font-medium uppercase tracking-wider">Official Race Time</span>
+                </div>
+                <RaceClock showControls={false} />
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Stats */}
-        <div className="flex flex-wrap gap-4 mb-8">
+        {/* Key Stats */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
           <StatusChip 
             label="Total Finishers" 
             value={totalFinishers} 
@@ -357,14 +369,12 @@ const Index = () => {
             <h2 className="text-xl font-semibold">Live Results</h2>
           </div>
           
-          <div className="bg-card rounded-lg border border-border p-6">
-            <DataTable
-              columns={columns}
-              data={finishers}
-              renderRow={renderRow}
-              emptyMessage="No finishers yet. Results will appear as runners cross the finish line."
-            />
-          </div>
+          <DataTable
+            columns={columns}
+            data={finishers}
+            renderRow={renderRow}
+            emptyMessage="No finishers yet. Results will appear as runners cross the finish line."
+          />
         </div>
 
         {/* Footer */}

@@ -25,15 +25,17 @@ export default function AdminLogin() {
 
   return (
     <Layout showNavigation={false}>
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center p-6">
         <div className="w-full max-w-md">
-          <div className="bg-card border border-border rounded-lg p-8">
+          <div className="race-card">
             <div className="text-center mb-8">
-              <div className="flex items-center justify-center gap-2 mb-4">
-                <span className="material-icon text-2xl text-primary">admin_panel_settings</span>
-                <h1 className="text-2xl font-bold">Admin Access</h1>
+              <div className="flex items-center justify-center gap-3 mb-6">
+                <div className="flex items-center justify-center w-16 h-16 rounded-xl bg-primary/10 border border-primary/20">
+                  <span className="material-icon text-3xl text-primary">admin_panel_settings</span>
+                </div>
+                <h1 className="text-3xl font-bold text-gradient">Admin Access</h1>
               </div>
-              <p className="text-muted-foreground">Sign in to access the race timing dashboard</p>
+              <p className="text-muted-foreground text-lg">Sign in to access the race timing dashboard</p>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-6">

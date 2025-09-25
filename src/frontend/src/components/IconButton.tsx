@@ -19,14 +19,20 @@ export default function IconButton({
     success: 'hover:text-success'
   };
 
+  const variantStyles = {
+    default: '',
+    destructive: 'hover:text-destructive hover:bg-destructive/10 hover:border-destructive/20',
+    success: 'hover:text-success hover:bg-success/10 hover:border-success/20'
+  };
+
   return (
     <button
-      className={`icon-button ${variantClasses[variant]} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      className={`icon-button ${variantStyles[variant]} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
       onClick={onClick}
       title={title}
       disabled={disabled}
     >
-      <span className="material-icon text-base">{icon}</span>
+      <span className="material-icon">{icon}</span>
     </button>
   );
 }

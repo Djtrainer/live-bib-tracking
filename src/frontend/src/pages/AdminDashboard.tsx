@@ -224,7 +224,7 @@ export default function AdminDashboard() {
 
   const handleDownloadCSV = () => {
     // Create CSV headers
-    const headers = 'Rank,Bib Number,Racer Name,Finish Time\n';
+    const headers = 'Rank,Bib Number,Racer Name,Finish Time,Gender,Team\n';
     
     // Convert finishers data to CSV rows
     const csvRows = finishers.map(finisher => {
@@ -232,7 +232,7 @@ export default function AdminDashboard() {
         ? formatTime(finisher.finishTime) 
         : finisher.finishTime;
       
-      return `${finisher.rank},"${finisher.bibNumber}","${finisher.racerName}","${formattedTime}"`;
+      return `${finisher.rank},"${finisher.bibNumber}","${finisher.racerName}","${formattedTime}","${finisher.gender || ''}","${finisher.team || ''}"`;
     }).join('\n');
     
     // Combine headers and data

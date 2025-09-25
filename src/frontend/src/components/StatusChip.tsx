@@ -10,15 +10,17 @@ export default function StatusChip({ label, value, variant = 'default', icon }: 
   const variantClasses = {
     default: "",
     live: "live",
-    success: "text-success",
-    warning: "text-warning"
+    success: "success",
+    warning: "warning"
   };
 
   return (
     <div className={`${baseClasses} ${variantClasses[variant]}`}>
-      {icon && <span className="material-icon text-xs">{icon}</span>}
-      <span className="font-medium">{label}:</span>
-      <span>{value}</span>
+      {icon && <span className="material-icon text-base">{icon}</span>}
+      <div className="flex flex-col items-start">
+        <span className="text-xs opacity-80 font-medium">{label}</span>
+        <span className="font-bold text-sm">{value}</span>
+      </div>
     </div>
   );
 }

@@ -8,53 +8,76 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    /* Google Gemini Dark Mode Color Palette */
-    --background: 210 7% 12%;          /* #1E1F20 */
-    --foreground: 0 0% 89%;            /* #E3E3E3 */
+    /* Professional Racing Design System - Google Gemini Inspired */
+    --background: 210 7% 12%;           /* #1E1F20 - Deep charcoal */
+    --foreground: 0 0% 94%;             /* #F0F0F0 - Clean white text */
 
-    --card: 210 6% 18%;                /* #2D2E30 */
-    --card-foreground: 0 0% 89%;       /* #E3E3E3 */
+    --card: 210 6% 15%;                 /* #262729 - Elevated surface */
+    --card-foreground: 0 0% 94%;        /* #F0F0F0 - Card text */
 
-    --popover: 210 6% 18%;             /* #2D2E30 */
-    --popover-foreground: 0 0% 89%;    /* #E3E3E3 */
+    --popover: 210 6% 15%;              /* #262729 - Popover background */
+    --popover-foreground: 0 0% 94%;     /* #F0F0F0 - Popover text */
 
-    --primary: 217 91% 60%;            /* #8AB4F8 - Gemini Blue */
-    --primary-foreground: 0 0% 10%;    /* Dark text on primary */
+    --primary: 217 91% 65%;             /* #96C4FF - Bright Gemini blue */
+    --primary-foreground: 210 7% 12%;   /* Dark text on primary */
+    --primary-glow: 217 91% 75%;        /* Lighter primary for accents */
 
-    --secondary: 210 6% 18%;           /* #2D2E30 */
-    --secondary-foreground: 0 0% 89%;  /* #E3E3E3 */
+    --secondary: 210 6% 20%;            /* #323437 - Secondary surfaces */
+    --secondary-foreground: 0 0% 94%;   /* #F0F0F0 - Secondary text */
 
-    --muted: 210 7% 16%;               /* Slightly darker than card */
-    --muted-foreground: 220 9% 64%;    /* #9AA0A6 - Gemini Gray */
+    --muted: 210 7% 14%;                /* #232426 - Muted backgrounds */
+    --muted-foreground: 220 9% 70%;     /* #B8BCC8 - Muted text */
 
-    --accent: 217 91% 60%;             /* #8AB4F8 - Gemini Blue */
-    --accent-foreground: 0 0% 10%;     /* Dark text on accent */
+    --accent: 217 91% 65%;              /* #96C4FF - Accent color */
+    --accent-foreground: 210 7% 12%;    /* Dark text on accent */
 
-    --destructive: 0 84% 60%;          /* Red for destructive actions */
-    --destructive-foreground: 0 0% 98%;
+    --destructive: 0 84% 63%;           /* #F56565 - Error red */
+    --destructive-foreground: 0 0% 98%; /* White text on destructive */
 
-    --border: 210 6% 25%;              /* Subtle borders */
-    --input: 210 6% 18%;               /* Match card background */
-    --ring: 217 91% 60%;               /* Focus ring - Gemini Blue */
+    --success: 142 76% 58%;             /* #4ADE80 - Success green */
+    --success-foreground: 210 7% 12%;   /* Dark text on success */
 
-    --radius: 0.375rem;                /* Slightly smaller radius for Gemini look */
+    --warning: 48 96% 58%;              /* #FDE047 - Warning yellow */
+    --warning-foreground: 210 7% 12%;   /* Dark text on warning */
+
+    --border: 210 6% 22%;               /* #37393D - Subtle borders */
+    --input: 210 6% 15%;                /* #262729 - Input backgrounds */
+    --ring: 217 91% 65%;                /* Focus ring - Bright blue */
+
+    --radius: 0.5rem;                   /* Modern border radius */
 
     /* Sidebar colors */
     --sidebar-background: 210 7% 12%;
-    --sidebar-foreground: 0 0% 89%;
-    --sidebar-primary: 217 91% 60%;
-    --sidebar-primary-foreground: 0 0% 10%;
-    --sidebar-accent: 210 6% 18%;
-    --sidebar-accent-foreground: 0 0% 89%;
-    --sidebar-border: 210 6% 25%;
-    --sidebar-ring: 217 91% 60%;
+    --sidebar-foreground: 0 0% 94%;
+    --sidebar-primary: 217 91% 65%;
+    --sidebar-primary-foreground: 210 7% 12%;
+    --sidebar-accent: 210 6% 15%;
+    --sidebar-accent-foreground: 0 0% 94%;
+    --sidebar-border: 210 6% 22%;
+    --sidebar-ring: 217 91% 65%;
 
-    /* Custom tokens for race timing */
-    --success: 120 78% 55%;            /* Green for success states */
-    --warning: 48 96% 53%;             /* Yellow for warnings */
-    --chip-background: 210 6% 20%;     /* For status chips */
-    --table-hover: 217 91% 60% / 0.1;  /* Subtle hover effect */
-    --live-indicator: 120 78% 55%;     /* Green for live status */
+    /* Professional design tokens */
+    --surface-elevated: 210 6% 18%;     /* Raised elements */
+    --surface-hover: 210 6% 20%;        /* Hover states */
+    --surface-active: 210 6% 25%;       /* Active states */
+    
+    /* Table and data display */
+    --table-header: 210 7% 14%;         /* Table headers */
+    --table-row-hover: 217 91% 65% / 0.08;  /* Subtle row hover */
+    --table-border: 210 6% 20%;         /* Table borders */
+    
+    /* Status indicators */
+    --status-live: 142 76% 58%;         /* Live indicator green */
+    --status-chip: 210 6% 18%;          /* Status chip background */
+    
+    /* Shadows and depth */
+    --shadow-sm: 0 1px 2px 0 hsl(210 7% 8% / 0.15);
+    --shadow-md: 0 4px 6px -1px hsl(210 7% 8% / 0.15), 0 2px 4px -2px hsl(210 7% 8% / 0.1);
+    --shadow-lg: 0 10px 15px -3px hsl(210 7% 8% / 0.15), 0 4px 6px -4px hsl(210 7% 8% / 0.1);
+    
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary-glow)));
+    --gradient-surface: linear-gradient(180deg, hsl(var(--card)), hsl(var(--surface-elevated)));
   }
 }
 
@@ -64,121 +87,229 @@ All colors MUST be HSL.
   }
 
   body {
-    @apply bg-background text-foreground font-roboto;
+    @apply bg-background text-foreground;
+    font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-feature-settings: 'cv03', 'cv04', 'cv11';
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 }
 
 @layer components {
-  /* Race timing specific components */
+  /* Professional status chips */
   .status-chip {
-    @apply inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium;
-    background-color: hsl(var(--chip-background));
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all;
+    background: hsl(var(--status-chip));
+    border-color: hsl(var(--border));
     color: hsl(var(--foreground));
+    box-shadow: var(--shadow-sm);
   }
 
   .status-chip.live {
-    background-color: hsl(var(--live-indicator) / 0.2);
-    color: hsl(var(--live-indicator));
+    background: hsl(var(--status-live) / 0.15);
+    border-color: hsl(var(--status-live) / 0.3);
+    color: hsl(var(--status-live));
+    box-shadow: 0 0 0 1px hsl(var(--status-live) / 0.2), var(--shadow-sm);
   }
 
+  .status-chip.success {
+    background: hsl(var(--success) / 0.15);
+    border-color: hsl(var(--success) / 0.3);
+    color: hsl(var(--success));
+  }
+
+  .status-chip.warning {
+    background: hsl(var(--warning) / 0.15);
+    border-color: hsl(var(--warning) / 0.3);
+    color: hsl(var(--warning));
+  }
+
+  /* Enhanced data tables */
   .data-table {
-    @apply w-full border-collapse;
+    @apply w-full border-collapse rounded-lg overflow-hidden;
+    box-shadow: var(--shadow-md);
   }
 
   .data-table th {
-    @apply text-left py-3 px-4 font-medium text-sm;
+    @apply py-4 px-4 font-semibold text-sm tracking-wide;
+    background: hsl(var(--table-header));
     color: hsl(var(--muted-foreground));
-    border-bottom: 1px solid hsl(var(--border));
+    border-bottom: 1px solid hsl(var(--table-border));
+    position: sticky;
+    top: 0;
+    z-index: 10;
   }
 
   .data-table td {
     @apply py-3 px-4 text-sm;
-    border-bottom: 1px solid hsl(var(--border) / 0.3);
+    border-bottom: 1px solid hsl(var(--table-border) / 0.5);
+    background: hsl(var(--card));
   }
 
-  .data-table tr:hover {
-    background-color: hsl(var(--table-hover));
+  .data-table tr:hover td {
+    background: hsl(var(--table-row-hover));
   }
 
-  .data-table tr.new-entry {
+  .data-table tr.new-entry td {
     animation: highlight-new 2s ease-out;
   }
 
+  /* Material icons with proper sizing */
   .material-icon {
     font-family: 'Material Symbols Outlined';
-    font-weight: normal;
+    font-weight: 400;
     font-style: normal;
-    font-size: 20px;
-    display: inline-block;
+    font-size: 1.25rem;
     line-height: 1;
-    text-transform: none;
     letter-spacing: normal;
-    word-wrap: normal;
+    text-transform: none;
+    display: inline-block;
     white-space: nowrap;
+    word-wrap: normal;
     direction: ltr;
+    -webkit-font-feature-settings: 'liga';
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
 
+  /* Professional icon buttons */
   .icon-button {
-    @apply inline-flex items-center justify-center w-8 h-8 rounded-md transition-colors;
+    @apply relative inline-flex items-center justify-center w-9 h-9 rounded-lg transition-all duration-200;
     color: hsl(var(--muted-foreground));
+    background: transparent;
+    border: 1px solid transparent;
   }
 
   .icon-button:hover {
-    background-color: hsl(var(--accent) / 0.1);
+    background: hsl(var(--surface-hover));
+    border-color: hsl(var(--border));
     color: hsl(var(--accent));
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
   }
 
+  .icon-button:active {
+    transform: translateY(0);
+    background: hsl(var(--surface-active));
+  }
+
+  /* Enhanced form inputs */
   .form-input {
-    @apply w-full px-3 py-2 rounded-md border text-sm;
-    background-color: hsl(var(--input));
+    @apply w-full px-3 py-2.5 rounded-lg border text-sm font-medium transition-all duration-200;
+    background: hsl(var(--input));
     border-color: hsl(var(--border));
     color: hsl(var(--foreground));
+    box-shadow: var(--shadow-sm);
   }
 
   .form-input:focus {
     outline: none;
     border-color: hsl(var(--ring));
-    box-shadow: 0 0 0 2px hsl(var(--ring) / 0.2);
+    box-shadow: 0 0 0 3px hsl(var(--ring) / 0.15), var(--shadow-md);
+    background: hsl(var(--surface-elevated));
   }
 
+  .form-input::placeholder {
+    color: hsl(var(--muted-foreground));
+  }
+
+  /* Professional button system */
   .btn-primary {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
-    background-color: hsl(var(--primary));
+    @apply inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200;
+    background: var(--gradient-primary);
     color: hsl(var(--primary-foreground));
+    border: 1px solid hsl(var(--primary));
+    box-shadow: var(--shadow-md);
   }
 
   .btn-primary:hover {
-    background-color: hsl(var(--primary) / 0.9);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-lg);
+    filter: brightness(1.1);
+  }
+
+  .btn-primary:active {
+    transform: translateY(0);
+    box-shadow: var(--shadow-sm);
   }
 
   .btn-secondary {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
-    background-color: hsl(var(--secondary));
+    @apply inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200;
+    background: hsl(var(--secondary));
     color: hsl(var(--secondary-foreground));
+    border: 1px solid hsl(var(--border));
+    box-shadow: var(--shadow-sm);
   }
 
   .btn-secondary:hover {
-    background-color: hsl(var(--secondary) / 0.8);
+    background: hsl(var(--surface-hover));
+    border-color: hsl(var(--accent) / 0.5);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-ghost {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
+    @apply inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200;
     color: hsl(var(--foreground));
+    background: transparent;
+    border: 1px solid transparent;
   }
 
   .btn-ghost:hover {
-    background-color: hsl(var(--accent) / 0.1);
+    background: hsl(var(--surface-hover));
+    border-color: hsl(var(--border));
     color: hsl(var(--accent));
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+  }
+
+  /* Professional card styling */
+  .race-card {
+    @apply rounded-xl border p-6 transition-all duration-200;
+    background: var(--gradient-surface);
+    border-color: hsl(var(--border));
+    box-shadow: var(--shadow-md);
+  }
+
+  .race-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+    border-color: hsl(var(--accent) / 0.3);
+  }
+
+  /* Enhanced typography */
+  .text-gradient {
+    background: var(--gradient-primary);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
   }
 }
 
 @keyframes highlight-new {
   0% {
-    background-color: hsl(var(--primary) / 0.3);
+    background-color: hsl(var(--success) / 0.2);
+    transform: scale(1.02);
+  }
+  50% {
+    background-color: hsl(var(--success) / 0.1);
   }
   100% {
     background-color: transparent;
+    transform: scale(1);
   }
+}
+
+@keyframes pulse-live {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.pulse-live {
+  animation: pulse-live 2s ease-in-out infinite;
 }
