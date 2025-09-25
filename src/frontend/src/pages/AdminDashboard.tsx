@@ -478,7 +478,7 @@ export default function AdminDashboard() {
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
           <div>
-            <h1 className="text-3xl font-bold mb-2">Race Administration</h1>
+            <h1 className="text-3xl font-bold mb-2 text-gradient">Slay Sarcoma Race Administration</h1>
             <p className="text-muted-foreground">Manage race results and finisher data</p>
           </div>
           <button onClick={handleLogout} className="btn-ghost">

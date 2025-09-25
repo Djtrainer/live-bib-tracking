@@ -8,72 +8,72 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    /* Professional Racing Design System - Google Gemini Inspired */
-    --background: 210 7% 12%;           /* #1E1F20 - Deep charcoal */
-    --foreground: 0 0% 94%;             /* #F0F0F0 - Clean white text */
+    /* Slay Sarcoma Brand Design System */
+    --background: 0 0% 5%;              /* Deep black background */
+    --foreground: 0 0% 98%;             /* Pure white text */
 
-    --card: 210 6% 15%;                 /* #262729 - Elevated surface */
-    --card-foreground: 0 0% 94%;        /* #F0F0F0 - Card text */
+    --card: 0 0% 10%;                   /* Dark card background */
+    --card-foreground: 0 0% 98%;        /* White card text */
 
-    --popover: 210 6% 15%;              /* #262729 - Popover background */
-    --popover-foreground: 0 0% 94%;     /* #F0F0F0 - Popover text */
+    --popover: 0 0% 10%;                /* Dark popover background */
+    --popover-foreground: 0 0% 98%;     /* White popover text */
 
-    --primary: 217 91% 65%;             /* #96C4FF - Bright Gemini blue */
-    --primary-foreground: 210 7% 12%;   /* Dark text on primary */
-    --primary-glow: 217 91% 75%;        /* Lighter primary for accents */
+    --primary: 287 36% 54%;             /* #A26BAE - Slay Sarcoma purple */
+    --primary-foreground: 0 0% 98%;     /* White text on primary */
+    --primary-glow: 287 36% 70%;        /* Lighter purple for accents */
 
-    --secondary: 210 6% 20%;            /* #323437 - Secondary surfaces */
-    --secondary-foreground: 0 0% 94%;   /* #F0F0F0 - Secondary text */
+    --secondary: 287 27% 87%;           /* #D8C6E0 - Light purple */
+    --secondary-foreground: 0 0% 5%;    /* Dark text on secondary */
 
-    --muted: 210 7% 14%;                /* #232426 - Muted backgrounds */
-    --muted-foreground: 220 9% 70%;     /* #B8BCC8 - Muted text */
+    --muted: 0 0% 15%;                  /* Dark muted backgrounds */
+    --muted-foreground: 0 0% 65%;       /* Light gray muted text */
 
-    --accent: 217 91% 65%;              /* #96C4FF - Accent color */
-    --accent-foreground: 210 7% 12%;    /* Dark text on accent */
+    --accent: 287 36% 54%;              /* Purple accent */
+    --accent-foreground: 0 0% 98%;      /* White text on accent */
 
-    --destructive: 0 84% 63%;           /* #F56565 - Error red */
+    --destructive: 0 84% 60%;           /* Red for destructive actions */
     --destructive-foreground: 0 0% 98%; /* White text on destructive */
 
-    --success: 142 76% 58%;             /* #4ADE80 - Success green */
-    --success-foreground: 210 7% 12%;   /* Dark text on success */
+    --success: 142 76% 58%;             /* Green for success */
+    --success-foreground: 0 0% 5%;      /* Dark text on success */
 
-    --warning: 48 96% 58%;              /* #FDE047 - Warning yellow */
-    --warning-foreground: 210 7% 12%;   /* Dark text on warning */
+    --warning: 48 96% 58%;              /* Yellow for warning */
+    --warning-foreground: 0 0% 5%;      /* Dark text on warning */
 
-    --border: 210 6% 22%;               /* #37393D - Subtle borders */
-    --input: 210 6% 15%;                /* #262729 - Input backgrounds */
-    --ring: 217 91% 65%;                /* Focus ring - Bright blue */
+    --border: 0 0% 20%;                 /* Dark borders */
+    --input: 0 0% 10%;                  /* Dark input backgrounds */
+    --ring: 287 36% 54%;                /* Purple focus ring */
 
     --radius: 0.5rem;                   /* Modern border radius */
 
     /* Sidebar colors */
-    --sidebar-background: 210 7% 12%;
-    --sidebar-foreground: 0 0% 94%;
-    --sidebar-primary: 217 91% 65%;
-    --sidebar-primary-foreground: 210 7% 12%;
-    --sidebar-accent: 210 6% 15%;
-    --sidebar-accent-foreground: 0 0% 94%;
-    --sidebar-border: 210 6% 22%;
-    --sidebar-ring: 217 91% 65%;
+    --sidebar-background: 0 0% 5%;
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 287 36% 54%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 0 0% 10%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 0 0% 20%;
+    --sidebar-ring: 287 36% 54%;
 
     /* Professional design tokens */
-    --surface-elevated: 210 6% 18%;     /* Raised elements */
-    --surface-hover: 210 6% 20%;        /* Hover states */
-    --surface-active: 210 6% 25%;       /* Active states */
+    --surface-elevated: 0 0% 12%;       /* Raised elements */
+    --surface-hover: 0 0% 15%;          /* Hover states */
+    --surface-active: 0 0% 18%;         /* Active states */
     
     /* Table and data display */
-    --table-header: 210 7% 14%;         /* Table headers */
-    --table-row-hover: 217 91% 65% / 0.08;  /* Subtle row hover */
-    --table-border: 210 6% 20%;         /* Table borders */
+    --table-header: 0 0% 8%;            /* Table headers */
+    --table-row-hover: 287 36% 54% / 0.08;  /* Subtle purple row hover */
+    --table-border: 0 0% 20%;           /* Table borders */
     
     /* Status indicators */
     --status-live: 142 76% 58%;         /* Live indicator green */
-    --status-chip: 210 6% 18%;          /* Status chip background */
+    --status-chip: 0 0% 12%;            /* Status chip background */
     
     /* Shadows and depth */
-    --shadow-sm: 0 1px 2px 0 hsl(210 7% 8% / 0.15);
-    --shadow-md: 0 4px 6px -1px hsl(210 7% 8% / 0.15), 0 2px 4px -2px hsl(210 7% 8% / 0.1);
-    --shadow-lg: 0 10px 15px -3px hsl(210 7% 8% / 0.15), 0 4px 6px -4px hsl(210 7% 8% / 0.1);
+    --shadow-sm: 0 1px 2px 0 hsl(0 0% 0% / 0.25);
+    --shadow-md: 0 4px 6px -1px hsl(0 0% 0% / 0.25), 0 2px 4px -2px hsl(0 0% 0% / 0.15);
+    --shadow-lg: 0 10px 15px -3px hsl(0 0% 0% / 0.25), 0 4px 6px -4px hsl(0 0% 0% / 0.15);
     
     /* Gradients */
     --gradient-primary: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary-glow)));

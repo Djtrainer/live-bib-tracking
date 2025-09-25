@@ -259,7 +259,7 @@ const Index = () => {
                   <span className="material-icon text-3xl text-primary">emoji_events</span>
                 </div>
                 <div>
-                  <h1 className="text-4xl font-bold mb-2 text-gradient">2025 Slay Sarcoma Race</h1>
+                  <h1 className="text-4xl font-bold mb-2 text-gradient">Slay Sarcoma Race 2025</h1>
                   <p className="text-muted-foreground text-lg">Live results updated in real-time</p>
                 </div>
               </div>

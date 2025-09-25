@@ -17,9 +17,13 @@ export default function Layout({ children, showNavigation = true }: LayoutProps)
           <div className="container mx-auto px-6">
             <div className="flex items-center justify-between h-16">
               <div className="flex items-center gap-8">
-                <Link to="/" className="flex items-center gap-2 text-xl font-bold text-foreground">
-                  <span className="material-icon text-primary text-2xl">timer</span>
-                  <span className="text-gradient">Race Timing Pro</span>
+                <Link to="/" className="flex items-center gap-3 text-xl font-bold text-foreground">
+                  <img 
+                    src="/src/assets/ssri-logo.jpg" 
+                    alt="Slay Sarcoma Research Initiative" 
+                    className="h-10 w-auto rounded"
+                  />
+                  <span className="text-gradient">Slay Sarcoma Race Timing</span>
                 </Link>
                 <nav className="hidden md:flex items-center gap-6">
                   <Link 

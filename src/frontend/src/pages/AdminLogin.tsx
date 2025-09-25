@@ -33,7 +33,7 @@ export default function AdminLogin() {
                 <div className="flex items-center justify-center w-16 h-16 rounded-xl bg-primary/10 border border-primary/20">
                   <span className="material-icon text-3xl text-primary">admin_panel_settings</span>
                 </div>
-                <h1 className="text-3xl font-bold text-gradient">Admin Access</h1>
+                <h1 className="text-3xl font-bold text-gradient">Slay Sarcoma Admin</h1>
               </div>
               <p className="text-muted-foreground text-lg">Sign in to access the race timing dashboard</p>
             </div>
