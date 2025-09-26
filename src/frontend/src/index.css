@@ -8,53 +8,57 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    /* Google Gemini Dark Mode Color Palette */
-    --background: 210 7% 12%;          /* #1E1F20 */
-    --foreground: 0 0% 89%;            /* #E3E3E3 */
+    /* Slay Sarcoma Professional Color Palette */
+    --background: 240 10% 3.9%;        /* Deep professional dark */
+    --foreground: 0 0% 98%;             /* Clean white text */
 
-    --card: 210 6% 18%;                /* #2D2E30 */
-    --card-foreground: 0 0% 89%;       /* #E3E3E3 */
+    --card: 240 10% 7%;                 /* Elevated dark surface */
+    --card-foreground: 0 0% 98%;        /* Clean white on cards */
 
-    --popover: 210 6% 18%;             /* #2D2E30 */
-    --popover-foreground: 0 0% 89%;    /* #E3E3E3 */
+    --popover: 240 10% 7%;              /* Match card for consistency */
+    --popover-foreground: 0 0% 98%;     /* Clean white */
 
-    --primary: 217 91% 60%;            /* #8AB4F8 - Gemini Blue */
-    --primary-foreground: 0 0% 10%;    /* Dark text on primary */
+    --primary: 290 54% 59%;             /* Slay Sarcoma Purple #A26BAE */
+    --primary-foreground: 0 0% 98%;     /* White text on primary */
 
-    --secondary: 210 6% 18%;           /* #2D2E30 */
-    --secondary-foreground: 0 0% 89%;  /* #E3E3E3 */
+    --secondary: 279 23% 84%;           /* Light purple #D8C6E0 */
+    --secondary-foreground: 240 10% 3.9%; /* Dark text on light secondary */
 
-    --muted: 210 7% 16%;               /* Slightly darker than card */
-    --muted-foreground: 220 9% 64%;    /* #9AA0A6 - Gemini Gray */
+    --muted: 240 5% 15%;                /* Subtle muted background */
+    --muted-foreground: 240 5% 64.9%;  /* Muted text */
 
-    --accent: 217 91% 60%;             /* #8AB4F8 - Gemini Blue */
-    --accent-foreground: 0 0% 10%;     /* Dark text on accent */
+    --accent: 290 54% 59%;              /* Match primary for cohesion */
+    --accent-foreground: 0 0% 98%;      /* White text on accent */
 
-    --destructive: 0 84% 60%;          /* Red for destructive actions */
+    --destructive: 0 62.8% 30.6%;      /* Professional red */
     --destructive-foreground: 0 0% 98%;
 
-    --border: 210 6% 25%;              /* Subtle borders */
-    --input: 210 6% 18%;               /* Match card background */
-    --ring: 217 91% 60%;               /* Focus ring - Gemini Blue */
+    --border: 240 5.9% 20%;             /* Subtle borders */
+    --input: 240 10% 7%;                /* Match card background */
+    --ring: 290 54% 59%;                /* Focus ring - Slay Sarcoma Purple */
 
-    --radius: 0.375rem;                /* Slightly smaller radius for Gemini look */
+    --radius: 0.75rem;                  /* Modern larger radius */
 
     /* Sidebar colors */
-    --sidebar-background: 210 7% 12%;
-    --sidebar-foreground: 0 0% 89%;
-    --sidebar-primary: 217 91% 60%;
-    --sidebar-primary-foreground: 0 0% 10%;
-    --sidebar-accent: 210 6% 18%;
-    --sidebar-accent-foreground: 0 0% 89%;
-    --sidebar-border: 210 6% 25%;
-    --sidebar-ring: 217 91% 60%;
+    --sidebar-background: 240 10% 3.9%;
+    --sidebar-foreground: 0 0% 98%;
+    --sidebar-primary: 290 54% 59%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 10% 7%;
+    --sidebar-accent-foreground: 0 0% 98%;
+    --sidebar-border: 240 5.9% 20%;
+    --sidebar-ring: 290 54% 59%;
 
-    /* Custom tokens for race timing */
-    --success: 120 78% 55%;            /* Green for success states */
-    --warning: 48 96% 53%;             /* Yellow for warnings */
-    --chip-background: 210 6% 20%;     /* For status chips */
-    --table-hover: 217 91% 60% / 0.1;  /* Subtle hover effect */
-    --live-indicator: 120 78% 55%;     /* Green for live status */
+    /* Slay Sarcoma themed tokens */
+    --success: 120 60% 50%;             /* Professional green */
+    --warning: 45 93% 47%;              /* Professional amber */
+    --live-indicator: 120 100% 50%;     /* Bright green for live status */
+    
+    /* Enhanced gradients for modern look */
+    --gradient-primary: linear-gradient(135deg, hsl(290 54% 59%) 0%, hsl(279 23% 84%) 100%);
+    --gradient-card: linear-gradient(135deg, hsl(240 10% 7%) 0%, hsl(240 5% 15%) 100%);
+    --shadow-primary: 0 10px 40px -10px hsl(290 54% 59% / 0.3);
+    --shadow-card: 0 8px 32px -8px hsl(240 10% 3.9% / 0.8);
   }
 }
 
@@ -64,46 +68,99 @@ All colors MUST be HSL.
   }
 
   body {
-    @apply bg-background text-foreground font-roboto;
+    @apply bg-background text-foreground;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 }
 
 @layer components {
-  /* Race timing specific components */
+  /* Modern Slay Sarcoma Component System */
+  
+  /* Enhanced Status Chips with modern styling */
   .status-chip {
-    @apply inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium;
-    background-color: hsl(var(--chip-background));
+    @apply inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200;
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted)) 100%);
+    border: 1px solid hsl(var(--border));
     color: hsl(var(--foreground));
+    box-shadow: var(--shadow-card);
   }
 
   .status-chip.live {
-    background-color: hsl(var(--live-indicator) / 0.2);
+    background: linear-gradient(135deg, hsl(var(--live-indicator) / 0.15) 0%, hsl(var(--live-indicator) / 0.05) 100%);
+    border: 1px solid hsl(var(--live-indicator) / 0.3);
     color: hsl(var(--live-indicator));
+    box-shadow: 0 0 20px hsl(var(--live-indicator) / 0.2);
+    animation: pulse-glow 2s ease-in-out infinite alternate;
   }
 
-  .data-table {
-    @apply w-full border-collapse;
+  .status-chip.success {
+    background: linear-gradient(135deg, hsl(var(--success) / 0.15) 0%, hsl(var(--success) / 0.05) 100%);
+    border: 1px solid hsl(var(--success) / 0.3);
+    color: hsl(var(--success));
   }
 
-  .data-table th {
-    @apply text-left py-3 px-4 font-medium text-sm;
-    color: hsl(var(--muted-foreground));
-    border-bottom: 1px solid hsl(var(--border));
+  .status-chip.warning {
+    background: linear-gradient(135deg, hsl(var(--warning) / 0.15) 0%, hsl(var(--warning) / 0.05) 100%);
+    border: 1px solid hsl(var(--warning) / 0.3);
+    color: hsl(var(--warning));
   }
 
-  .data-table td {
-    @apply py-3 px-4 text-sm;
+  /* Modern elevated cards */
+  .modern-card {
+    @apply rounded-xl border transition-all duration-300;
+    background: var(--gradient-card);
+    border: 1px solid hsl(var(--border));
+    box-shadow: var(--shadow-card);
+  }
+
+  .modern-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 16px 48px -16px hsl(var(--primary) / 0.2), var(--shadow-card);
+  }
+
+  /* Professional data tables */
+  .professional-table {
+    @apply w-full border-collapse rounded-xl overflow-hidden;
+    background: var(--gradient-card);
+    border: 1px solid hsl(var(--border));
+    box-shadow: var(--shadow-card);
+  }
+
+  .professional-table thead {
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.1) 0%, hsl(var(--accent) / 0.05) 100%);
+    border-bottom: 2px solid hsl(var(--border));
+  }
+
+  .professional-table th {
+    @apply text-left py-4 px-6 font-semibold text-sm tracking-wide;
+    color: hsl(var(--primary));
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .professional-table td {
+    @apply py-4 px-6 text-sm;
     border-bottom: 1px solid hsl(var(--border) / 0.3);
   }
 
-  .data-table tr:hover {
-    background-color: hsl(var(--table-hover));
+  .professional-table tbody tr {
+    @apply transition-all duration-200;
   }
 
-  .data-table tr.new-entry {
-    animation: highlight-new 2s ease-out;
+  .professional-table tbody tr:hover {
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.05) 0%, hsl(var(--accent) / 0.02) 100%);
+    transform: scale(1.002);
   }
 
+  .professional-table tbody tr.new-entry {
+    animation: highlight-new-modern 3s ease-out;
+  }
+
+  /* Modern Material Icons */
   .material-icon {
     font-family: 'Material Symbols Outlined';
     font-weight: normal;
@@ -120,57 +177,97 @@ All colors MUST be HSL.
     text-rendering: optimizeLegibility;
   }
 
+  /* Enhanced icon buttons */
   .icon-button {
-    @apply inline-flex items-center justify-center w-8 h-8 rounded-md transition-colors;
+    @apply inline-flex items-center justify-center w-10 h-10 rounded-full transition-all duration-200;
     color: hsl(var(--muted-foreground));
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted)) 100%);
+    border: 1px solid hsl(var(--border));
   }
 
   .icon-button:hover {
-    background-color: hsl(var(--accent) / 0.1);
-    color: hsl(var(--accent));
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.1) 0%, hsl(var(--accent) / 0.05) 100%);
+    color: hsl(var(--primary));
+    transform: scale(1.05);
+    box-shadow: var(--shadow-primary);
   }
 
+  /* Modern form inputs */
   .form-input {
-    @apply w-full px-3 py-2 rounded-md border text-sm;
-    background-color: hsl(var(--input));
-    border-color: hsl(var(--border));
+    @apply w-full px-4 py-3 rounded-xl border text-sm transition-all duration-200;
+    background: linear-gradient(135deg, hsl(var(--input)) 0%, hsl(var(--card)) 100%);
+    border: 1px solid hsl(var(--border));
     color: hsl(var(--foreground));
   }
 
   .form-input:focus {
     outline: none;
-    border-color: hsl(var(--ring));
-    box-shadow: 0 0 0 2px hsl(var(--ring) / 0.2);
+    border-color: hsl(var(--primary));
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.1), var(--shadow-primary);
+    transform: translateY(-1px);
   }
 
+  /* Premium button styles */
   .btn-primary {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
-    background-color: hsl(var(--primary));
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold transition-all duration-200;
+    background: var(--gradient-primary);
     color: hsl(var(--primary-foreground));
+    border: 1px solid hsl(var(--primary));
+    box-shadow: var(--shadow-primary);
   }
 
   .btn-primary:hover {
-    background-color: hsl(var(--primary) / 0.9);
+    transform: translateY(-2px);
+    box-shadow: 0 16px 32px -8px hsl(var(--primary) / 0.4), var(--shadow-primary);
   }
 
   .btn-secondary {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
-    background-color: hsl(var(--secondary));
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold transition-all duration-200;
+    background: linear-gradient(135deg, hsl(var(--secondary)) 0%, hsl(var(--secondary) / 0.8) 100%);
     color: hsl(var(--secondary-foreground));
+    border: 1px solid hsl(var(--secondary));
   }
 
   .btn-secondary:hover {
-    background-color: hsl(var(--secondary) / 0.8);
+    background: linear-gradient(135deg, hsl(var(--secondary) / 0.9) 0%, hsl(var(--secondary) / 0.7) 100%);
+    transform: translateY(-1px);
   }
 
   .btn-ghost {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-semibold transition-all duration-200;
     color: hsl(var(--foreground));
+    background: transparent;
+    border: 1px solid transparent;
   }
 
   .btn-ghost:hover {
-    background-color: hsl(var(--accent) / 0.1);
-    color: hsl(var(--accent));
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.1) 0%, hsl(var(--accent) / 0.05) 100%);
+    color: hsl(var(--primary));
+    border-color: hsl(var(--primary) / 0.3);
+  }
+
+  /* Professional header styling */
+  .professional-header {
+    background: linear-gradient(135deg, hsl(var(--background)) 0%, hsl(var(--card)) 100%);
+    border-bottom: 1px solid hsl(var(--border));
+    box-shadow: 0 4px 16px -4px hsl(var(--background) / 0.8);
+  }
+
+  /* Stats grid for modern layout */
+  .stats-grid {
+    @apply grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6;
+  }
+
+  .stat-card {
+    @apply p-6 rounded-xl transition-all duration-300;
+    background: var(--gradient-card);
+    border: 1px solid hsl(var(--border));
+    box-shadow: var(--shadow-card);
+  }
+
+  .stat-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 20px 48px -12px hsl(var(--primary) / 0.15), var(--shadow-card);
   }
 }
 
@@ -180,5 +277,25 @@ All colors MUST be HSL.
   }
   100% {
     background-color: transparent;
+  }
+}
+
+@keyframes highlight-new-modern {
+  0% {
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.3) 0%, hsl(var(--accent) / 0.2) 100%);
+    transform: scale(1.02);
+  }
+  100% {
+    background: transparent;
+    transform: scale(1);
+  }
+}
+
+@keyframes pulse-glow {
+  0% {
+    box-shadow: 0 0 20px hsl(var(--live-indicator) / 0.2);
+  }
+  100% {
+    box-shadow: 0 0 30px hsl(var(--live-indicator) / 0.4);
   }
 }
