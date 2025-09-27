@@ -1,5 +1,5 @@
 # Frontend-only Dockerfile for development
-FROM node:18-alpine
+FROM --platform=linux/amd64 node:18-slim
 
 # Set working directory
 WORKDIR /app

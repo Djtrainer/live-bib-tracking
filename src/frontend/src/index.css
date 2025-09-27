@@ -8,55 +8,71 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    /* Google Gemini Dark Mode Color Palette */
-    --background: 210 7% 12%;          /* #1E1F20 */
-    --foreground: 0 0% 89%;            /* #E3E3E3 */
+    /* Slay Sarcoma Brand Identity - Light Mode */
+    --background: 0 0% 100%;           /* White background */
+    --foreground: 0 0% 9%;             /* Near black text */
 
-    --card: 210 6% 18%;                /* #2D2E30 */
-    --card-foreground: 0 0% 89%;       /* #E3E3E3 */
+    --card: 0 0% 100%;                 /* White cards */
+    --card-foreground: 0 0% 9%;        /* Near black text */
 
-    --popover: 210 6% 18%;             /* #2D2E30 */
-    --popover-foreground: 0 0% 89%;    /* #E3E3E3 */
+    --popover: 0 0% 100%;              /* White popover */
+    --popover-foreground: 0 0% 9%;     /* Near black text */
 
-    --primary: 217 91% 60%;            /* #8AB4F8 - Gemini Blue */
-    --primary-foreground: 0 0% 10%;    /* Dark text on primary */
+    --primary: 291 19% 55%;            /* #A26BAE - Slay Sarcoma Purple */
+    --primary-foreground: 0 0% 100%;   /* White text on primary */
 
-    --secondary: 210 6% 18%;           /* #2D2E30 */
-    --secondary-foreground: 0 0% 89%;  /* #E3E3E3 */
+    --secondary: 291 33% 86%;          /* #D8C6E0 - Light Purple */
+    --secondary-foreground: 0 0% 9%;   /* Dark text on secondary */
 
-    --muted: 210 7% 16%;               /* Slightly darker than card */
-    --muted-foreground: 220 9% 64%;    /* #9AA0A6 - Gemini Gray */
+    --muted: 0 0% 96%;                 /* Very light gray */
+    --muted-foreground: 0 0% 45%;      /* Medium gray text */
 
-    --accent: 217 91% 60%;             /* #8AB4F8 - Gemini Blue */
-    --accent-foreground: 0 0% 10%;     /* Dark text on accent */
+    --accent: 291 19% 55%;             /* #A26BAE - Slay Sarcoma Purple */
+    --accent-foreground: 0 0% 100%;    /* White text on accent */
 
     --destructive: 0 84% 60%;          /* Red for destructive actions */
     --destructive-foreground: 0 0% 98%;
 
-    --border: 210 6% 25%;              /* Subtle borders */
-    --input: 210 6% 18%;               /* Match card background */
-    --ring: 217 91% 60%;               /* Focus ring - Gemini Blue */
+    --border: 0 0% 90%;                /* Light gray borders */
+    --input: 0 0% 100%;                /* White inputs */
+    --ring: 291 19% 55%;               /* Purple focus ring */
 
-    --radius: 0.375rem;                /* Slightly smaller radius for Gemini look */
+    --radius: 0.5rem;                  /* Smooth rounded corners */
 
     /* Sidebar colors */
-    --sidebar-background: 210 7% 12%;
-    --sidebar-foreground: 0 0% 89%;
-    --sidebar-primary: 217 91% 60%;
-    --sidebar-primary-foreground: 0 0% 10%;
-    --sidebar-accent: 210 6% 18%;
-    --sidebar-accent-foreground: 0 0% 89%;
-    --sidebar-border: 210 6% 25%;
-    --sidebar-ring: 217 91% 60%;
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 0 0% 9%;
+    --sidebar-primary: 291 19% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 291 33% 86%;
+    --sidebar-accent-foreground: 0 0% 9%;
+    --sidebar-border: 0 0% 90%;
+    --sidebar-ring: 291 19% 55%;
+
+    /* Success/Live status colors */
+    --success: 142 76% 36%;            /* Green for live status */
+    --success-foreground: 0 0% 98%;
+
+    /* Design System Extensions */
+    --gradient-primary: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary) / 0.8));
+    --shadow-elegant: 0 10px 30px -10px hsl(var(--primary) / 0.2);
+    --shadow-subtle: 0 2px 8px -2px hsl(var(--border) / 0.4);
+  }
 
     /* Custom tokens for race timing */
-    --success: 120 78% 55%;            /* Green for success states */
-    --warning: 48 96% 53%;             /* Yellow for warnings */
-    --chip-background: 210 6% 20%;     /* For status chips */
-    --table-hover: 217 91% 60% / 0.1;  /* Subtle hover effect */
-    --live-indicator: 120 78% 55%;     /* Green for live status */
+    --success: 120 78% 35%;            /* Darker green for better contrast */
+    --warning: 48 96% 45%;             /* Darker yellow for better contrast */
+    --chip-background: 0 0% 96%;       /* Light gray for status chips */
+    --table-hover: 291 19% 55% / 0.08; /* Purple hover effect */
+    --live-indicator: 120 78% 35%;     /* Green for live status */
+    
+    /* Professional shadows and gradients */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    --gradient-purple: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--secondary)));
+    --gradient-subtle: linear-gradient(135deg, hsl(var(--background)), hsl(var(--muted)));
   }
-}
 
 @layer base {
   * {
@@ -69,41 +85,348 @@ All colors MUST be HSL.
 }
 
 @layer components {
-  /* Race timing specific components */
+  /* TV-Optimized Professional Design System */
+  .leaderboard-container {
+    @apply min-h-screen;
+    background: linear-gradient(135deg, hsl(var(--background)) 0%, hsl(var(--muted)) 100%);
+    padding: 2rem;
+  }
+
+  /* TV Hero Section - Compact but prominent */
+  .hero-section-tv {
+    @apply relative overflow-hidden rounded-2xl p-6 mb-6;
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.05) 0%, hsl(var(--secondary) / 0.1) 100%);
+    border: 1px solid hsl(var(--border) / 0.5);
+    backdrop-filter: blur(10px);
+  }
+
+  .hero-title-tv {
+    @apply text-4xl md:text-5xl font-black text-center mb-4;
+    background: linear-gradient(135deg, hsl(var(--foreground)) 0%, hsl(var(--primary)) 50%, hsl(var(--secondary)) 100%);
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 0 4px 12px hsl(var(--primary) / 0.2);
+  }
+
+  /* TV Race Clock - Side positioned */
+  .race-clock-tv {
+    @apply flex items-center gap-3 p-4 rounded-xl;
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted) / 0.3) 100%);
+    border: 1px solid hsl(var(--border) / 0.3);
+    box-shadow: 0 8px 32px hsl(var(--primary) / 0.1);
+  }
+
+  .race-clock-time-tv {
+    @apply text-2xl md:text-3xl font-mono font-black text-primary;
+    filter: drop-shadow(0 2px 4px hsl(var(--primary) / 0.2));
+  }
+
+  /* TV Stats Grid - Horizontal layout */
+  .stats-grid-tv {
+    @apply flex gap-4 justify-center;
+  }
+
+  .stat-card-tv {
+    @apply bg-card rounded-xl p-4 border border-border/50 transition-all duration-300 min-w-[120px];
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted) / 0.2) 100%);
+  }
+
+  .stat-value-tv {
+    @apply text-3xl font-black text-primary mb-1 text-center;
+  }
+
+  .stat-label-tv {
+    @apply text-xs font-semibold text-muted-foreground uppercase tracking-widest text-center;
+  }
+
+  /* TV Layout Grid - Optimized for wide screens */
+  .tv-dashboard-grid {
+    @apply grid grid-cols-12 gap-6;
+  }
+
+  .tv-main-content {
+    @apply col-span-8;
+  }
+
+  .tv-sidebar {
+    @apply col-span-4 space-y-6;
+  }
+
+  /* TV Section Cards */
+  .section-card-tv {
+    @apply bg-card rounded-xl border border-border/50 overflow-hidden;
+    box-shadow: 0 4px 20px hsl(var(--border) / 0.1);
+  }
+
+  .section-header-tv {
+    @apply flex items-center gap-3 p-4 border-b border-border/50;
+    background: linear-gradient(135deg, hsl(var(--muted) / 0.3) 0%, hsl(var(--muted) / 0.1) 100%);
+  }
+
+  .section-icon-tv {
+    @apply p-2 rounded-lg;
+    background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary) / 0.8) 100%);
+  }
+
+  .section-title-tv {
+    @apply text-xl font-bold text-foreground;
+  }
+
+  /* TV Results Table - Larger fonts for distance viewing */
+  .results-table-tv {
+    @apply w-full;
+  }
+
+  .results-table-tv thead tr {
+    @apply bg-gradient-to-r from-muted/50 to-muted/30;
+  }
+
+  .results-table-tv thead th {
+    @apply px-6 py-4 text-left font-bold text-base text-muted-foreground border-b border-border;
+  }
+
+  .results-table-tv tbody tr {
+    @apply border-b border-border/30 transition-all duration-200 hover:bg-muted/20;
+  }
+
+  .results-table-tv tbody tr:nth-child(5n) {
+    @apply border-b-2 border-primary/20;
+  }
+
+  .results-table-tv tbody td {
+    @apply px-6 py-4 text-base;
+  }
+
+  .rank-cell-tv {
+    @apply font-mono font-black text-2xl text-center;
+  }
+
+  .bib-cell-tv {
+    @apply font-mono font-bold text-xl text-primary text-center;
+  }
+
+  .name-cell-tv {
+    @apply font-semibold text-lg;
+  }
+
+  .time-cell-tv {
+    @apply font-mono font-black text-xl text-primary text-center;
+  }
+
+  /* TV Category Cards - Compact sidebar style */
+  .category-card-tv {
+    @apply bg-gradient-to-br from-card to-muted/20 rounded-lg p-4 border border-border/30;
+  }
+
+  .category-header-tv {
+    @apply flex items-center gap-2 mb-3 pb-2 border-b border-border/50;
+  }
+
+  .category-title-tv {
+    @apply font-bold text-lg text-foreground;
+  }
+
+  /* TV Podium Items */
+  .podium-item-tv {
+    @apply flex items-center gap-3 p-2 rounded-lg transition-all duration-300 hover:bg-muted/30;
+  }
+
+  .podium-position-tv {
+    @apply flex items-center justify-center w-8 h-8 rounded-full font-bold text-sm;
+  }
+
+  .podium-name-tv {
+    @apply font-semibold text-base;
+  }
+
+  .podium-time-tv {
+    @apply font-mono font-bold text-lg text-primary;
+  }
+
+  .podium-bib-tv {
+    @apply text-sm text-muted-foreground;
+  }
+
+  /* TV Live Indicator */
+  .live-indicator-tv {
+    @apply flex items-center gap-2 px-4 py-2 rounded-full;
+    background: linear-gradient(135deg, hsl(var(--success) / 0.1) 0%, hsl(var(--success) / 0.05) 100%);
+    border: 1px solid hsl(var(--success) / 0.3);
+  }
+
+  .live-text-tv {
+    @apply text-sm font-bold text-success;
+  }
+
+  /* TV Team Cards */
+  .team-card-tv {
+    @apply bg-gradient-to-br from-card to-muted/20 rounded-lg p-4 border border-border/30 mb-4;
+  }
+
+  .team-header-tv {
+    @apply flex items-center gap-2 mb-3;
+  }
+
+  .team-name-tv {
+    @apply font-bold text-base;
+  }
+
+  /* Medal indicators for top finishers */
+  .medal-gold {
+    @apply text-yellow-500;
+  }
+
+  .medal-silver {
+    @apply text-gray-400;
+  }
+
+  .medal-bronze {
+    @apply text-amber-600;
+  }
+}
+
+  /* Premium Section Cards */
+  .section-card-premium {
+    @apply bg-gradient-to-br from-card to-muted/20 rounded-2xl border border-border/50 overflow-hidden;
+    box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(10px);
+  }
+
+  /* Integrated Section Cards */
+  .section-card {
+    @apply bg-card rounded-xl border border-border;
+    box-shadow: var(--shadow-md);
+  }
+
+  .section-card-header-premium {
+    @apply flex items-center gap-4 p-8 pb-6 border-b border-border/30;
+    background: linear-gradient(135deg, hsl(var(--muted) / 0.3), transparent);
+  }
+
+  .section-card-content-premium {
+    @apply p-8;
+  }
+
+  /* Compact Category Cards */
+  .category-card-compact {
+    @apply bg-gradient-to-br from-card to-muted/10 rounded-lg border border-border/50 overflow-hidden;
+    box-shadow: 0 4px 12px -4px rgba(0, 0, 0, 0.08);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .category-card-compact:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.12);
+  }
+
+  .category-card-compact-header {
+    @apply p-3 border-b border-border/30 bg-muted/10;
+  }
+
+  .category-card-compact-content {
+    @apply p-3;
+  }
+
+  /* Professional Card Components */
+  .card-professional {
+    @apply bg-card rounded-lg border border-border;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .card-professional:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateY(-1px);
+  }
+
+  .card-elevated {
+    @apply bg-card rounded-lg border border-border;
+    box-shadow: var(--shadow-md);
+  }
   .status-chip {
-    @apply inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium;
+    @apply inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium border;
     background-color: hsl(var(--chip-background));
     color: hsl(var(--foreground));
+    border-color: hsl(var(--border));
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s ease-in-out;
+  }
+
+  .status-chip:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateY(-1px);
   }
 
   .status-chip.live {
-    background-color: hsl(var(--live-indicator) / 0.2);
-    color: hsl(var(--live-indicator));
+    background: linear-gradient(135deg, hsl(var(--success) / 0.1), hsl(var(--success) / 0.05));
+    color: hsl(var(--success));
+    border-color: hsl(var(--success) / 0.3);
   }
 
+  .status-chip.success {
+    background: linear-gradient(135deg, hsl(var(--primary) / 0.1), hsl(var(--primary) / 0.05));
+    color: hsl(var(--primary));
+    border-color: hsl(var(--primary) / 0.3);
+  }
+
+  /* Professional Data Tables */
   .data-table {
     @apply w-full border-collapse;
+    background-color: hsl(var(--card));
   }
 
   .data-table th {
-    @apply text-left py-3 px-4 font-medium text-sm;
+    @apply text-left py-4 px-6 font-semibold text-sm;
     color: hsl(var(--muted-foreground));
-    border-bottom: 1px solid hsl(var(--border));
+    border-bottom: 2px solid hsl(var(--border));
+    background: linear-gradient(180deg, hsl(var(--muted) / 0.3), transparent);
   }
 
   .data-table td {
-    @apply py-3 px-4 text-sm;
-    border-bottom: 1px solid hsl(var(--border) / 0.3);
+    @apply py-4 px-6 text-sm;
+    border-bottom: 1px solid hsl(var(--border) / 0.5);
   }
 
   .data-table tr:hover {
     background-color: hsl(var(--table-hover));
+    transition: background-color 0.2s ease-in-out;
   }
 
   .data-table tr.new-entry {
     animation: highlight-new 2s ease-out;
   }
 
+  /* Row separators for long tables */
+  .data-table tbody tr:not(:last-child) td {
+    border-bottom: 1px solid hsl(var(--border) / 0.4);
+  }
+
+  .data-table tbody tr:nth-child(5n) td {
+    border-bottom: 2px solid hsl(var(--border) / 0.6);
+  }
+
+  /* Professional Headers */
+  .section-header {
+    @apply flex items-center gap-3 mb-6;
+  }
+
+  .section-header .material-icon {
+    @apply text-primary;
+    font-size: 24px;
+  }
+
+  .section-header h2 {
+    @apply text-2xl font-bold text-foreground;
+  }
+
+  /* Hero Section Styling */
+  .hero-section {
+    background: var(--gradient-subtle);
+    border-bottom: 1px solid hsl(var(--border));
+  }
+
+  /* Material Icons */
   .material-icon {
     font-family: 'Material Symbols Outlined';
     font-weight: normal;
@@ -120,65 +443,86 @@ All colors MUST be HSL.
     text-rendering: optimizeLegibility;
   }
 
+  /* Professional Buttons */
   .icon-button {
-    @apply inline-flex items-center justify-center w-8 h-8 rounded-md transition-colors;
+    @apply inline-flex items-center justify-center w-10 h-10 rounded-lg transition-all duration-200;
     color: hsl(var(--muted-foreground));
+    border: 1px solid hsl(var(--border));
+    background-color: hsl(var(--card));
   }
 
   .icon-button:hover {
     background-color: hsl(var(--accent) / 0.1);
     color: hsl(var(--accent));
+    border-color: hsl(var(--accent) / 0.3);
+    box-shadow: var(--shadow-sm);
   }
 
+  /* Form Inputs */
   .form-input {
-    @apply w-full px-3 py-2 rounded-md border text-sm;
+    @apply w-full px-4 py-3 rounded-lg border text-sm;
     background-color: hsl(var(--input));
     border-color: hsl(var(--border));
     color: hsl(var(--foreground));
+    box-shadow: var(--shadow-sm);
   }
 
   .form-input:focus {
     outline: none;
     border-color: hsl(var(--ring));
-    box-shadow: 0 0 0 2px hsl(var(--ring) / 0.2);
+    box-shadow: 0 0 0 3px hsl(var(--ring) / 0.1), var(--shadow-sm);
   }
 
+  /* Professional Button Variants */
   .btn-primary {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
-    background-color: hsl(var(--primary));
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all duration-200;
+    background: var(--gradient-purple);
     color: hsl(var(--primary-foreground));
+    border: 1px solid hsl(var(--primary));
+    box-shadow: var(--shadow-sm);
   }
 
   .btn-primary:hover {
-    background-color: hsl(var(--primary) / 0.9);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-secondary {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all duration-200;
     background-color: hsl(var(--secondary));
     color: hsl(var(--secondary-foreground));
+    border: 1px solid hsl(var(--secondary));
+    box-shadow: var(--shadow-sm);
   }
 
   .btn-secondary:hover {
     background-color: hsl(var(--secondary) / 0.8);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
   }
 
   .btn-ghost {
-    @apply inline-flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors;
+    @apply inline-flex items-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all duration-200;
     color: hsl(var(--foreground));
+    border: 1px solid hsl(var(--border));
+    background-color: hsl(var(--card));
   }
 
   .btn-ghost:hover {
     background-color: hsl(var(--accent) / 0.1);
     color: hsl(var(--accent));
+    border-color: hsl(var(--accent) / 0.3);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
   }
-}
 
-@keyframes highlight-new {
-  0% {
-    background-color: hsl(var(--primary) / 0.3);
+  @keyframes highlight-new {
+    0% {
+      background-color: hsl(var(--primary) / 0.2);
+      transform: scale(1.01);
+    }
+    100% {
+      background-color: transparent;
+      transform: scale(1);
+    }
   }
-  100% {
-    background-color: transparent;
-  }
-}

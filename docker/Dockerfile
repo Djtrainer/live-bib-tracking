@@ -1,6 +1,6 @@
 # Multi-stage Dockerfile for Live Bib Tracking Application
 # Stage 1: Frontend Build
-FROM node:18-alpine AS frontend-builder
+FROM --platform=linux/amd64 node:18-slim AS frontend-builder
 
 # Set working directory for frontend
 WORKDIR /app/frontend
