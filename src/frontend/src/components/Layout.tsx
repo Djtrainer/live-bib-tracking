@@ -1,18 +1,26 @@
 import { ReactNode } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import RaceClock from '@/components/RaceClock';
+import { LogOut } from 'lucide-react';
 
 interface LayoutProps {
   children: ReactNode;
   showNavigation?: boolean;
   totalFinishers?: number;
   lastUpdated?: Date;
+  activeTab?: 'setup' | 'live';
+  onTabChange?: (tab: 'setup' | 'live') => void;
 }
 
 
-export default function Layout({ children, showNavigation = true, totalFinishers = 0, lastUpdated }: LayoutProps) {
+export default function Layout({ children, showNavigation = true, totalFinishers = 0, lastUpdated, activeTab, onTabChange }: LayoutProps) {
   const location = useLocation();
+  const navigate = useNavigate();
   const isAdmin = location.pathname.startsWith('/admin');
+
+  const handleLogout = () => {
+    navigate('/admin/login');
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -60,6 +68,35 @@ export default function Layout({ children, showNavigation = true, totalFinishers
                     <span className="material-icon text-lg mr-2">admin_panel_settings</span>
                     Admin Dashboard
                   </Link>
+                  
+                  {/* Admin Sub-navigation */}
+                  {isAdmin && activeTab && onTabChange && (
+                    <>
+                      <div className="w-px h-6 bg-border mx-2"></div>
+                      <button
+                        onClick={() => onTabChange('setup')}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+                          activeTab === 'setup'
+                            ? 'bg-secondary text-secondary-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-secondary/20'
+                        }`}
+                      >
+                        <span className="material-icon text-lg mr-2">settings</span>
+                        Race Setup
+                      </button>
+                      <button
+                        onClick={() => onTabChange('live')}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+                          activeTab === 'live'
+                            ? 'bg-secondary text-secondary-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-secondary/20'
+                        }`}
+                      >
+                        <span className="material-icon text-lg mr-2">monitor</span>
+                        Live Management
+                      </button>
+                    </>
+                  )}
                 </nav>
               </div>
               
@@ -90,6 +127,18 @@ export default function Layout({ children, showNavigation = true, totalFinishers
                   <span className="w-2 h-2 bg-success rounded-full animate-pulse"></span>
                   <span className="text-sm font-semibold text-success">LIVE</span>
                 </div>
+                
+                {/* Sign Out Button - Only show on admin pages */}
+                {isAdmin && (
+                  <button
+                    onClick={handleLogout}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-destructive hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
+                    title="Sign Out"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    Sign Out
+                  </button>
+                )}
               </div>
             </div>
           </div>

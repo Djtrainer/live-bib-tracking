@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { 
   Settings, 
   Users, 
@@ -9,7 +8,6 @@ import {
   Flag, 
   RefreshCw,
   Clock,
-  LogOut,
   Trash2,
   Plus,
   Monitor,
@@ -43,7 +41,6 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<'setup' | 'live'>('setup');
   const [bibNumber, setBibNumber] = useState('');
   const [clockStatus, setClockStatus] = useState<any>(null);
-  const navigate = useNavigate();
   const resultsContainerRef = useRef<HTMLDivElement>(null);
 
   // Fetch finishers data from backend
@@ -92,14 +89,17 @@ export default function AdminDashboard() {
           fetchFinishers();
         } else if (message.type === 'add' || message.type === 'update') {
           setFinishers(prev => {
-            const existingIndex = prev.findIndex(f => f.id === message.data.id || f.bibNumber === message.data.bibNumber);
+            // Only match by ID for updates, not by bib number to allow duplicates
+            const existingIndex = prev.findIndex(f => f.id === message.data.id);
             let updated;
             const isNewFinisher = existingIndex === -1;
             
             if (existingIndex > -1) {
+              // Update existing entry
               updated = [...prev];
               updated[existingIndex] = { ...updated[existingIndex], ...message.data };
             } else {
+              // Add new entry (even if bib number already exists)
               updated = [...prev, message.data];
             }
             updated.sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0));
@@ -134,10 +134,6 @@ export default function AdminDashboard() {
     };
   }, []);
 
-  const handleLogout = () => {
-    navigate('/admin/login');
-  };
-
   // Auto-scroll to bottom of results
   const scrollToBottom = () => {
     if (resultsContainerRef.current) {
@@ -146,8 +142,6 @@ export default function AdminDashboard() {
   };
 
   const handleQuickAdd = async () => {
-    if (!bibNumber.trim()) return;
-    
     try {
       // Read the official race clock so we store the elapsed race time (ms),
       // not the epoch timestamp which would render as a huge value in the UI.
@@ -174,13 +168,16 @@ export default function AdminDashboard() {
         finishTimeMs = Math.round((nowSec - raceStartTime) * 1000 + (offset || 0));
       }
 
+      // Use provided bib number or generate a placeholder based on current finisher count
+      const finalBibNumber = bibNumber.trim() || `No-Bib-${finishers.length + 1}`;
+
       const response = await fetch('/api/results', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          bibNumber: bibNumber.trim(),
+          bibNumber: finalBibNumber,
           finishTime: finishTimeMs,
         }),
       });
@@ -382,8 +379,18 @@ export default function AdminDashboard() {
     return normalized ? formatTime(normalized) : null;
   };
 
+  // Function to check if a bib number is duplicated
+  const isDuplicateBib = (bibNumber: string, currentId: string) => {
+    return finishers.filter(f => f.bibNumber === bibNumber && f.id !== currentId).length > 0;
+  };
+
   return (
-    <Layout>
+    <Layout 
+      activeTab={activeTab} 
+      onTabChange={setActiveTab}
+      totalFinishers={finishers.length}
+      lastUpdated={new Date()}
+    >
       <div className="leaderboard-container">
         <div className="max-w-[1800px] mx-auto">
           
@@ -424,42 +431,10 @@ export default function AdminDashboard() {
                   </div>
                   <div className="stat-label-tv">Race Time</div>
                 </div>
-                
-                <button onClick={handleLogout} className="stat-card-tv hover:bg-destructive/10 transition-colors min-w-[140px]">
-                  <LogOut className="w-5 h-5 text-destructive mb-2 mx-auto" />
-                  <div className="stat-label-tv text-destructive">Sign Out</div>
-                </button>
               </div>
             </div>
           </div>
 
-          {/* Tabbed Navigation - TV Style */}
-          <div className="mb-6">
-            <div className="flex bg-card rounded-xl border border-border/50 p-2">
-              <button
-                onClick={() => setActiveTab('setup')}
-                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-semibold transition-all ${
-                  activeTab === 'setup'
-                    ? 'bg-primary text-primary-foreground shadow-md'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
-                }`}
-              >
-                <Settings className="w-4 h-4" />
-                Race Setup
-              </button>
-              <button
-                onClick={() => setActiveTab('live')}
-                className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-semibold transition-all ${
-                  activeTab === 'live'
-                    ? 'bg-primary text-primary-foreground shadow-md'
-                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
-                }`}
-              >
-                <Monitor className="w-4 h-4" />
-                Live Management
-              </button>
-            </div>
-          </div>
 
           {/* Tab Content */}
           {activeTab === 'setup' && (
@@ -541,67 +516,21 @@ export default function AdminDashboard() {
           )}
 
           {activeTab === 'live' && (
-            <div className="flex flex-col h-[calc(100vh-280px)]">
+            <div className="flex gap-6 h-[calc(100vh-320px)]">
               
-              {/* Sticky Quick Add Finisher */}
-              <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-border/50 pb-6 mb-6">
-                <div className="section-card-tv">
-                  <div className="section-header-tv">
-                    <div className="section-icon-tv">
-                      <Plus className="w-5 h-5 text-white" />
-                    </div>
-                    <h2 className="section-title-tv">Add Finisher</h2>
-                  </div>
-                  
-                  <div className="p-6">
-                    <p className="text-muted-foreground mb-4 text-lg">
-                      Quickly capture finishers as they cross the line. Just enter their bib number and press Enter or click Add.
-                    </p>
-                    <div className="flex gap-4">
-                      <input
-                        type="text"
-                        placeholder="Bib Number"
-                        value={bibNumber}
-                        onChange={(e) => setBibNumber(e.target.value)}
-                        className="px-4 py-3 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground font-mono text-lg"
-                        onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
-                      />
-                      <button
-                        onClick={handleQuickAdd}
-                        disabled={!bibNumber.trim()}
-                        className="flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50"
-                      >
-                        <Plus className="w-4 h-4" />
-                        Add Finisher
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Scrollable Results Table */}
-              <div className="flex-1 overflow-hidden">
+              {/* Left Side - Manage Results Table (75% width, left-aligned) */}
+              <div className="w-3/4 overflow-hidden">
                 <div className="section-card-tv h-full flex flex-col">
                   <div className="section-header-tv flex-shrink-0">
                     <div className="section-icon-tv">
                       <Users className="w-5 h-5 text-white" />
                     </div>
                     <h2 className="section-title-tv">Manage Results</h2>
-                    {finishers.length > 0 && (
-                      <button
-                        onClick={handleDownloadCSV}
-                        className="flex items-center gap-2 px-4 py-2 bg-success text-success-foreground rounded-lg font-semibold hover:bg-success/90 transition-colors"
-                        title="Download results as CSV"
-                      >
-                        <Download className="w-4 h-4" />
-                        Download CSV
-                      </button>
-                    )}
                   </div>
                   
                   <div 
                     ref={resultsContainerRef}
-                    className="flex-1 overflow-y-auto max-h-[60vh] scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent"
+                    className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent"
                   >
                     {loading ? (
                       <div className="text-center py-12">
@@ -612,7 +541,7 @@ export default function AdminDashboard() {
                       <div className="text-center py-12">
                         <Flag className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                         <p className="text-muted-foreground text-lg">
-                          No finishers added yet. Click 'Add Finisher' to capture the first racer crossing the finish line.
+                          No finishers added yet. Use the 'Add Finisher' panel on the right to capture the first racer crossing the finish line.
                         </p>
                       </div>
                     ) : (
@@ -621,26 +550,26 @@ export default function AdminDashboard() {
                           <thead className="sticky top-0 bg-card z-10">
                             <tr>
                               <th className="w-20">Rank</th>
-                              <th className="w-24">Bib #</th>
-                              <th>Racer Name</th>
+                              <th className="w-28">Bib #</th>
+                              <th className="w-auto min-w-[200px]">Racer Name</th>
                               <th className="w-32">Finish Time</th>
                               <th className="w-20">Gender</th>
-                              <th>Team</th>
+                              <th className="w-auto min-w-[150px]">Team</th>
                               <th className="w-24">Actions</th>
                             </tr>
                           </thead>
                           <tbody>
                             {finishers.map((finisher, index) => (
-                              <tr key={finisher.id} className="group">
-                                <td className="text-center">
+                              <tr key={finisher.id} className={`group ${isDuplicateBib(finisher.bibNumber, finisher.id) ? 'duplicate-bib' : ''}`}>
+                                <td>
                                   <span className="rank-cell-tv">{index + 1}</span>
                                 </td>
-                                <td className="text-center">
+                                <td>
                                   {editingCell?.id === finisher.id && editingCell?.field === 'bibNumber' ? (
                                     <input
                                       type="text"
                                       defaultValue={finisher.bibNumber}
-                                      className="w-full p-2 rounded border border-border bg-background text-center font-mono text-lg"
+                                      className="w-full p-2 rounded border border-border bg-background text-left font-mono text-lg"
                                       autoFocus
                                       onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'bibNumber', (e.target as HTMLInputElement).value)}
                                       onBlur={(e) => handleCellBlur(finisher.id, 'bibNumber', e.target.value)}
@@ -673,12 +602,12 @@ export default function AdminDashboard() {
                                     </span>
                                   )}
                                 </td>
-                                <td className="text-center">
+                                <td>
                                   {editingCell?.id === finisher.id && editingCell?.field === 'finishTime' ? (
                                     <input
                                       type="text"
                                       defaultValue={getDisplayFinishTime(finisher.finishTime) || ''}
-                                      className="w-full p-2 rounded border border-border bg-background text-center font-mono text-lg"
+                                      className="w-full p-2 rounded border border-border bg-background text-left font-mono text-lg"
                                       autoFocus
                                       onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'finishTime', (e.target as HTMLInputElement).value)}
                                       onBlur={(e) => handleCellBlur(finisher.id, 'finishTime', e.target.value)}
@@ -692,11 +621,11 @@ export default function AdminDashboard() {
                                     </span>
                                   )}
                                 </td>
-                                <td className="text-center">
+                                <td>
                                   {editingCell?.id === finisher.id && editingCell?.field === 'gender' ? (
                                     <select
                                       defaultValue={finisher.gender || ''}
-                                      className="w-full p-2 rounded border border-border bg-background text-center"
+                                      className="w-full p-2 rounded border border-border bg-background text-left"
                                       autoFocus
                                       onBlur={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
                                       onChange={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
@@ -733,7 +662,7 @@ export default function AdminDashboard() {
                                     </span>
                                   )}
                                 </td>
-                                <td className="text-center">
+                                <td>
                                   <button
                                     onClick={() => handleDelete(finisher.id)}
                                     className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
@@ -750,6 +679,69 @@ export default function AdminDashboard() {
                     )}
                   </div>
                 </div>
+              </div>
+
+              {/* Right Side - Panels (25% width) */}
+              <div className="w-1/4 flex flex-col gap-6">
+                
+                {/* Add Finisher Panel */}
+                <div className="section-card-tv">
+                  <div className="section-header-tv">
+                    <div className="section-icon-tv">
+                      <Plus className="w-5 h-5 text-white" />
+                    </div>
+                    <h2 className="section-title-tv">Add Finisher</h2>
+                  </div>
+                  
+                  <div className="p-6">
+                    <p className="text-muted-foreground mb-4 text-sm">
+                      Quickly capture finishers as they cross the line. Bib number is optional - leave blank to auto-assign.
+                    </p>
+                    <div className="space-y-4">
+                      <input
+                        type="text"
+                        placeholder="Bib Number (optional)"
+                        value={bibNumber}
+                        onChange={(e) => setBibNumber(e.target.value)}
+                        className="w-full px-4 py-3 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground font-mono text-lg"
+                        onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
+                      />
+                      <button
+                        onClick={handleQuickAdd}
+                        className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors"
+                      >
+                        <Plus className="w-4 h-4" />
+                        Add Finisher
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Download CSV Panel */}
+                {finishers.length > 0 && (
+                  <div className="section-card-tv">
+                    <div className="section-header-tv">
+                      <div className="section-icon-tv">
+                        <Download className="w-5 h-5 text-white" />
+                      </div>
+                      <h2 className="section-title-tv">Export Results</h2>
+                    </div>
+                    
+                    <div className="p-6">
+                      <p className="text-muted-foreground mb-4 text-sm">
+                        Download race results as a CSV file for analysis or record keeping.
+                      </p>
+                      <button
+                        onClick={handleDownloadCSV}
+                        className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-success text-success-foreground rounded-lg font-semibold hover:bg-success/90 transition-colors"
+                        title="Download results as CSV"
+                      >
+                        <Download className="w-4 h-4" />
+                        Download CSV
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

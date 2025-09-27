@@ -135,7 +135,7 @@ const ModernLeaderboard = ({
       case 0: return 'podium-gold';
       case 1: return 'podium-silver';
       case 2: return 'podium-bronze';
-      default: return 'bg-primary text-primary-foreground';
+      default: return ''; // No special styling for 4th, 5th, etc.
     }
   };
 
@@ -226,10 +226,10 @@ const ModernLeaderboard = ({
               <table className="results-table-tv">
                 <thead>
                 <tr>
-                  <th className="w-24">Rank</th>
-                  <th className="w-24">Bib</th>
-                  <th>Runner Name</th>
-                  <th className="w-40">Finish Time</th>
+                  <th className="w-28">Rank</th>
+                  <th className="w-40">Bib</th>
+                  <th className="min-w-0 flex-1">Runner Name</th>
+                  <th className="w-44">Finish Time</th>
                 </tr>
               </thead>
                 <tbody ref={tableBodyRef}>
@@ -366,35 +366,53 @@ const ModernLeaderboard = ({
                   <h2 className="section-title-tv">Team Results</h2>
                 </div>
                 
-                <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
+                <div className="p-4 space-y-4 max-h-96 overflow-y-auto">
                   {Array.from(teamData.entries()).slice(0, 6).map(([teamName, runners]) => (
-                    <div key={teamName} className="team-card-tv">
-                      <div className="team-header-tv">
+                    <div key={teamName} className="category-card-tv">
+                      <div className="category-header-tv">
                         <Users className="w-4 h-4 text-primary" />
-                        <h3 className="team-name-tv">{teamName}</h3>
+                        <h3 className="category-title-tv">{teamName}</h3>
                       </div>
                       
-                      <div className="space-y-1">
-                        {runners.slice(0, 2).map((runner, index) => (
-                          <div key={runner.id} className="flex items-center justify-between text-sm">
-                            <div className="flex items-center gap-2">
+                      <div className="space-y-2">
+                        {runners.length === 0 ? (
+                          <div className="text-center py-4">
+                            <Timer className="w-5 h-5 text-muted-foreground mx-auto mb-2" />
+                            <p className="text-muted-foreground text-xs">No finishers yet...</p>
+                          </div>
+                        ) : (
+                          runners.slice(0, 5).map((runner, index) => (
+                            <div key={runner.id} className="podium-item-tv group">
                               <div className={`podium-position-tv ${getPodiumClass(index)}`}>
                                 {index + 1}
                               </div>
-                              <div>
-                                <span className="font-semibold">{runner.racerName || 'Unknown'}</span>
-                                <span className="text-xs text-muted-foreground ml-2">#{runner.bibNumber}</span>
+                              
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between">
+                                  <div>
+                                    <p className="podium-name-tv group-hover:text-primary transition-colors">
+                                      {runner.racerName || 'Unknown Runner'}
+                                    </p>
+                                    <p className="podium-bib-tv">Bib #{runner.bibNumber}</p>
+                                  </div>
+                                  
+                                  <div className="text-right">
+                                    <p className="podium-time-tv">
+                                      {formatTime(normalizeFinishTime(runner.finishTime))}
+                                    </p>
+                                    <p className="text-xs text-muted-foreground">
+                                      Overall #{runner.rank}
+                                    </p>
+                                  </div>
+                                </div>
                               </div>
                             </div>
-                            <span className="font-mono font-bold text-primary">
-                              {formatTime(runner.finishTime)}
-                            </span>
-                          </div>
-                        ))}
+                          ))
+                        )}
                         
-                        {runners.length > 2 && (
-                          <div className="text-center text-xs text-muted-foreground pt-1 border-t border-border/30">
-                            +{runners.length - 2} more
+                        {runners.length > 5 && (
+                          <div className="text-center text-xs text-muted-foreground pt-2 border-t border-border/30">
+                            +{runners.length - 5} more team members
                           </div>
                         )}
                       </div>

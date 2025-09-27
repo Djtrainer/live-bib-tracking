@@ -200,15 +200,60 @@ All colors MUST be HSL.
   }
 
   .results-table-tv tbody tr {
-    @apply border-b border-border/30 transition-all duration-200 hover:bg-muted/20;
+    @apply transition-all duration-200;
+    border-bottom: 1px solid hsl(var(--border) / 0.25);
+  }
+
+  .results-table-tv tbody tr:hover {
+    background-color: hsl(var(--muted) / 0.3);
+    transform: translateX(2px);
   }
 
   .results-table-tv tbody tr:nth-child(5n) {
     @apply border-b-2 border-primary/20;
   }
 
+  /* Duplicate bib number highlighting */
+  .results-table-tv tbody tr.duplicate-bib {
+    background-color: rgba(255, 192, 203, 0.3) !important; /* Light pink background */
+  }
+
+  .results-table-tv tbody tr.duplicate-bib:hover {
+    background-color: rgba(255, 192, 203, 0.5) !important; /* Slightly darker pink on hover */
+  }
+
   .results-table-tv tbody td {
-    @apply px-6 py-4 text-base;
+    @apply px-4 py-4 text-base;
+  }
+
+  /* Improved column spacing for better readability */
+  .results-table-tv th:not(:last-child),
+  .results-table-tv td:not(:last-child) {
+    @apply border-r border-border/20;
+  }
+
+  /* Left align all columns and add extra spacing */
+  .results-table-tv th,
+  .results-table-tv td {
+    @apply text-left;
+  }
+
+  /* Add extra spacing after Rank column */
+  .results-table-tv th:first-child,
+  .results-table-tv td:first-child {
+    @apply pr-12;
+  }
+
+  /* Add extra spacing after Bib # column */
+  .results-table-tv th:nth-child(2),
+  .results-table-tv td:nth-child(2) {
+    @apply pr-12;
+  }
+
+  /* Center align Actions column for better visual balance */
+  .results-table-tv th:last-child,
+  .results-table-tv td:last-child {
+    @apply text-center;
   }
 
   /* Auto-scroll viewport for results table */
@@ -249,19 +294,19 @@ All colors MUST be HSL.
   }
 
   .rank-cell-tv {
-    @apply font-mono font-black text-2xl text-center;
+    @apply font-mono font-black text-2xl text-left;
   }
 
   .bib-cell-tv {
-    @apply font-mono font-bold text-xl text-primary text-center;
+    @apply font-mono font-bold text-xl text-primary text-left;
   }
 
   .name-cell-tv {
-    @apply font-semibold text-lg;
+    @apply font-semibold text-lg text-left;
   }
 
   .time-cell-tv {
-    @apply font-mono font-black text-xl text-primary text-center;
+    @apply font-mono font-black text-xl text-primary text-left;
   }
 
   /* TV Category Cards - Compact sidebar style */

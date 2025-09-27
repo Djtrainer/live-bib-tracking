@@ -92,10 +92,27 @@ const Index = () => {
           };
 
           const normalized = result.data.map((f: any) => ({ ...f, finishTime: normalizeFinishTime(f.finishTime) ?? f.finishTime }));
-          setFinishers(normalized);
-          setTotalFinishers(normalized.length);
+          
+          // CRITICAL FIX: Filter out duplicate bib numbers, keeping only the FIRST occurrence
+          const uniqueFinishers: Finisher[] = [];
+          const seenBibNumbers = new Set<string>();
+          
+          // Sort by finish time first to ensure we keep the fastest time for each bib
+          const sortedNormalized = [...normalized].sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0));
+          
+          for (const finisher of sortedNormalized) {
+            if (!seenBibNumbers.has(finisher.bibNumber)) {
+              seenBibNumbers.add(finisher.bibNumber);
+              uniqueFinishers.push(finisher);
+            } else {
+              console.log(`Duplicate bib ${finisher.bibNumber} found in initial data - keeping first occurrence for Live Leaderboard`);
+            }
+          }
+          
+          setFinishers(uniqueFinishers);
+          setTotalFinishers(uniqueFinishers.length);
           setLastUpdated(new Date());
-          calculateCategoryLeaderboards(normalized);
+          calculateCategoryLeaderboards(uniqueFinishers);
         } else {
           console.error('Failed to fetch results:', result);
         }
@@ -139,10 +156,26 @@ const Index = () => {
           const result = await response.json();
           
           if (result.success && result.data) {
-            setFinishers(result.data);
-            setTotalFinishers(result.data.length);
+            // Apply same duplicate filtering logic as initial fetch
+            const uniqueFinishers: Finisher[] = [];
+            const seenBibNumbers = new Set<string>();
+            
+            // Sort by finish time first to ensure we keep the fastest time for each bib
+            const sortedData = [...result.data].sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0));
+            
+            for (const finisher of sortedData) {
+              if (!seenBibNumbers.has(finisher.bibNumber)) {
+                seenBibNumbers.add(finisher.bibNumber);
+                uniqueFinishers.push(finisher);
+              } else {
+                console.log(`Duplicate bib ${finisher.bibNumber} found in reload data - keeping first occurrence for Live Leaderboard`);
+              }
+            }
+            
+            setFinishers(uniqueFinishers);
+            setTotalFinishers(uniqueFinishers.length);
             setLastUpdated(new Date());
-            calculateCategoryLeaderboards(result.data);
+            calculateCategoryLeaderboards(uniqueFinishers);
           }
         } else if (message.type === 'add' || message.type === 'update') {
           setFinishers(prev => {
@@ -160,17 +193,33 @@ const Index = () => {
 
             const incoming = { ...message.data, finishTime: normalizeFinishTime(message.data.finishTime) ?? message.data.finishTime };
 
-            const existingIndex = prev.findIndex(f => f.id === incoming.id || f.bibNumber === incoming.bibNumber);
+            // CRITICAL FIX: Only match by ID to allow duplicate bib numbers
+            // For Live Leaderboard, we want to show only the FIRST occurrence of each bib number
+            const existingIndex = prev.findIndex(f => f.id === incoming.id);
             let updated;
             if (existingIndex > -1) {
+              // Update existing entry by ID
               updated = [...prev];
               updated[existingIndex] = { ...updated[existingIndex], ...incoming };
             } else {
-              updated = [...prev, incoming];
+              // Check if this bib number already exists (for duplicate handling)
+              const duplicateBibIndex = prev.findIndex(f => f.bibNumber === incoming.bibNumber);
+              if (duplicateBibIndex > -1) {
+                // Bib number already exists - keep the FIRST one (ignore the new one for Live Leaderboard)
+                console.log(`Duplicate bib ${incoming.bibNumber} detected - keeping first occurrence for Live Leaderboard`);
+                updated = [...prev]; // Don't add the duplicate
+              } else {
+                // New unique bib number - add it
+                updated = [...prev, incoming];
+              }
             }
             // --- THIS IS THE CORRECT NUMERICAL SORT ---
             updated.sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0));
             calculateCategoryLeaderboards(updated);
+            
+            // CRITICAL FIX: Update total finishers count when finishers array changes
+            setTotalFinishers(updated.length);
+            
             return updated;
           });
           setLastUpdated(new Date());
