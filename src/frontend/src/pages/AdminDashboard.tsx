@@ -42,23 +42,61 @@ export default function AdminDashboard() {
   const [bibNumber, setBibNumber] = useState('');
   const [clockStatus, setClockStatus] = useState<any>(null);
   const resultsContainerRef = useRef<HTMLDivElement>(null);
+  const [preservedScrollPosition, setPreservedScrollPosition] = useState<number>(0);
+
+  // Function to preserve scroll position
+  const preserveScrollPosition = () => {
+    if (resultsContainerRef.current) {
+      setPreservedScrollPosition(resultsContainerRef.current.scrollTop);
+    }
+  };
+
+  // Function to restore scroll position
+  const restoreScrollPosition = () => {
+    if (resultsContainerRef.current && preservedScrollPosition > 0) {
+      setTimeout(() => {
+        if (resultsContainerRef.current) {
+          resultsContainerRef.current.scrollTop = preservedScrollPosition;
+        }
+      }, 100); // Small delay to ensure DOM is updated
+    }
+  };
 
   // Fetch finishers data from backend
-  const fetchFinishers = async () => {
+  const fetchFinishers = async (shouldPreserveScroll = false) => {
     try {
-      setLoading(true);
+      if (shouldPreserveScroll) {
+        preserveScrollPosition();
+      }
+      
+      // Only show loading state if we're not preserving scroll position
+      // This prevents the loading spinner from interfering with scroll restoration
+      if (!shouldPreserveScroll) {
+        setLoading(true);
+      }
+      
       const response = await fetch('/api/results');
       const result = await response.json();
       
       if (result.success && result.data) {
         setFinishers(result.data);
+        if (shouldPreserveScroll) {
+          // Use a longer delay and requestAnimationFrame for better timing
+          requestAnimationFrame(() => {
+            setTimeout(() => {
+              restoreScrollPosition();
+            }, 50);
+          });
+        }
       } else {
         console.error('Failed to fetch results:', result);
       }
     } catch (error) {
       console.error('Error fetching finishers:', error);
     } finally {
-      setLoading(false);
+      if (!shouldPreserveScroll) {
+        setLoading(false);
+      }
     }
   };
 
@@ -86,7 +124,7 @@ export default function AdminDashboard() {
         const message = JSON.parse(event.data);
         
         if (message.action === 'reload') {
-          fetchFinishers();
+          fetchFinishers(true); // Preserve scroll position on reload
         } else if (message.type === 'add' || message.type === 'update') {
           setFinishers(prev => {
             // Only match by ID for updates, not by bib number to allow duplicates
@@ -265,12 +303,12 @@ export default function AdminDashboard() {
       if (!result.success) {
         console.error('Failed to update finisher:', result.error || result.message);
       } else {
-        // Optimistically update local state for bib changes so racerName updates to
-        // backend-provided value or falls back to a sensible default if unknown.
-        if (field === 'bibNumber') {
-          const newBib = processedValue;
-          const newName = result.data && result.data.racerName ? result.data.racerName : `Racer #${newBib}`;
-          setFinishers(prev => prev.map(f => f.id === id ? { ...f, bibNumber: newBib, racerName: newName } : f));
+        // For bib number changes, the backend will handle the name update logic
+        // and return the complete updated data, so we should use that instead of
+        // doing optimistic updates that might be incorrect
+        if (field === 'bibNumber' && result.data) {
+          // Use the complete data returned from the backend
+          setFinishers(prev => prev.map(f => f.id === id ? { ...f, ...result.data } : f));
         }
       }
     } catch (error) {

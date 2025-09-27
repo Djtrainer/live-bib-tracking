@@ -842,6 +842,11 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                 updated_data.update(finisher_data)  # Update with provided data
                 updated_data["id"] = finisher_id  # Ensure ID is preserved
                 
+                # CRITICAL FIX: If bib number changed and not found in roster, update name to "Racer #<bib>"
+                if bib_changed:
+                    updated_data["racerName"] = f"Racer #{new_bib}"
+                    logger.info(f"🔍 DEBUG: Bib changed to unknown number - updated name to: {updated_data['racerName']}")
+                
                 race_results[i] = updated_data
                 
                 logger.info(f"🔍 DEBUG: Updated finisher with regular data: {updated_data}")
