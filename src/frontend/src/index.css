@@ -142,15 +142,28 @@ All colors MUST be HSL.
 
   /* TV Layout Grid - Optimized for wide screens */
   .tv-dashboard-grid {
-    @apply grid grid-cols-12 gap-6;
+    @apply grid gap-6;
+    /* Use explicit percentage columns so we can size the main content 10% skinnier
+       than before while preserving left alignment. On small screens it will collapse to a single column. */
+   /* Make main content ~10 percentage points skinnier than the original 66.67% (8/12).
+     Set to 56.67% / 43.33% to preserve spacing and left alignment. */
+   grid-template-columns: 56.67% 43.33%;
+  }
+
+  /* Keep responsive behavior: stack on smaller screens */
+  @media (max-width: 768px) {
+    .tv-dashboard-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .tv-main-content {
-    @apply col-span-8;
+    /* left column stays as defined by the grid-template-columns */
   }
 
   .tv-sidebar {
-    @apply col-span-4 space-y-6;
+    /* right column */
+    @apply space-y-6;
   }
 
   /* TV Section Cards */
@@ -198,6 +211,43 @@ All colors MUST be HSL.
     @apply px-6 py-4 text-base;
   }
 
+  /* Auto-scroll viewport for results table */
+  .results-scroll-viewport {
+    /* limit height so auto-scroll activates when content overflows */
+    max-height: 60vh; /* matches previous max-h usage */
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Fixed header that stays above scrolling content */
+  .results-table-tv thead {
+    display: table-header-group;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted) / 0.3) 100%);
+    backdrop-filter: blur(8px);
+  }
+
+  /* Allow tbody transforms for smooth scrolling */
+  .results-table-tv tbody {
+    display: table-row-group;
+    transform: translateY(0);
+    will-change: transform;
+  }
+
+  .results-table-tv {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 0;
+  }
+
+  .results-table-tv tr {
+    display: table-row;
+    width: 100%;
+  }
+
   .rank-cell-tv {
     @apply font-mono font-black text-2xl text-center;
   }
@@ -224,7 +274,7 @@ All colors MUST be HSL.
   }
 
   .category-title-tv {
-    @apply font-bold text-lg text-foreground;
+    @apply font-bold text-base text-foreground;
   }
 
   /* TV Podium Items */
@@ -237,15 +287,15 @@ All colors MUST be HSL.
   }
 
   .podium-name-tv {
-    @apply font-semibold text-base;
+    @apply font-semibold text-sm;
   }
 
   .podium-time-tv {
-    @apply font-mono font-bold text-lg text-primary;
+    @apply font-mono font-bold text-base text-primary;
   }
 
   .podium-bib-tv {
-    @apply text-sm text-muted-foreground;
+    @apply text-xs text-muted-foreground;
   }
 
   /* TV Live Indicator */

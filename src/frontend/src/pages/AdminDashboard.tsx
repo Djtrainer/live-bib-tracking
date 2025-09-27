@@ -42,6 +42,7 @@ export default function AdminDashboard() {
   const [isUploading, setIsUploading] = useState(false);
   const [activeTab, setActiveTab] = useState<'setup' | 'live'>('setup');
   const [bibNumber, setBibNumber] = useState('');
+  const [clockStatus, setClockStatus] = useState<any>(null);
   const navigate = useNavigate();
   const resultsContainerRef = useRef<HTMLDivElement>(null);
 
@@ -74,6 +75,13 @@ export default function AdminDashboard() {
     
     ws.onopen = () => {
       console.log('✅ WebSocket connection opened - AdminDashboard.tsx');
+      // fetch current clock status for display conversions
+      fetch('/api/clock/status')
+        .then(r => r.json())
+        .then(res => {
+          if (res.success && res.data) setClockStatus(res.data);
+        })
+        .catch(err => console.error('Failed to fetch clock status:', err));
     };
     
     ws.onmessage = (event) => {
@@ -99,6 +107,10 @@ export default function AdminDashboard() {
             // Auto-scroll to bottom when a new finisher is added
             if (isNewFinisher && message.type === 'add') {
               setTimeout(scrollToBottom, 100);
+            }
+            // Update clock status on clock messages (if provided)
+            if (message.type === 'clock_update' && message.data) {
+              setClockStatus(message.data);
             }
             
             return updated;
@@ -137,6 +149,31 @@ export default function AdminDashboard() {
     if (!bibNumber.trim()) return;
     
     try {
+      // Read the official race clock so we store the elapsed race time (ms),
+      // not the epoch timestamp which would render as a huge value in the UI.
+      const clockResp = await fetch('/api/clock/status');
+      const clockResult = await clockResp.json();
+
+      if (!clockResult.success || !clockResult.data) {
+        alert('Unable to read race clock status. Please ensure the race clock is running or reachable.');
+        return;
+      }
+
+      const { raceStartTime, status, offset } = clockResult.data as {
+        raceStartTime: number | null;
+        status: string;
+        offset: number;
+      };
+
+      let finishTimeMs: number;
+      if (status !== 'running' || !raceStartTime) {
+        // If the clock isn't running, use the stored offset (could be paused/stopped time)
+        finishTimeMs = offset || 0;
+      } else {
+        const nowSec = Date.now() / 1000; // seconds
+        finishTimeMs = Math.round((nowSec - raceStartTime) * 1000 + (offset || 0));
+      }
+
       const response = await fetch('/api/results', {
         method: 'POST',
         headers: {
@@ -144,7 +181,7 @@ export default function AdminDashboard() {
         },
         body: JSON.stringify({
           bibNumber: bibNumber.trim(),
-          finishTime: Date.now(),
+          finishTime: finishTimeMs,
         }),
       });
 
@@ -230,6 +267,14 @@ export default function AdminDashboard() {
       
       if (!result.success) {
         console.error('Failed to update finisher:', result.error || result.message);
+      } else {
+        // Optimistically update local state for bib changes so racerName updates to
+        // backend-provided value or falls back to a sensible default if unknown.
+        if (field === 'bibNumber') {
+          const newBib = processedValue;
+          const newName = result.data && result.data.racerName ? result.data.racerName : `Racer #${newBib}`;
+          setFinishers(prev => prev.map(f => f.id === id ? { ...f, bibNumber: newBib, racerName: newName } : f));
+        }
       }
     } catch (error) {
       console.error('Error updating finisher:', error);
@@ -277,13 +322,32 @@ export default function AdminDashboard() {
 
     // Create CSV content
     const headers = ['Rank', 'Bib Number', 'Racer Name', 'Finish Time', 'Gender', 'Team'];
+    const normalizeFinishTime = (ft: number | null) => {
+      if (ft === null || ft === undefined) return null;
+      // If it looks like a unix epoch in ms (greater than year 3000 ~32503680000000),
+      // or realistically > 1e12 (approx year 2001), assume it's an epoch and convert
+      // to elapsed race time using clockStatus if available.
+      if (ft > 1e12 && clockStatus) {
+        const { raceStartTime, offset } = clockStatus;
+        if (raceStartTime) {
+          const elapsed = Math.round(ft - (raceStartTime * 1000) - (offset || 0));
+          return elapsed > 0 ? elapsed : 0;
+        }
+      }
+      // otherwise assume it's already elapsed ms
+      return ft;
+    };
+
     const csvContent = [
       headers.join(','),
       ...finishers.map((finisher, index) => [
         index + 1,
         finisher.bibNumber,
         `"${finisher.racerName || 'Unknown Runner'}"`,
-        finisher.finishTime ? formatTime(finisher.finishTime) : '',
+        (() => {
+          const normalized = normalizeFinishTime(finisher.finishTime);
+          return normalized ? formatTime(normalized) : '';
+        })(),
         finisher.gender || '',
         `"${finisher.team || ''}"`
       ].join(','))
@@ -299,6 +363,23 @@ export default function AdminDashboard() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  };
+
+  const normalizeFinishTime = (ft: number | null) => {
+    if (ft === null || ft === undefined) return null;
+    if (ft > 1e12 && clockStatus) {
+      const { raceStartTime, offset } = clockStatus;
+      if (raceStartTime) {
+        const elapsed = Math.round(ft - (raceStartTime * 1000) - (offset || 0));
+        return elapsed > 0 ? elapsed : 0;
+      }
+    }
+    return ft;
+  };
+
+  const getDisplayFinishTime = (ft: number | null) => {
+    const normalized = normalizeFinishTime(ft);
+    return normalized ? formatTime(normalized) : null;
   };
 
   return (
@@ -382,10 +463,10 @@ export default function AdminDashboard() {
 
           {/* Tab Content */}
           {activeTab === 'setup' && (
-            <div className="tv-dashboard-grid">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               
               {/* Race Clock Controls */}
-              <div className="col-span-6">
+              <div>
                 <div className="section-card-tv">
                   <div className="section-header-tv">
                     <div className="section-icon-tv">
@@ -407,7 +488,7 @@ export default function AdminDashboard() {
               </div>
 
               {/* Roster Management */}
-              <div className="col-span-6">
+              <div>
                 <div className="section-card-tv">
                   <div className="section-header-tv">
                     <div className="section-icon-tv">
@@ -596,7 +677,7 @@ export default function AdminDashboard() {
                                   {editingCell?.id === finisher.id && editingCell?.field === 'finishTime' ? (
                                     <input
                                       type="text"
-                                      defaultValue={finisher.finishTime ? formatTime(finisher.finishTime) : ''}
+                                      defaultValue={getDisplayFinishTime(finisher.finishTime) || ''}
                                       className="w-full p-2 rounded border border-border bg-background text-center font-mono text-lg"
                                       autoFocus
                                       onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'finishTime', (e.target as HTMLInputElement).value)}
@@ -607,7 +688,7 @@ export default function AdminDashboard() {
                                       className="time-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
                                       onClick={() => setEditingCell({ id: finisher.id, field: 'finishTime' })}
                                     >
-                                      {finisher.finishTime ? formatTime(finisher.finishTime) : '-'}
+                                      {getDisplayFinishTime(finisher.finishTime) || '-'}
                                     </span>
                                   )}
                                 </td>

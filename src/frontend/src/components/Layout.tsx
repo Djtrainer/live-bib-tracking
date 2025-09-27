@@ -25,6 +25,7 @@ export default function Layout({ children, showNavigation = true, totalFinishers
                   <img 
                     src="/ssri-logo.jpg" 
                     alt="Slay Sarcoma Research Initiative" 
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/placeholder.svg'; }}
                     className="h-12 w-12 rounded-lg object-cover shadow-sm group-hover:shadow-md transition-all duration-200"
                   />
                   <div className="flex flex-col">

@@ -24,6 +24,7 @@ const Index = () => {
   const [totalFinishers, setTotalFinishers] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [loading, setLoading] = useState(true);
+  const [clockStatus, setClockStatus] = useState<any>(null);
 
   // Category-specific leaderboards
   const [topMen, setTopMen] = useState<Finisher[]>([]);
@@ -77,10 +78,24 @@ const Index = () => {
         const result = await response.json();
         
         if (result.success && result.data) {
-          setFinishers(result.data);
-          setTotalFinishers(result.data.length);
+          // Normalize finish times if some are stored as epoch timestamps
+          const normalizeFinishTime = (ft: number | null) => {
+            if (ft === null || ft === undefined) return null;
+            if (ft > 1e12 && clockStatus) {
+              const { raceStartTime, offset } = clockStatus;
+              if (raceStartTime) {
+                const elapsed = Math.round(ft - (raceStartTime * 1000) - (offset || 0));
+                return elapsed > 0 ? elapsed : 0;
+              }
+            }
+            return ft;
+          };
+
+          const normalized = result.data.map((f: any) => ({ ...f, finishTime: normalizeFinishTime(f.finishTime) ?? f.finishTime }));
+          setFinishers(normalized);
+          setTotalFinishers(normalized.length);
           setLastUpdated(new Date());
-          calculateCategoryLeaderboards(result.data);
+          calculateCategoryLeaderboards(normalized);
         } else {
           console.error('Failed to fetch results:', result);
         }
@@ -102,6 +117,13 @@ const Index = () => {
       console.log('✅ WebSocket connection opened - Index.tsx');
       console.log('🔗 WebSocket URL:', wsUrl);
       console.log('🔗 WebSocket readyState:', ws.readyState);
+      // fetch clock status too
+      fetch('/api/clock/status')
+        .then(r => r.json())
+        .then(res => {
+          if (res.success && res.data) setClockStatus(res.data);
+        })
+        .catch(() => {});
     };
     
     ws.onmessage = async (event) => {
@@ -124,16 +146,30 @@ const Index = () => {
           }
         } else if (message.type === 'add' || message.type === 'update') {
           setFinishers(prev => {
-            const existingIndex = prev.findIndex(f => f.id === message.data.id || f.bibNumber === message.data.bibNumber);
+            const normalizeFinishTime = (ft: number | null) => {
+              if (ft === null || ft === undefined) return null;
+              if (ft > 1e12 && clockStatus) {
+                const { raceStartTime, offset } = clockStatus;
+                if (raceStartTime) {
+                  const elapsed = Math.round(ft - (raceStartTime * 1000) - (offset || 0));
+                  return elapsed > 0 ? elapsed : 0;
+                }
+              }
+              return ft;
+            };
+
+            const incoming = { ...message.data, finishTime: normalizeFinishTime(message.data.finishTime) ?? message.data.finishTime };
+
+            const existingIndex = prev.findIndex(f => f.id === incoming.id || f.bibNumber === incoming.bibNumber);
             let updated;
             if (existingIndex > -1) {
               updated = [...prev];
-              updated[existingIndex] = { ...updated[existingIndex], ...message.data };
+              updated[existingIndex] = { ...updated[existingIndex], ...incoming };
             } else {
-              updated = [...prev, message.data];
+              updated = [...prev, incoming];
             }
             // --- THIS IS THE CORRECT NUMERICAL SORT ---
-            updated.sort((a, b) => a.finishTime - b.finishTime);
+            updated.sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0));
             calculateCategoryLeaderboards(updated);
             return updated;
           });
