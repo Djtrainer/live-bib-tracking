@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Settings, 
@@ -12,7 +12,8 @@ import {
   LogOut,
   Trash2,
   Plus,
-  Monitor
+  Monitor,
+  Download
 } from 'lucide-react';
 import Layout from '@/components/Layout';
 import RaceClock from '@/components/RaceClock';
@@ -42,6 +43,7 @@ export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState<'setup' | 'live'>('setup');
   const [bibNumber, setBibNumber] = useState('');
   const navigate = useNavigate();
+  const resultsContainerRef = useRef<HTMLDivElement>(null);
 
   // Fetch finishers data from backend
   const fetchFinishers = async () => {
@@ -84,6 +86,8 @@ export default function AdminDashboard() {
           setFinishers(prev => {
             const existingIndex = prev.findIndex(f => f.id === message.data.id || f.bibNumber === message.data.bibNumber);
             let updated;
+            const isNewFinisher = existingIndex === -1;
+            
             if (existingIndex > -1) {
               updated = [...prev];
               updated[existingIndex] = { ...updated[existingIndex], ...message.data };
@@ -91,6 +95,12 @@ export default function AdminDashboard() {
               updated = [...prev, message.data];
             }
             updated.sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0));
+            
+            // Auto-scroll to bottom when a new finisher is added
+            if (isNewFinisher && message.type === 'add') {
+              setTimeout(scrollToBottom, 100);
+            }
+            
             return updated;
           });
         }
@@ -116,18 +126,24 @@ export default function AdminDashboard() {
     navigate('/admin/login');
   };
 
+  // Auto-scroll to bottom of results
+  const scrollToBottom = () => {
+    if (resultsContainerRef.current) {
+      resultsContainerRef.current.scrollTop = resultsContainerRef.current.scrollHeight;
+    }
+  };
+
   const handleQuickAdd = async () => {
     if (!bibNumber.trim()) return;
     
     try {
-      const response = await fetch('/api/add-finisher', {
+      const response = await fetch('/api/results', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           bibNumber: bibNumber.trim(),
-          racerName: '',
           finishTime: Date.now(),
         }),
       });
@@ -136,9 +152,11 @@ export default function AdminDashboard() {
       
       if (result.success) {
         setBibNumber('');
+        // Auto-scroll to bottom after adding finisher
+        setTimeout(scrollToBottom, 100);
         // fetchFinishers(); // The WebSocket will handle the update
       } else {
-        console.error('Failed to add finisher:', result.error);
+        console.error('Failed to add finisher:', result.error || result.message);
       }
     } catch (error) {
       console.error('Error adding finisher:', error);
@@ -149,7 +167,7 @@ export default function AdminDashboard() {
     if (!confirm('Are you sure you want to delete this finisher?')) return;
     
     try {
-      const response = await fetch(`/api/delete-finisher/${id}`, {
+      const response = await fetch(`/api/results/${id}`, {
         method: 'DELETE',
       });
 
@@ -158,7 +176,7 @@ export default function AdminDashboard() {
       if (result.success) {
         // fetchFinishers(); // The WebSocket will handle the update
       } else {
-        console.error('Failed to delete finisher:', result.error);
+        console.error('Failed to delete finisher:', result.error || result.message);
       }
     } catch (error) {
       console.error('Error deleting finisher:', error);
@@ -198,7 +216,7 @@ export default function AdminDashboard() {
     if (finisher[field as keyof Finisher] === processedValue) return;
 
     try {
-      const response = await fetch(`/api/update-finisher/${id}`, {
+      const response = await fetch(`/api/results/${id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -211,7 +229,7 @@ export default function AdminDashboard() {
       const result = await response.json();
       
       if (!result.success) {
-        console.error('Failed to update finisher:', result.error);
+        console.error('Failed to update finisher:', result.error || result.message);
       }
     } catch (error) {
       console.error('Error updating finisher:', error);
@@ -226,10 +244,10 @@ export default function AdminDashboard() {
     setUploadStatus('');
 
     const formData = new FormData();
-    formData.append('roster', file);
+    formData.append('file', file);
 
     try {
-      const response = await fetch('/api/upload-roster', {
+      const response = await fetch('/api/roster/upload', {
         method: 'POST',
         body: formData,
       });
@@ -237,10 +255,11 @@ export default function AdminDashboard() {
       const result = await response.json();
       
       if (result.success) {
-        setUploadStatus(`✅ Successfully processed ${result.processed} participants\n${result.summary}`);
+        const message = result.message || 'Upload successful';
+        setUploadStatus(`✅ ${message}`);
         fetchFinishers();
       } else {
-        setUploadStatus(`❌ Upload failed: ${result.error}`);
+        setUploadStatus(`❌ Upload failed: ${result.detail || result.error || 'Unknown error'}`);
       }
     } catch (error) {
       setUploadStatus(`❌ Upload error: ${error}`);
@@ -248,6 +267,38 @@ export default function AdminDashboard() {
       setIsUploading(false);
       event.target.value = '';
     }
+  };
+
+  const handleDownloadCSV = () => {
+    if (finishers.length === 0) {
+      alert('No results to download');
+      return;
+    }
+
+    // Create CSV content
+    const headers = ['Rank', 'Bib Number', 'Racer Name', 'Finish Time', 'Gender', 'Team'];
+    const csvContent = [
+      headers.join(','),
+      ...finishers.map((finisher, index) => [
+        index + 1,
+        finisher.bibNumber,
+        `"${finisher.racerName || 'Unknown Runner'}"`,
+        finisher.finishTime ? formatTime(finisher.finishTime) : '',
+        finisher.gender || '',
+        `"${finisher.team || ''}"`
+      ].join(','))
+    ].join('\n');
+
+    // Create and download file
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `race_results_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -409,197 +460,214 @@ export default function AdminDashboard() {
           )}
 
           {activeTab === 'live' && (
-            <div className="space-y-6">
+            <div className="flex flex-col h-[calc(100vh-280px)]">
               
-              {/* Quick Add Finisher */}
-              <div className="section-card-tv">
-                <div className="section-header-tv">
-                  <div className="section-icon-tv">
-                    <Plus className="w-5 h-5 text-white" />
+              {/* Sticky Quick Add Finisher */}
+              <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-border/50 pb-6 mb-6">
+                <div className="section-card-tv">
+                  <div className="section-header-tv">
+                    <div className="section-icon-tv">
+                      <Plus className="w-5 h-5 text-white" />
+                    </div>
+                    <h2 className="section-title-tv">Add Finisher</h2>
                   </div>
-                  <h2 className="section-title-tv">Add Finisher</h2>
-                </div>
-                
-                <div className="p-6">
-                  <p className="text-muted-foreground mb-4 text-lg">
-                    Quickly capture finishers as they cross the line. Just enter their bib number and press Enter or click Add.
-                  </p>
-                  <div className="flex gap-4">
-                    <input
-                      type="text"
-                      placeholder="Bib Number"
-                      value={bibNumber}
-                      onChange={(e) => setBibNumber(e.target.value)}
-                      className="px-4 py-3 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground font-mono text-lg"
-                      onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
-                    />
-                    <button
-                      onClick={handleQuickAdd}
-                      disabled={!bibNumber.trim()}
-                      className="flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50"
-                    >
-                      <Plus className="w-4 h-4" />
-                      Add Finisher
-                    </button>
+                  
+                  <div className="p-6">
+                    <p className="text-muted-foreground mb-4 text-lg">
+                      Quickly capture finishers as they cross the line. Just enter their bib number and press Enter or click Add.
+                    </p>
+                    <div className="flex gap-4">
+                      <input
+                        type="text"
+                        placeholder="Bib Number"
+                        value={bibNumber}
+                        onChange={(e) => setBibNumber(e.target.value)}
+                        className="px-4 py-3 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground font-mono text-lg"
+                        onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
+                      />
+                      <button
+                        onClick={handleQuickAdd}
+                        disabled={!bibNumber.trim()}
+                        className="flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50"
+                      >
+                        <Plus className="w-4 h-4" />
+                        Add Finisher
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* Results Table */}
-              <div className="section-card-tv">
-                <div className="section-header-tv">
-                  <div className="section-icon-tv">
-                    <Users className="w-5 h-5 text-white" />
+              {/* Scrollable Results Table */}
+              <div className="flex-1 overflow-hidden">
+                <div className="section-card-tv h-full flex flex-col">
+                  <div className="section-header-tv flex-shrink-0">
+                    <div className="section-icon-tv">
+                      <Users className="w-5 h-5 text-white" />
+                    </div>
+                    <h2 className="section-title-tv">Manage Results</h2>
+                    {finishers.length > 0 && (
+                      <button
+                        onClick={handleDownloadCSV}
+                        className="flex items-center gap-2 px-4 py-2 bg-success text-success-foreground rounded-lg font-semibold hover:bg-success/90 transition-colors"
+                        title="Download results as CSV"
+                      >
+                        <Download className="w-4 h-4" />
+                        Download CSV
+                      </button>
+                    )}
                   </div>
-                  <h2 className="section-title-tv">Manage Results</h2>
-                </div>
-                
-                <div className="overflow-hidden">
-                  {loading ? (
-                    <div className="text-center py-12">
-                      <RefreshCw className="w-8 h-8 text-primary mx-auto mb-4 animate-spin" />
-                      <p className="text-muted-foreground">Loading results...</p>
-                    </div>
-                  ) : finishers.length === 0 ? (
-                    <div className="text-center py-12">
-                      <Flag className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-                      <p className="text-muted-foreground text-lg">
-                        No finishers added yet. Click 'Add Finisher' to capture the first racer crossing the finish line.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="results-table-tv">
-                        <thead>
-                          <tr>
-                            <th className="w-20">Rank</th>
-                            <th className="w-24">Bib #</th>
-                            <th>Racer Name</th>
-                            <th className="w-32">Finish Time</th>
-                            <th className="w-20">Gender</th>
-                            <th>Team</th>
-                            <th className="w-24">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {finishers.map((finisher, index) => (
-                            <tr key={finisher.id} className="group">
-                              <td className="text-center">
-                                <span className="rank-cell-tv">{index + 1}</span>
-                              </td>
-                              <td className="text-center">
-                                {editingCell?.id === finisher.id && editingCell?.field === 'bibNumber' ? (
-                                  <input
-                                    type="text"
-                                    defaultValue={finisher.bibNumber}
-                                    className="w-full p-2 rounded border border-border bg-background text-center font-mono text-lg"
-                                    autoFocus
-                                    onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'bibNumber', (e.target as HTMLInputElement).value)}
-                                    onBlur={(e) => handleCellBlur(finisher.id, 'bibNumber', e.target.value)}
-                                  />
-                                ) : (
-                                  <span 
-                                    className="bib-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                    onClick={() => setEditingCell({ id: finisher.id, field: 'bibNumber' })}
-                                  >
-                                    #{finisher.bibNumber}
-                                  </span>
-                                )}
-                              </td>
-                              <td>
-                                {editingCell?.id === finisher.id && editingCell?.field === 'racerName' ? (
-                                  <input
-                                    type="text"
-                                    defaultValue={finisher.racerName}
-                                    className="w-full p-2 rounded border border-border bg-background text-lg"
-                                    autoFocus
-                                    onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'racerName', (e.target as HTMLInputElement).value)}
-                                    onBlur={(e) => handleCellBlur(finisher.id, 'racerName', e.target.value)}
-                                  />
-                                ) : (
-                                  <span 
-                                    className="name-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                    onClick={() => setEditingCell({ id: finisher.id, field: 'racerName' })}
-                                  >
-                                    {finisher.racerName || 'Unknown Runner'}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="text-center">
-                                {editingCell?.id === finisher.id && editingCell?.field === 'finishTime' ? (
-                                  <input
-                                    type="text"
-                                    defaultValue={finisher.finishTime ? formatTime(finisher.finishTime) : ''}
-                                    className="w-full p-2 rounded border border-border bg-background text-center font-mono text-lg"
-                                    autoFocus
-                                    onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'finishTime', (e.target as HTMLInputElement).value)}
-                                    onBlur={(e) => handleCellBlur(finisher.id, 'finishTime', e.target.value)}
-                                  />
-                                ) : (
-                                  <span 
-                                    className="time-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                    onClick={() => setEditingCell({ id: finisher.id, field: 'finishTime' })}
-                                  >
-                                    {finisher.finishTime ? formatTime(finisher.finishTime) : '-'}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="text-center">
-                                {editingCell?.id === finisher.id && editingCell?.field === 'gender' ? (
-                                  <select
-                                    defaultValue={finisher.gender || ''}
-                                    className="w-full p-2 rounded border border-border bg-background text-center"
-                                    autoFocus
-                                    onBlur={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
-                                    onChange={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
-                                  >
-                                    <option value="">-</option>
-                                    <option value="M">M</option>
-                                    <option value="W">W</option>
-                                  </select>
-                                ) : (
-                                  <span 
-                                    className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1 font-semibold"
-                                    onClick={() => setEditingCell({ id: finisher.id, field: 'gender' })}
-                                  >
-                                    {finisher.gender || '-'}
-                                  </span>
-                                )}
-                              </td>
-                              <td>
-                                {editingCell?.id === finisher.id && editingCell?.field === 'team' ? (
-                                  <input
-                                    type="text"
-                                    defaultValue={finisher.team || ''}
-                                    className="w-full p-2 rounded border border-border bg-background"
-                                    autoFocus
-                                    onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'team', (e.target as HTMLInputElement).value)}
-                                    onBlur={(e) => handleCellBlur(finisher.id, 'team', e.target.value)}
-                                  />
-                                ) : (
-                                  <span 
-                                    className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                    onClick={() => setEditingCell({ id: finisher.id, field: 'team' })}
-                                  >
-                                    {finisher.team || '-'}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="text-center">
-                                <button
-                                  onClick={() => handleDelete(finisher.id)}
-                                  className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
-                                  title="Delete entry"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </td>
+                  
+                  <div 
+                    ref={resultsContainerRef}
+                    className="flex-1 overflow-y-auto max-h-[60vh] scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent"
+                  >
+                    {loading ? (
+                      <div className="text-center py-12">
+                        <RefreshCw className="w-8 h-8 text-primary mx-auto mb-4 animate-spin" />
+                        <p className="text-muted-foreground">Loading results...</p>
+                      </div>
+                    ) : finishers.length === 0 ? (
+                      <div className="text-center py-12">
+                        <Flag className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                        <p className="text-muted-foreground text-lg">
+                          No finishers added yet. Click 'Add Finisher' to capture the first racer crossing the finish line.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="results-table-tv">
+                          <thead className="sticky top-0 bg-card z-10">
+                            <tr>
+                              <th className="w-20">Rank</th>
+                              <th className="w-24">Bib #</th>
+                              <th>Racer Name</th>
+                              <th className="w-32">Finish Time</th>
+                              <th className="w-20">Gender</th>
+                              <th>Team</th>
+                              <th className="w-24">Actions</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                          </thead>
+                          <tbody>
+                            {finishers.map((finisher, index) => (
+                              <tr key={finisher.id} className="group">
+                                <td className="text-center">
+                                  <span className="rank-cell-tv">{index + 1}</span>
+                                </td>
+                                <td className="text-center">
+                                  {editingCell?.id === finisher.id && editingCell?.field === 'bibNumber' ? (
+                                    <input
+                                      type="text"
+                                      defaultValue={finisher.bibNumber}
+                                      className="w-full p-2 rounded border border-border bg-background text-center font-mono text-lg"
+                                      autoFocus
+                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'bibNumber', (e.target as HTMLInputElement).value)}
+                                      onBlur={(e) => handleCellBlur(finisher.id, 'bibNumber', e.target.value)}
+                                    />
+                                  ) : (
+                                    <span 
+                                      className="bib-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                      onClick={() => setEditingCell({ id: finisher.id, field: 'bibNumber' })}
+                                    >
+                                      #{finisher.bibNumber}
+                                    </span>
+                                  )}
+                                </td>
+                                <td>
+                                  {editingCell?.id === finisher.id && editingCell?.field === 'racerName' ? (
+                                    <input
+                                      type="text"
+                                      defaultValue={finisher.racerName}
+                                      className="w-full p-2 rounded border border-border bg-background text-lg"
+                                      autoFocus
+                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'racerName', (e.target as HTMLInputElement).value)}
+                                      onBlur={(e) => handleCellBlur(finisher.id, 'racerName', e.target.value)}
+                                    />
+                                  ) : (
+                                    <span 
+                                      className="name-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                      onClick={() => setEditingCell({ id: finisher.id, field: 'racerName' })}
+                                    >
+                                      {finisher.racerName || 'Unknown Runner'}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="text-center">
+                                  {editingCell?.id === finisher.id && editingCell?.field === 'finishTime' ? (
+                                    <input
+                                      type="text"
+                                      defaultValue={finisher.finishTime ? formatTime(finisher.finishTime) : ''}
+                                      className="w-full p-2 rounded border border-border bg-background text-center font-mono text-lg"
+                                      autoFocus
+                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'finishTime', (e.target as HTMLInputElement).value)}
+                                      onBlur={(e) => handleCellBlur(finisher.id, 'finishTime', e.target.value)}
+                                    />
+                                  ) : (
+                                    <span 
+                                      className="time-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                      onClick={() => setEditingCell({ id: finisher.id, field: 'finishTime' })}
+                                    >
+                                      {finisher.finishTime ? formatTime(finisher.finishTime) : '-'}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="text-center">
+                                  {editingCell?.id === finisher.id && editingCell?.field === 'gender' ? (
+                                    <select
+                                      defaultValue={finisher.gender || ''}
+                                      className="w-full p-2 rounded border border-border bg-background text-center"
+                                      autoFocus
+                                      onBlur={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
+                                      onChange={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
+                                    >
+                                      <option value="">-</option>
+                                      <option value="M">M</option>
+                                      <option value="W">W</option>
+                                    </select>
+                                  ) : (
+                                    <span 
+                                      className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1 font-semibold"
+                                      onClick={() => setEditingCell({ id: finisher.id, field: 'gender' })}
+                                    >
+                                      {finisher.gender || '-'}
+                                    </span>
+                                  )}
+                                </td>
+                                <td>
+                                  {editingCell?.id === finisher.id && editingCell?.field === 'team' ? (
+                                    <input
+                                      type="text"
+                                      defaultValue={finisher.team || ''}
+                                      className="w-full p-2 rounded border border-border bg-background"
+                                      autoFocus
+                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'team', (e.target as HTMLInputElement).value)}
+                                      onBlur={(e) => handleCellBlur(finisher.id, 'team', e.target.value)}
+                                    />
+                                  ) : (
+                                    <span 
+                                      className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                      onClick={() => setEditingCell({ id: finisher.id, field: 'team' })}
+                                    >
+                                      {finisher.team || '-'}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="text-center">
+                                  <button
+                                    onClick={() => handleDelete(finisher.id)}
+                                    className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                                    title="Delete entry"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

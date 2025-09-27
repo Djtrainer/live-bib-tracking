@@ -1,6 +1,5 @@
 import { ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import ssriLogo from '@/assets/ssri-logo.jpg';
 import RaceClock from '@/components/RaceClock';
 
 interface LayoutProps {
@@ -24,7 +23,7 @@ export default function Layout({ children, showNavigation = true, totalFinishers
               <div className="flex items-center gap-8">
                 <Link to="/" className="flex items-center gap-4 group">
                   <img 
-                    src={ssriLogo} 
+                    src="/ssri-logo.jpg" 
                     alt="Slay Sarcoma Research Initiative" 
                     className="h-12 w-12 rounded-lg object-cover shadow-sm group-hover:shadow-md transition-all duration-200"
                   />
