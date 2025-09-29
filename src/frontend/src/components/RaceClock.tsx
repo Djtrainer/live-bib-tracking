@@ -1,4 +1,13 @@
 import { useState, useEffect } from 'react';
+import { 
+  Play, 
+  Square, 
+  Edit, 
+  RotateCcw, 
+  Wifi, 
+  WifiOff,
+  Clock
+} from 'lucide-react';
 
 interface RaceClockProps {
   className?: string;
@@ -195,13 +204,28 @@ export default function RaceClock({ className = '', showControls = false }: Race
     <div className={`race-clock ${className}`}>
       <div className="flex items-center gap-3">
         {/* Connection Status Indicator */}
-        <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} 
-             title={isConnected ? 'Connected' : 'Disconnected'} />
+        <div className="flex items-center gap-1" title={isConnected ? 'Connected' : 'Disconnected'}>
+          {isConnected ? (
+            <Wifi className="w-4 h-4 text-success" />
+          ) : (
+            <WifiOff className="w-4 h-4 text-destructive" />
+          )}
+        </div>
         
         {/* Clock Status Icon */}
-        <span className="text-lg" title={`Clock is ${clockState.status}`}>
-          {getStatusIcon()}
-        </span>
+        <div className={`flex items-center justify-center w-6 h-6 rounded-full ${
+          clockState.status === 'running' ? 'bg-success/20' :
+          clockState.status === 'paused' ? 'bg-warning/20' :
+          'bg-muted/20'
+        }`}>
+          {clockState.status === 'running' ? (
+            <Play className="w-3 h-3 text-success fill-current" />
+          ) : clockState.status === 'paused' ? (
+            <Square className="w-3 h-3 text-warning" />
+          ) : (
+            <Square className="w-3 h-3 text-muted-foreground" />
+          )}
+        </div>
         
         {/* Race Time Display */}
         <div className="font-mono text-2xl font-bold">
@@ -218,39 +242,39 @@ export default function RaceClock({ className = '', showControls = false }: Race
 
       {/* Control Buttons (only shown if showControls is true) */}
       {showControls && (
-        <div className="flex items-center gap-2 mt-3">
+        <div className="grid grid-cols-2 gap-3 mt-6">
           <button
             onClick={handleStart}
             disabled={clockState.status === 'running'}
-            className="btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-success text-white rounded-lg font-semibold hover:bg-success/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <span className="material-icon text-sm">play_arrow</span>
-            Start
+            <Play className="w-4 h-4" />
+            Start Race
           </button>
           
           <button
             onClick={handleStop}
             disabled={clockState.status === 'stopped'}
-            className="btn-secondary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-destructive text-white rounded-lg font-semibold hover:bg-destructive/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <span className="material-icon text-sm">stop</span>
-            Stop
+            <Square className="w-4 h-4" />
+            Stop Race
           </button>
           
           <button
             onClick={handleEdit}
-            className="btn-ghost text-sm"
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-primary text-primary-foreground rounded-lg font-semibold hover:bg-primary/90 transition-colors"
           >
-            <span className="material-icon text-sm">edit</span>
+            <Edit className="w-4 h-4" />
             Edit Time
           </button>
           
           <button
             onClick={handleReset}
-            className="btn-ghost text-sm text-red-600 hover:text-red-700"
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-muted text-foreground rounded-lg font-semibold hover:bg-muted/80 transition-colors"
           >
-            <span className="material-icon text-sm">refresh</span>
-            Reset
+            <RotateCcw className="w-4 h-4" />
+            Reset Clock
           </button>
         </div>
       )}

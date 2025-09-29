@@ -616,7 +616,7 @@ async def upload_roster(file: UploadFile = File(...)):
 
 @app.post("/api/results")
 async def update_finish_time(finish_data: Dict[str, Any]):
-    """Endpoint to update a pre-registered racer's finish time or add new finisher."""
+    """Endpoint to add new finisher - ALWAYS creates a new entry to allow duplicates."""
     logger.info(f"🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
     logger.info(f"🔍 DEBUG: Raw finish_data received: {finish_data}")
     logger.info(f"🔍 DEBUG: Type of finish_data: {type(finish_data)}")
@@ -673,104 +673,72 @@ async def update_finish_time(finish_data: Dict[str, Any]):
     logger.info(f"🔍 DEBUG: Current race_results count: {len(race_results)}")
     logger.info(f"🔍 DEBUG: Current race_results bib numbers: {[r.get('bibNumber', 'NO_BIB') for r in race_results]}")
 
-    # Look up the pre-registered racer by bib number
-    existing_racer = None
-    racer_index = -1
+    # CRITICAL FIX: Always create a new entry to allow duplicate bib numbers
+    # Generate a unique ID using timestamp and bib number to ensure uniqueness
+    import uuid
+    unique_id = str(uuid.uuid4())
+    logger.info(f"🔍 DEBUG: Generated unique ID: {unique_id}")
     
-    logger.info(f"🔍 DEBUG: Starting lookup for bib number: '{bib_number}'")
-    for i, racer in enumerate(race_results):
-        racer_bib = racer.get("bibNumber", "")
-        logger.info(f"🔍 DEBUG: Comparing '{bib_number}' with racer[{i}] bib: '{racer_bib}' (match: {racer_bib == bib_number})")
-        if racer["bibNumber"] == bib_number:
-            existing_racer = racer
-            racer_index = i
-            logger.info(f"✅ DEBUG: MATCH FOUND! Racer index: {i}")
-            break
+    # Calculate rank for new finisher
+    current_finished_count = len([r for r in race_results if r.get("finishTime") is not None])
+    new_rank = current_finished_count + 1
+    logger.info(f"🔍 DEBUG: Calculated new rank: {new_rank}")
+    
+    # Look up roster data for this bib number (if available)
+    roster_data = original_roster.get(bib_number, {})
+    logger.info(f"🔍 DEBUG: Roster data for bib #{bib_number}: {roster_data}")
+    
+    # Create new finisher with merged data from roster and finish_data
+    new_finisher = {
+        "id": unique_id,  # Always use unique ID
+        "bibNumber": bib_number,
+        "racerName": roster_data.get("racerName", finish_data.get("racerName", f"Racer #{bib_number}")),
+        "finishTime": finish_time,
+        "rank": new_rank,
+    }
+    
+    # Add optional fields from roster or finish_data
+    if roster_data.get("gender") or finish_data.get("gender"):
+        gender_source = roster_data.get("gender") or finish_data.get("gender")
+        gender = str(gender_source).upper()
+        if gender in ["M", "MALE", "MAN"]:
+            new_finisher["gender"] = "M"
+        elif gender in ["W", "F", "FEMALE", "WOMAN"]:
+            new_finisher["gender"] = "W"
+        else:
+            new_finisher["gender"] = gender
+        logger.info(f"🔍 DEBUG: Added gender: {new_finisher['gender']}")
 
-    if existing_racer:
-        # Merge with existing pre-registered racer data
-        logger.info(f"✅ DEBUG: Found pre-registered racer at index {racer_index}")
-        logger.info(f"🔍 DEBUG: Existing racer data: {existing_racer}")
-        logger.info(f"🔍 DEBUG: Racer name: {existing_racer.get('racerName', 'Unknown')}")
-        logger.info(f"🔍 DEBUG: Current finish time: {existing_racer.get('finishTime', 'None')}")
-        
-        # Update the existing racer with finish time, preserving all other data
-        race_results[racer_index]["finishTime"] = finish_time
-        logger.info(f"🔍 DEBUG: Updated finish time to: {finish_time}")
-        
-        # Calculate rank based on finish time among finished racers
-        finished_racers = [r for r in race_results if r.get("finishTime") is not None]
-        finished_racers.sort(key=lambda x: x["finishTime"])
-        logger.info(f"🔍 DEBUG: Total finished racers: {len(finished_racers)}")
-        
-        # Update ranks for all finished racers
-        for rank, finished_racer in enumerate(finished_racers, 1):
-            for j, r in enumerate(race_results):
-                if r["bibNumber"] == finished_racer["bibNumber"]:
-                    race_results[j]["rank"] = rank
-                    break
+    if roster_data.get("team") or finish_data.get("team"):
+        team_source = roster_data.get("team") or finish_data.get("team")
+        new_finisher["team"] = str(team_source).strip()
+        logger.info(f"🔍 DEBUG: Added team: {new_finisher['team']}")
 
-        # Get the complete updated racer object
-        updated_racer = race_results[racer_index]
-        logger.info(f"🔍 DEBUG: Complete updated racer object: {updated_racer}")
-        
-        # Broadcast the complete merged data to all connected WebSocket clients
-        broadcast_data = {"type": "update", "data": updated_racer}
-        broadcast_json = json.dumps(broadcast_data)
-        logger.info(f"🔍 DEBUG: About to broadcast updated racer data")
-        logger.info(f"📡 BROADCAST DEBUG: Broadcasting WebSocket message: {broadcast_json}")
-        print(f"📡 Broadcasting update via WebSocket: {broadcast_json}")
-        await manager.broadcast(broadcast_json)
-        logger.info(f"✅ DEBUG: Successfully broadcasted updated racer data")
-        
-        logger.info(f"✅ DEBUG: Updated finish time for pre-registered racer: Bib #{bib_number} - {updated_racer['racerName']} - {finish_time}ms")
-        return {"success": True, "data": updated_racer}
+    logger.info(f"🔍 DEBUG: Created new finisher object: {new_finisher}")
 
-    else:
-        # Racer not found in pre-registered list - create new entry (fallback)
-        logger.warning(f"❌ DEBUG: Racer with bib #{bib_number} not found in roster. Creating new entry with default name.")
-        
-        # Calculate rank for new finisher
-        current_finished_count = len([r for r in race_results if r.get("finishTime") is not None])
-        new_rank = current_finished_count + 1
-        logger.info(f"🔍 DEBUG: Calculated new rank: {new_rank}")
-        
-        # Create new finisher with merged data from finish_data and defaults
-        new_finisher = {
-            "id": bib_number,
-            "bibNumber": bib_number,
-            "racerName": finish_data.get("racerName", f"Racer #{bib_number}"),
-            "finishTime": finish_time,
-            "rank": new_rank,
-        }
-        logger.info(f"🔍 DEBUG: Created new finisher object: {new_finisher}")
+    # Add to race results (always creates new entry)
+    race_results.append(new_finisher)
+    logger.info(f"🔍 DEBUG: Added new finisher to race_results. Total count: {len(race_results)}")
 
-        # Handle optional fields from finish_data if provided
-        if "gender" in finish_data and finish_data["gender"]:
-            gender = str(finish_data["gender"]).upper()
-            if gender in ["M", "MALE", "MAN"]:
-                new_finisher["gender"] = "M"
-            elif gender in ["W", "F", "FEMALE", "WOMAN"]:
-                new_finisher["gender"] = "W"
-            else:
-                new_finisher["gender"] = gender
-            logger.info(f"🔍 DEBUG: Added gender: {new_finisher['gender']}")
+    # Recalculate ranks for all finished racers
+    finished_racers = [r for r in race_results if r.get("finishTime") is not None]
+    finished_racers.sort(key=lambda x: x["finishTime"])
+    logger.info(f"🔍 DEBUG: Total finished racers: {len(finished_racers)}")
+    
+    # Update ranks for all finished racers
+    for rank, finished_racer in enumerate(finished_racers, 1):
+        for j, r in enumerate(race_results):
+            if r["id"] == finished_racer["id"]:  # Match by unique ID, not bib number
+                race_results[j]["rank"] = rank
+                break
 
-        if "team" in finish_data and finish_data["team"]:
-            new_finisher["team"] = str(finish_data["team"]).strip()
-            logger.info(f"🔍 DEBUG: Added team: {new_finisher['team']}")
+    # Broadcast the new finisher to all connected WebSocket clients
+    logger.info(f"🔍 DEBUG: About to broadcast new finisher data")
+    await manager.broadcast(json.dumps({"type": "add", "data": new_finisher}))
+    logger.info(f"✅ DEBUG: Successfully broadcasted new finisher data")
 
-        # Add to race results
-        race_results.append(new_finisher)
-        logger.info(f"🔍 DEBUG: Added new finisher to race_results. Total count: {len(race_results)}")
-
-        # Broadcast the new finisher to all connected WebSocket clients
-        logger.info(f"🔍 DEBUG: About to broadcast new finisher data")
-        await manager.broadcast(json.dumps({"type": "add", "data": new_finisher}))
-        logger.info(f"✅ DEBUG: Successfully broadcasted new finisher data")
-
-        logger.info(f"✅ DEBUG: Added new finisher: Bib #{bib_number} - {new_finisher['racerName']} - {finish_time}ms")
-        return {"success": True, "data": new_finisher}
+    logger.info(f"✅ DEBUG: Added new finisher: Bib #{bib_number} - {new_finisher['racerName']} - {finish_time}ms")
+    return {"success": True, "data": new_finisher}
 
 
 @app.put("/api/results/{finisher_id}")
@@ -812,16 +780,18 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
             
             logger.info(f"🔍 DEBUG: Original bib: '{original_bib}', New bib: '{new_bib}', Changed: {bib_changed}")
             
-            # CRITICAL FIX: Use immutable original_roster for lookup instead of race_results
+            # CRITICAL FIX: Only lookup roster data if bib number has changed
             roster_racer = None
-            if new_bib in original_roster:
+            if bib_changed and new_bib in original_roster:
                 # Found in original roster - this is our source of truth!
                 roster_racer = original_roster[new_bib].copy()  # Make a copy to avoid mutation
-                logger.info(f"✅ DEBUG: Found in original_roster for bib #{new_bib}: {roster_racer}")
+                logger.info(f"✅ DEBUG: Bib changed - Found in original_roster for bib #{new_bib}: {roster_racer}")
+            elif bib_changed:
+                logger.info(f"🔍 DEBUG: Bib changed but #{new_bib} not found in original_roster")
             else:
-                logger.info(f"🔍 DEBUG: Bib #{new_bib} not found in original_roster")
+                logger.info(f"🔍 DEBUG: Bib not changed - skipping roster lookup")
             
-            if roster_racer:
+            if roster_racer and bib_changed:
                 # Create new finisher object by merging roster data with existing finish data
                 merged_data = {
                     "id": finisher_id,  # Keep the original ID
@@ -871,6 +841,11 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                 updated_data = finisher.copy()  # Start with existing data
                 updated_data.update(finisher_data)  # Update with provided data
                 updated_data["id"] = finisher_id  # Ensure ID is preserved
+                
+                # CRITICAL FIX: If bib number changed and not found in roster, update name to "Racer #<bib>"
+                if bib_changed:
+                    updated_data["racerName"] = f"Racer #{new_bib}"
+                    logger.info(f"🔍 DEBUG: Bib changed to unknown number - updated name to: {updated_data['racerName']}")
                 
                 race_results[i] = updated_data
                 
