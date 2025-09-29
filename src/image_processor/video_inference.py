@@ -38,6 +38,8 @@ class VideoInferenceProcessor:
         confidence_threshold: float = 0,
         finish_line_fraction: float = 0.85,
         result_callback=None,
+        camera_width: int | None = None,
+        camera_height: int | None = None,
     ):
         """
         Initializes the VideoInferenceProcessor for live bib tracking.
@@ -49,6 +51,10 @@ class VideoInferenceProcessor:
             confidence_threshold (float, optional): YOLO detection confidence threshold. Defaults to 0.
             finish_line_fraction (float, optional): Fraction of frame width for finish line. Defaults to 0.85.
         """
+        # Optional camera resolution requested by caller (may be None)
+        self.requested_width = camera_width
+        self.requested_height = camera_height
+
         self.model_path = Path(model_path)
 
         # Handle both file paths and camera indices
@@ -103,6 +109,34 @@ class VideoInferenceProcessor:
                                 f"✅ Successfully opened camera {self.video_path} with backend {backend}"
                             )
                             self.cap = cap_test
+
+                            # If caller requested a specific resolution, apply it now.
+                            try:
+                                if self.requested_width is not None:
+                                    logger.info(
+                                        f"Setting requested camera width: {self.requested_width}"
+                                    )
+                                    self.cap.set(
+                                        cv2.CAP_PROP_FRAME_WIDTH,
+                                        int(self.requested_width),
+                                    )
+                                if self.requested_height is not None:
+                                    logger.info(
+                                        f"Setting requested camera height: {self.requested_height}"
+                                    )
+                                    self.cap.set(
+                                        cv2.CAP_PROP_FRAME_HEIGHT,
+                                        int(self.requested_height),
+                                    )
+                                # Read back actual frame size and log
+                                actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                                logger.info(
+                                    f"Camera actual resolution after set: {actual_w}x{actual_h}"
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to set camera resolution: {e}")
+
                             break
                         else:
                             logger.warning(
@@ -162,7 +196,7 @@ class VideoInferenceProcessor:
 
         # Initialize timing tracking
         self.timings = defaultdict(float)
-        
+
         # Callback function for when racers finish
         self.result_callback = result_callback
 
@@ -254,7 +288,7 @@ class VideoInferenceProcessor:
                 history["finish_time_ms"] = finish_time
                 history["finish_wall_time"] = finish_wall_time
                 history["has_finished"] = True  # Set flag to prevent recording again
-                
+
                 logger.info(
                     f"Racer ID {person_id} entered finish zone at {finish_time / 1000:.2f}s"
                 )
@@ -265,53 +299,73 @@ class VideoInferenceProcessor:
 
                 if bib_result:
                     logger.info(
-                        f"Racer finished: Bib #{bib_result['final_bib']} at {finish_time/1000:.2f}s"
+                        f"Racer finished: Bib #{bib_result['final_bib']} at {finish_time / 1000:.2f}s"
                     )
-                    
+
                     # Call the callback function to notify the server with wall-clock time
                     if self.result_callback:
                         try:
                             payload = {
-                                "bibNumber": bib_result['final_bib'],
+                                "bibNumber": bib_result["final_bib"],
                                 "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
-                                "racerName": f"Racer {person_id}"
+                                "racerName": f"Racer {person_id}",
                             }
-                            logger.info("🔍 DEBUG: About to send finisher data via callback")
+                            logger.info(
+                                "🔍 DEBUG: About to send finisher data via callback"
+                            )
                             logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
                             logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)")
+                            logger.info(
+                                f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)"
+                            )
                             logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
-                            
+
                             self.result_callback(payload)
-                            logger.info(f"✅ DEBUG: Successfully sent finisher data via callback: Bib #{payload['bibNumber']}")
+                            logger.info(
+                                f"✅ DEBUG: Successfully sent finisher data via callback: Bib #{payload['bibNumber']}"
+                            )
                         except Exception as e:
-                            logger.error(f"❌ DEBUG: Error calling result callback: {e}")
-                            logger.error(f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}")
+                            logger.error(
+                                f"❌ DEBUG: Error calling result callback: {e}"
+                            )
+                            logger.error(
+                                f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}"
+                            )
                 else:
                     # No bib number found - send finisher with placeholder bib
                     logger.info(
-                        f"Racer finished: No readable bib number for Racer ID {person_id} at {finish_time/1000:.2f}s"
+                        f"Racer finished: No readable bib number for Racer ID {person_id} at {finish_time / 1000:.2f}s"
                     )
-                    
+
                     # Call the callback function to notify the server with placeholder bib and wall-clock time
                     if self.result_callback:
                         try:
                             payload = {
                                 "bibNumber": f"Unknown-{person_id}",  # Use tracker ID as placeholder
                                 "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
-                                "racerName": f"Racer {person_id}"
+                                "racerName": f"Racer {person_id}",
                             }
-                            logger.info("🔍 DEBUG: About to send 'No Bib' finisher data via callback")
+                            logger.info(
+                                "🔍 DEBUG: About to send 'No Bib' finisher data via callback"
+                            )
                             logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
                             logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)")
+                            logger.info(
+                                f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)"
+                            )
                             logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
-                            
+
                             self.result_callback(payload)
-                            logger.info(f"✅ DEBUG: Successfully sent 'No Bib' finisher data via callback: {payload['bibNumber']}")
+                            logger.info(
+                                f"✅ DEBUG: Successfully sent 'No Bib' finisher data via callback: {payload['bibNumber']}"
+                            )
                         except Exception as e:
-                            logger.error(f"❌ DEBUG: Error calling result callback for 'No Bib' finisher: {e}")
-                            logger.error(f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}")
+                            logger.error(
+                                f"❌ DEBUG: Error calling result callback for 'No Bib' finisher: {e}"
+                            )
+                            logger.error(
+                                f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}"
+                            )
 
                 self.print_live_leaderboard()
 
@@ -337,7 +391,7 @@ class VideoInferenceProcessor:
                 score = ocr_conf
                 # Add the score to the total for that bib number
                 scores[bib_num] = scores.get(bib_num, 0) + score
-            
+
             # 3. Find the bib number with the highest total score
             if scores:
                 most_likely_bib = max(scores, key=scores.get)
@@ -735,11 +789,13 @@ class VideoInferenceProcessor:
                                             self.preprocess_for_easyocr(bib_crop)
                                         )
                                     )
-                                    
+
                                     # Add detailed OCR logging for every attempt
                                     if bib_number and ocr_conf:
-                                        logger.info(f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Confidence: {ocr_conf:.2f})")
-                                        
+                                        logger.info(
+                                            f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Confidence: {ocr_conf:.2f})"
+                                        )
+
                                         history["ocr_reads"].append(
                                             (bib_number, ocr_conf, yolo_bib_conf)
                                         )
