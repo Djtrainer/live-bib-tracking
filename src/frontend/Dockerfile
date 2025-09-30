@@ -14,8 +14,11 @@ RUN npm install
 # Copy source code
 COPY . .
 
+# Set port environment variable
+ENV PORT=5173
+
 # Expose port 5173 (Vite default)
 EXPOSE 5173
 
 # Start development server
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
