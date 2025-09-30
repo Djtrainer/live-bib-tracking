@@ -11,16 +11,27 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List
 
+import cv2
 import dotenv
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, File, UploadFile, HTTPException
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from image_processor.utils import get_logger
 from image_processor.video_inference import VideoInferenceProcessor
+from image_processor.video_inference import FrameReader
 
 logger = get_logger()
 dotenv.load_dotenv()
@@ -99,6 +110,15 @@ async def lifespan(app: FastAPI):
                 confidence_threshold=confidence_threshold,
             )
             app_state["processor"] = processor
+
+            # Create and start a FrameReader to decouple blocking cap.read() from processing
+            try:
+                frame_reader = FrameReader(processor.cap, max_queue_size=1)
+                frame_reader.start()
+                app_state["frame_reader"] = frame_reader
+                logger.info("✅ FrameReader initialized and started during startup!")
+            except Exception as e:
+                logger.warning(f"Failed to start FrameReader: {e}")
             logger.info("✅ Video processor initialized successfully during startup!")
         else:
             # Running directly - processor will be initialized in main()
@@ -116,6 +136,13 @@ async def lifespan(app: FastAPI):
 
     # Code to run on shutdown
     logger.info("Application shutdown: Cleaning up resources.")
+    # Stop and cleanup FrameReader if present
+    if app_state.get("frame_reader"):
+        try:
+            app_state["frame_reader"].stop()
+        except Exception as e:
+            logger.warning(f"Error stopping FrameReader: {e}")
+
     if app_state.get("processor"):
         try:
             app_state["processor"].cap.release()
@@ -130,41 +157,59 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        print(f"🔗 WebSocket client connected. Total clients: {len(self.active_connections)}")
-        logger.info(f"🔗 WebSocket client connected. Total clients: {len(self.active_connections)}")
+        print(
+            f"🔗 WebSocket client connected. Total clients: {len(self.active_connections)}"
+        )
+        logger.info(
+            f"🔗 WebSocket client connected. Total clients: {len(self.active_connections)}"
+        )
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        print(f"❌ WebSocket client disconnected. Total clients: {len(self.active_connections)}")
-        logger.info(f"❌ WebSocket client disconnected. Total clients: {len(self.active_connections)}")
+        print(
+            f"❌ WebSocket client disconnected. Total clients: {len(self.active_connections)}"
+        )
+        logger.info(
+            f"❌ WebSocket client disconnected. Total clients: {len(self.active_connections)}"
+        )
 
     async def broadcast(self, message: str):
-        print(f"📡 BROADCAST DEBUG: Attempting to broadcast to {len(self.active_connections)} clients")
-        logger.info(f"📡 BROADCAST DEBUG: Attempting to broadcast to {len(self.active_connections)} clients")
-        
+        print(
+            f"📡 BROADCAST DEBUG: Attempting to broadcast to {len(self.active_connections)} clients"
+        )
+        logger.info(
+            f"📡 BROADCAST DEBUG: Attempting to broadcast to {len(self.active_connections)} clients"
+        )
+
         if len(self.active_connections) == 0:
-            print("⚠️ BROADCAST WARNING: No active WebSocket connections to broadcast to!")
-            logger.warning("⚠️ BROADCAST WARNING: No active WebSocket connections to broadcast to!")
+            print(
+                "⚠️ BROADCAST WARNING: No active WebSocket connections to broadcast to!"
+            )
+            logger.warning(
+                "⚠️ BROADCAST WARNING: No active WebSocket connections to broadcast to!"
+            )
             return
-        
+
         disconnected_clients = []
         for i, connection in enumerate(self.active_connections):
             try:
                 await connection.send_text(message)
-                print(f"✅ Successfully sent message to client {i+1}")
+                print(f"✅ Successfully sent message to client {i + 1}")
             except Exception as e:
-                print(f"❌ Failed to send message to client {i+1}: {e}")
-                logger.error(f"❌ Failed to send message to client {i+1}: {e}")
+                print(f"❌ Failed to send message to client {i + 1}: {e}")
+                logger.error(f"❌ Failed to send message to client {i + 1}: {e}")
                 disconnected_clients.append(connection)
-        
+
         # Remove disconnected clients
         for client in disconnected_clients:
             if client in self.active_connections:
                 self.active_connections.remove(client)
-        
+
         if disconnected_clients:
-            print(f"🧹 Cleaned up {len(disconnected_clients)} disconnected clients. Active clients: {len(self.active_connections)}")
+            print(
+                f"🧹 Cleaned up {len(disconnected_clients)} disconnected clients. Active clients: {len(self.active_connections)}"
+            )
 
 
 manager = ConnectionManager()
@@ -182,8 +227,8 @@ original_roster: Dict[str, Dict[str, Any]] = {}  # Key: bibNumber, Value: racer 
 # This stores the official race clock state
 race_clock_state = {
     "raceStartTime": None,  # Unix timestamp when race officially started
-    "status": "stopped",    # 'stopped', 'running', or 'paused'
-    "offset": 0,           # Manual time adjustment in milliseconds
+    "status": "stopped",  # 'stopped', 'running', or 'paused'
+    "offset": 0,  # Manual time adjustment in milliseconds
 }
 
 # --- FastAPI App ---
@@ -301,14 +346,31 @@ async def video_feed(request: Request):
                 logger.info("Starting video frame generation...")
 
                 # Main video processing loop
+                frame_reader = app_state.get("frame_reader")
                 while True:
                     try:
-                        # Read frame from video capture
-                        ret, frame = processor.cap.read()
+                        # Non-blocking read from FrameReader (keeps only latest frame)
+                        frame = None
+                        if frame_reader is not None:
+                            frame = frame_reader.get_latest_frame()
+                        else:
+                            # Fallback to direct read if FrameReader isn't available
+                            ret, frame = processor.cap.read()
+                            if not ret:
+                                logger.info("End of video reached")
+                                break
 
-                        if not ret:
-                            logger.info("End of video reached")
-                            break
+                        # If no frame available yet, yield control briefly and continue
+                        if frame is None:
+                            # For non-live (file) mode, if the reader has stopped and there are no frames, end stream
+                            if (not processor.is_live_mode) and (
+                                frame_reader is not None and not frame_reader.running
+                            ):
+                                logger.info("End of video reached (frame reader stopped and no frames left)")
+                                break
+
+                            await asyncio.sleep(0.005)
+                            continue
 
                         if frame is None or frame.size == 0:
                             logger.warning(f"Invalid frame at count {frame_count}")
@@ -329,9 +391,6 @@ async def video_feed(request: Request):
                                 f"Invalid processed frame at count {frame_count}"
                             )
                             continue
-
-                        # Encode frame as JPEG
-                        import cv2
 
                         ret, buffer = cv2.imencode(
                             ".jpg", processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
@@ -393,7 +452,6 @@ async def video_feed(request: Request):
                 logger.error(f"Critical error in video generator: {generator_error}")
                 # Yield an error frame
                 try:
-                    import cv2
 
                     error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
                     cv2.putText(
@@ -439,117 +497,127 @@ async def video_feed(request: Request):
 async def get_results():
     """Endpoint to get the current list of finishers (only racers who have completed the race)."""
     # Filter out racers who haven't finished (finishTime is None or null)
-    finished_racers = [racer for racer in race_results if racer.get("finishTime") is not None]
-    
+    finished_racers = [
+        racer for racer in race_results if racer.get("finishTime") is not None
+    ]
+
     # Sort by finish time before returning
     finished_racers.sort(key=lambda x: x["finishTime"])
-    
+
     return {"success": True, "data": finished_racers}
 
 
 @app.post("/api/roster/upload")
 async def upload_roster(file: UploadFile = File(...)):
     """Endpoint to upload a CSV roster file and merge with existing race data."""
-    if not file.filename.endswith('.csv'):
+    if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a CSV file")
-    
+
     try:
         # Read the uploaded file content
         content = await file.read()
-        csv_content = content.decode('utf-8')
-        
+        csv_content = content.decode("utf-8")
+
         # Parse CSV content
         csv_reader = csv.DictReader(io.StringIO(csv_content))
-        
+
         # Validate required headers
-        required_headers = {'bibNumber', 'racerName'}
+        required_headers = {"bibNumber", "racerName"}
         if not required_headers.issubset(set(csv_reader.fieldnames or [])):
             raise HTTPException(
-                status_code=400, 
-                detail=f"CSV must contain headers: {', '.join(required_headers)}"
+                status_code=400,
+                detail=f"CSV must contain headers: {', '.join(required_headers)}",
             )
-        
+
         # Fetch existing data and create a lookup dictionary keyed by bibNumber
         existing_data = {}
         for racer in race_results:
-            existing_data[racer['bibNumber']] = racer.copy()
-        
+            existing_data[racer["bibNumber"]] = racer.copy()
+
         uploaded_count = 0
         updated_count = 0
         errors = []
         csv_duplicates = set()  # Track duplicates within the CSV file
-        
-        for row_num, row in enumerate(csv_reader, start=2):  # Start at 2 because row 1 is headers
+
+        for row_num, row in enumerate(
+            csv_reader, start=2
+        ):  # Start at 2 because row 1 is headers
             try:
                 # Validate required fields
-                if not row.get('bibNumber') or not row.get('racerName'):
+                if not row.get("bibNumber") or not row.get("racerName"):
                     errors.append(f"Row {row_num}: Missing bibNumber or racerName")
                     continue
-                
-                bib_number = str(row['bibNumber'])
-                
+
+                bib_number = str(row["bibNumber"])
+
                 # Check for duplicates within the CSV file
                 if bib_number in csv_duplicates:
-                    errors.append(f"Row {row_num}: Duplicate bib number {bib_number} in CSV file")
+                    errors.append(
+                        f"Row {row_num}: Duplicate bib number {bib_number} in CSV file"
+                    )
                     continue
                 csv_duplicates.add(bib_number)
-                
+
                 # Create or update racer record
                 if bib_number in existing_data:
                     # Update existing racer - preserve finishTime and rank if they exist
                     racer = existing_data[bib_number]
-                    racer["racerName"] = str(row['racerName']).strip()
-                    
+                    racer["racerName"] = str(row["racerName"]).strip()
+
                     # Update optional fields
-                    if row.get('gender'):
-                        gender = str(row['gender']).upper()
+                    if row.get("gender"):
+                        gender = str(row["gender"]).upper()
                         if gender in ["M", "MALE", "MAN"]:
                             racer["gender"] = "M"
                         elif gender in ["W", "F", "FEMALE", "WOMAN"]:
                             racer["gender"] = "W"
                         else:
                             racer["gender"] = gender
-                    
-                    if row.get('team'):
-                        racer["team"] = str(row['team']).strip()
-                    
+
+                    if row.get("team"):
+                        racer["team"] = str(row["team"]).strip()
+
                     updated_count += 1
-                    logger.info(f"Updated existing racer: Bib #{bib_number} - {racer['racerName']}")
-                    
+                    logger.info(
+                        f"Updated existing racer: Bib #{bib_number} - {racer['racerName']}"
+                    )
+
                 else:
                     # Create new racer record
                     racer = {
                         "id": bib_number,
                         "bibNumber": bib_number,
-                        "racerName": str(row['racerName']).strip(),
+                        "racerName": str(row["racerName"]).strip(),
                         "finishTime": None,  # Will be updated when racer finishes
                         "rank": None,  # Will be calculated when racer finishes
                     }
-                    
+
                     # Add optional fields if present
-                    if row.get('gender'):
-                        gender = str(row['gender']).upper()
+                    if row.get("gender"):
+                        gender = str(row["gender"]).upper()
                         if gender in ["M", "MALE", "MAN"]:
                             racer["gender"] = "M"
                         elif gender in ["W", "F", "FEMALE", "WOMAN"]:
                             racer["gender"] = "W"
                         else:
                             racer["gender"] = gender
-                    
-                    if row.get('team'):
-                        racer["team"] = str(row['team']).strip()
-                    
+
+                    if row.get("team"):
+                        racer["team"] = str(row["team"]).strip()
+
                     existing_data[bib_number] = racer
                     uploaded_count += 1
-                    logger.info(f"Added new racer: Bib #{bib_number} - {racer['racerName']}")
-                
+                    logger.info(
+                        f"Added new racer: Bib #{bib_number} - {racer['racerName']}"
+                    )
+
             except Exception as e:
                 errors.append(f"Row {row_num}: {str(e)}")
-        
+
         # Update the global race_results with the merged data
         race_results.clear()
         race_results.extend(existing_data.values())
-        
+
         # CRITICAL: Update the original_roster dictionary (source of truth)
         # This preserves the original roster data for future lookups
         original_roster.clear()
@@ -563,50 +631,56 @@ async def upload_roster(file: UploadFile = File(...)):
                     "gender": racer.get("gender"),
                     "team": racer.get("team"),
                 }
-        
-        logger.info(f"🔍 DEBUG: Updated original_roster with {len(original_roster)} entries")
-        logger.info(f"🔍 DEBUG: Original roster bib numbers: {list(original_roster.keys())}")
-        
+
+        logger.info(
+            f"🔍 DEBUG: Updated original_roster with {len(original_roster)} entries"
+        )
+        logger.info(
+            f"🔍 DEBUG: Original roster bib numbers: {list(original_roster.keys())}"
+        )
+
         # Sort the results to maintain proper order (finished racers first, then by bib number)
         def sort_key(x):
             # First sort by whether they've finished (finished racers first)
             has_finished = x.get("finishTime") is None
             # Then by finish time (if they've finished)
-            finish_time = x.get("finishTime") or float('inf')
+            finish_time = x.get("finishTime") or float("inf")
             # Finally by bib number, handling non-numeric bibs like "Unknown-1"
             try:
                 bib_sort_key = int(x["bibNumber"])
             except (ValueError, TypeError):
                 # For non-numeric bibs (like "Unknown-1"), sort them after numeric bibs
-                bib_sort_key = float('inf')
-            
+                bib_sort_key = float("inf")
+
             return (has_finished, finish_time, bib_sort_key)
-        
+
         race_results.sort(key=sort_key)
-        
+
         # Broadcast roster update to all connected clients
         await manager.broadcast(json.dumps({"action": "reload"}))
-        
+
         total_processed = uploaded_count + updated_count
-        logger.info(f"Roster merge completed: {uploaded_count} new racers, {updated_count} updated racers")
-        
+        logger.info(
+            f"Roster merge completed: {uploaded_count} new racers, {updated_count} updated racers"
+        )
+
         message_parts = []
         if uploaded_count > 0:
             message_parts.append(f"{uploaded_count} new racers added")
         if updated_count > 0:
             message_parts.append(f"{updated_count} existing racers updated")
-        
+
         success_message = "Successfully processed roster: " + ", ".join(message_parts)
-        
+
         return {
             "success": True,
             "message": success_message,
             "uploaded_count": uploaded_count,
             "updated_count": updated_count,
             "total_processed": total_processed,
-            "errors": errors
+            "errors": errors,
         }
-        
+
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="File must be UTF-8 encoded")
     except Exception as e:
@@ -620,7 +694,9 @@ async def update_finish_time(finish_data: Dict[str, Any]):
     logger.info(f"🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
     logger.info(f"🔍 DEBUG: Raw finish_data received: {finish_data}")
     logger.info(f"🔍 DEBUG: Type of finish_data: {type(finish_data)}")
-    logger.info(f"🔍 DEBUG: Keys in finish_data: {list(finish_data.keys()) if isinstance(finish_data, dict) else 'Not a dict'}")
+    logger.info(
+        f"🔍 DEBUG: Keys in finish_data: {list(finish_data.keys()) if isinstance(finish_data, dict) else 'Not a dict'}"
+    )
 
     # Validate required fields
     if "bibNumber" not in finish_data:
@@ -628,75 +704,106 @@ async def update_finish_time(finish_data: Dict[str, Any]):
         return {"success": False, "message": "bibNumber is required"}
 
     bib_number = str(finish_data["bibNumber"])
-    logger.info(f"🔍 DEBUG: Extracted bib_number: '{bib_number}' (type: {type(bib_number)})")
-    
+    logger.info(
+        f"🔍 DEBUG: Extracted bib_number: '{bib_number}' (type: {type(bib_number)})"
+    )
+
     # CRITICAL CHANGE: Handle both wall-clock time and legacy finish time formats
     finish_time = None
-    
+
     if "wallClockTime" in finish_data:
         # NEW: Wall-clock time from video processor - calculate official finish time
         wall_clock_time = float(finish_data["wallClockTime"])
         logger.info(f"🔍 DEBUG: Received wall-clock time: {wall_clock_time}")
-        
-        if race_clock_state["raceStartTime"] is not None and race_clock_state["status"] == "running":
+
+        if (
+            race_clock_state["raceStartTime"] is not None
+            and race_clock_state["status"] == "running"
+        ):
             # Calculate official finish time relative to race start
-            official_finish_time_ms = (wall_clock_time - race_clock_state["raceStartTime"]) * 1000
+            official_finish_time_ms = (
+                wall_clock_time - race_clock_state["raceStartTime"]
+            ) * 1000
             # Apply any manual offset
             official_finish_time_ms += race_clock_state["offset"]
             finish_time = official_finish_time_ms
-            logger.info(f"🔍 DEBUG: Calculated official finish time: {finish_time}ms (race started at {race_clock_state['raceStartTime']}, offset: {race_clock_state['offset']}ms)")
+            logger.info(
+                f"🔍 DEBUG: Calculated official finish time: {finish_time}ms (race started at {race_clock_state['raceStartTime']}, offset: {race_clock_state['offset']}ms)"
+            )
         else:
-            logger.warning(f"⚠️ DEBUG: Race clock not running - cannot calculate official finish time")
-            return {"success": False, "message": "Race clock is not running. Please start the race clock first."}
-    
+            logger.warning(
+                f"⚠️ DEBUG: Race clock not running - cannot calculate official finish time"
+            )
+            return {
+                "success": False,
+                "message": "Race clock is not running. Please start the race clock first.",
+            }
+
     elif "finishTime" in finish_data:
         # LEGACY: Direct finish time (for manual entry or backward compatibility)
         raw_finish_time = finish_data["finishTime"]
-        logger.info(f"🔍 DEBUG: Raw finish_time: {raw_finish_time} (type: {type(raw_finish_time)})")
-        
+        logger.info(
+            f"🔍 DEBUG: Raw finish_time: {raw_finish_time} (type: {type(raw_finish_time)})"
+        )
+
         if isinstance(raw_finish_time, str):
             time_ms = time_string_to_milliseconds(raw_finish_time)
             if time_ms < 0:
                 logger.error(f"❌ DEBUG: Invalid time format: {raw_finish_time}")
-                return {"success": False, "message": "Invalid time format. Use MM:SS.ms"}
+                return {
+                    "success": False,
+                    "message": "Invalid time format. Use MM:SS.ms",
+                }
             finish_time = time_ms
-            logger.info(f"🔍 DEBUG: Converted string time to milliseconds: {finish_time}")
+            logger.info(
+                f"🔍 DEBUG: Converted string time to milliseconds: {finish_time}"
+            )
         else:
             finish_time = float(raw_finish_time)
             logger.info(f"🔍 DEBUG: Finish time is already numeric: {finish_time}")
-    
+
     else:
         logger.error(f"❌ DEBUG: Missing both wallClockTime and finishTime fields")
-        return {"success": False, "message": "Either wallClockTime or finishTime is required"}
+        return {
+            "success": False,
+            "message": "Either wallClockTime or finishTime is required",
+        }
 
     # Debug: Show current race_results state
     logger.info(f"🔍 DEBUG: Current race_results count: {len(race_results)}")
-    logger.info(f"🔍 DEBUG: Current race_results bib numbers: {[r.get('bibNumber', 'NO_BIB') for r in race_results]}")
+    logger.info(
+        f"🔍 DEBUG: Current race_results bib numbers: {[r.get('bibNumber', 'NO_BIB') for r in race_results]}"
+    )
 
     # CRITICAL FIX: Always create a new entry to allow duplicate bib numbers
     # Generate a unique ID using timestamp and bib number to ensure uniqueness
     import uuid
+
     unique_id = str(uuid.uuid4())
     logger.info(f"🔍 DEBUG: Generated unique ID: {unique_id}")
-    
+
     # Calculate rank for new finisher
-    current_finished_count = len([r for r in race_results if r.get("finishTime") is not None])
+    current_finished_count = len(
+        [r for r in race_results if r.get("finishTime") is not None]
+    )
     new_rank = current_finished_count + 1
     logger.info(f"🔍 DEBUG: Calculated new rank: {new_rank}")
-    
+
     # Look up roster data for this bib number (if available)
     roster_data = original_roster.get(bib_number, {})
     logger.info(f"🔍 DEBUG: Roster data for bib #{bib_number}: {roster_data}")
-    
+
     # Create new finisher with merged data from roster and finish_data
     new_finisher = {
         "id": unique_id,  # Always use unique ID
         "bibNumber": bib_number,
-        "racerName": roster_data.get("racerName", finish_data.get("racerName", f"Racer #{bib_number}")),
+        "racerName": roster_data.get(
+            "racerName", finish_data.get("racerName", f"Racer #{bib_number}")
+        ),
         "finishTime": finish_time,
         "rank": new_rank,
     }
-    
+
     # Add optional fields from roster or finish_data
     if roster_data.get("gender") or finish_data.get("gender"):
         gender_source = roster_data.get("gender") or finish_data.get("gender")
@@ -718,13 +825,15 @@ async def update_finish_time(finish_data: Dict[str, Any]):
 
     # Add to race results (always creates new entry)
     race_results.append(new_finisher)
-    logger.info(f"🔍 DEBUG: Added new finisher to race_results. Total count: {len(race_results)}")
+    logger.info(
+        f"🔍 DEBUG: Added new finisher to race_results. Total count: {len(race_results)}"
+    )
 
     # Recalculate ranks for all finished racers
     finished_racers = [r for r in race_results if r.get("finishTime") is not None]
     finished_racers.sort(key=lambda x: x["finishTime"])
     logger.info(f"🔍 DEBUG: Total finished racers: {len(finished_racers)}")
-    
+
     # Update ranks for all finished racers
     for rank, finished_racer in enumerate(finished_racers, 1):
         for j, r in enumerate(race_results):
@@ -737,7 +846,9 @@ async def update_finish_time(finish_data: Dict[str, Any]):
     await manager.broadcast(json.dumps({"type": "add", "data": new_finisher}))
     logger.info(f"✅ DEBUG: Successfully broadcasted new finisher data")
 
-    logger.info(f"✅ DEBUG: Added new finisher: Bib #{bib_number} - {new_finisher['racerName']} - {finish_time}ms")
+    logger.info(
+        f"✅ DEBUG: Added new finisher: Bib #{bib_number} - {new_finisher['racerName']} - {finish_time}ms"
+    )
     return {"success": True, "data": new_finisher}
 
 
@@ -746,7 +857,9 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
     """Endpoint to update an existing finisher with immutable roster lookup."""
     logger.info(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
     logger.info(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
-    logger.info(f"🔍 DEBUG: Original roster has {len(original_roster)} entries: {list(original_roster.keys())}")
+    logger.info(
+        f"🔍 DEBUG: Original roster has {len(original_roster)} entries: {list(original_roster.keys())}"
+    )
 
     if "finishTime" in finisher_data and isinstance(finisher_data["finishTime"], str):
         time_ms = time_string_to_milliseconds(finisher_data["finishTime"])
@@ -772,41 +885,53 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
     for i, finisher in enumerate(race_results):
         if finisher["id"] == finisher_id:
             logger.info(f"🔍 DEBUG: Found finisher at index {i}: {finisher}")
-            
+
             # Check if bibNumber has been changed
             original_bib = finisher.get("bibNumber", "")
-            new_bib = finisher_data.get("bibNumber", original_bib)  # Use original if not provided
+            new_bib = finisher_data.get(
+                "bibNumber", original_bib
+            )  # Use original if not provided
             bib_changed = new_bib != original_bib
-            
-            logger.info(f"🔍 DEBUG: Original bib: '{original_bib}', New bib: '{new_bib}', Changed: {bib_changed}")
-            
+
+            logger.info(
+                f"🔍 DEBUG: Original bib: '{original_bib}', New bib: '{new_bib}', Changed: {bib_changed}"
+            )
+
             # CRITICAL FIX: Only lookup roster data if bib number has changed
             roster_racer = None
             if bib_changed and new_bib in original_roster:
                 # Found in original roster - this is our source of truth!
-                roster_racer = original_roster[new_bib].copy()  # Make a copy to avoid mutation
-                logger.info(f"✅ DEBUG: Bib changed - Found in original_roster for bib #{new_bib}: {roster_racer}")
+                roster_racer = original_roster[
+                    new_bib
+                ].copy()  # Make a copy to avoid mutation
+                logger.info(
+                    f"✅ DEBUG: Bib changed - Found in original_roster for bib #{new_bib}: {roster_racer}"
+                )
             elif bib_changed:
-                logger.info(f"🔍 DEBUG: Bib changed but #{new_bib} not found in original_roster")
+                logger.info(
+                    f"🔍 DEBUG: Bib changed but #{new_bib} not found in original_roster"
+                )
             else:
                 logger.info(f"🔍 DEBUG: Bib not changed - skipping roster lookup")
-            
+
             if roster_racer and bib_changed:
                 # Create new finisher object by merging roster data with existing finish data
                 merged_data = {
                     "id": finisher_id,  # Keep the original ID
                     "bibNumber": new_bib,
                     "racerName": roster_racer.get("racerName", f"Racer #{new_bib}"),
-                    "finishTime": finisher.get("finishTime"),  # Preserve original finish time
+                    "finishTime": finisher.get(
+                        "finishTime"
+                    ),  # Preserve original finish time
                     "rank": finisher.get("rank"),  # Preserve original rank
                 }
-                
+
                 # Add optional fields from roster if available
                 if "gender" in roster_racer and roster_racer["gender"]:
                     merged_data["gender"] = roster_racer["gender"]
                 if "team" in roster_racer and roster_racer["team"]:
                     merged_data["team"] = roster_racer["team"]
-                
+
                 # Override with any explicitly provided data from the update request
                 # But prioritize roster data for name unless explicitly overridden
                 for key, value in finisher_data.items():
@@ -817,42 +942,58 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                         elif key != "racerName":
                             # For other fields, use the provided value
                             merged_data[key] = value
-                
-                logger.info(f"🔍 DEBUG: Merged data from original roster: {merged_data}")
-                
+
+                logger.info(
+                    f"🔍 DEBUG: Merged data from original roster: {merged_data}"
+                )
+
                 # Update the finisher with merged data (IMMUTABLE - no roster mutation)
                 race_results[i] = merged_data
-                
-                logger.info(f"✅ DEBUG: Successfully merged roster data for bib #{new_bib}")
-                
+
+                logger.info(
+                    f"✅ DEBUG: Successfully merged roster data for bib #{new_bib}"
+                )
+
                 # If bib number changed, broadcast reload to ensure all clients get fresh data
                 if bib_changed:
-                    logger.info(f"🔍 DEBUG: Bib number changed - broadcasting reload signal")
+                    logger.info(
+                        f"🔍 DEBUG: Bib number changed - broadcasting reload signal"
+                    )
                     await manager.broadcast(json.dumps({"action": "reload"}))
                 else:
                     # Regular update broadcast
-                    await manager.broadcast(json.dumps({"type": "update", "data": merged_data}))
-                
+                    await manager.broadcast(
+                        json.dumps({"type": "update", "data": merged_data})
+                    )
+
                 return {"success": True, "data": merged_data}
             else:
-                logger.info(f"🔍 DEBUG: No roster entry found for bib #{new_bib} - proceeding with regular update")
-                
+                logger.info(
+                    f"🔍 DEBUG: No roster entry found for bib #{new_bib} - proceeding with regular update"
+                )
+
                 # Regular update (no roster match) - just update the provided fields
                 updated_data = finisher.copy()  # Start with existing data
                 updated_data.update(finisher_data)  # Update with provided data
                 updated_data["id"] = finisher_id  # Ensure ID is preserved
-                
+
                 # CRITICAL FIX: If bib number changed and not found in roster, update name to "Racer #<bib>"
                 if bib_changed:
                     updated_data["racerName"] = f"Racer #{new_bib}"
-                    logger.info(f"🔍 DEBUG: Bib changed to unknown number - updated name to: {updated_data['racerName']}")
-                
+                    logger.info(
+                        f"🔍 DEBUG: Bib changed to unknown number - updated name to: {updated_data['racerName']}"
+                    )
+
                 race_results[i] = updated_data
-                
-                logger.info(f"🔍 DEBUG: Updated finisher with regular data: {updated_data}")
+
+                logger.info(
+                    f"🔍 DEBUG: Updated finisher with regular data: {updated_data}"
+                )
 
                 # Broadcast the update to all connected WebSocket clients
-                await manager.broadcast(json.dumps({"type": "update", "data": updated_data}))
+                await manager.broadcast(
+                    json.dumps({"type": "update", "data": updated_data})
+                )
 
                 return {"success": True, "data": updated_data}
 
@@ -909,6 +1050,7 @@ async def reorder_finishers(order_data: Dict[str, Any]):
 
 # --- Race Clock API Endpoints ---
 
+
 @app.get("/api/clock/status")
 async def get_clock_status():
     """Get the current race clock status."""
@@ -919,19 +1061,18 @@ async def get_clock_status():
 async def start_race_clock():
     """Start the race clock."""
     global race_clock_state
-    
+
     current_time = time.time()
     race_clock_state["raceStartTime"] = current_time
     race_clock_state["status"] = "running"
-    
+
     logger.info(f"🕐 Race clock started at {current_time}")
-    
+
     # Broadcast clock update to all connected clients
-    await manager.broadcast(json.dumps({
-        "type": "clock_update", 
-        "data": race_clock_state
-    }))
-    
+    await manager.broadcast(
+        json.dumps({"type": "clock_update", "data": race_clock_state})
+    )
+
     return {"success": True, "data": race_clock_state}
 
 
@@ -939,17 +1080,16 @@ async def start_race_clock():
 async def stop_race_clock():
     """Stop the race clock."""
     global race_clock_state
-    
+
     race_clock_state["status"] = "stopped"
-    
+
     logger.info("🕐 Race clock stopped")
-    
+
     # Broadcast clock update to all connected clients
-    await manager.broadcast(json.dumps({
-        "type": "clock_update", 
-        "data": race_clock_state
-    }))
-    
+    await manager.broadcast(
+        json.dumps({"type": "clock_update", "data": race_clock_state})
+    )
+
     return {"success": True, "data": race_clock_state}
 
 
@@ -957,12 +1097,12 @@ async def stop_race_clock():
 async def edit_race_clock(edit_data: Dict[str, Any]):
     """Edit the race clock time."""
     global race_clock_state
-    
+
     if "time" not in edit_data:
         return {"success": False, "message": "Time is required"}
-    
+
     time_str = edit_data["time"]
-    
+
     # Convert time string to milliseconds
     if isinstance(time_str, str):
         time_ms = time_string_to_milliseconds(time_str)
@@ -970,7 +1110,7 @@ async def edit_race_clock(edit_data: Dict[str, Any]):
             return {"success": False, "message": "Invalid time format. Use MM:SS.ms"}
     else:
         time_ms = float(time_str)
-    
+
     # Calculate the offset needed to achieve the desired time
     if race_clock_state["raceStartTime"] is not None:
         current_time = time.time()
@@ -979,15 +1119,16 @@ async def edit_race_clock(edit_data: Dict[str, Any]):
     else:
         # If race hasn't started, set offset to the desired time
         race_clock_state["offset"] = time_ms
-    
-    logger.info(f"🕐 Race clock edited to {time_ms}ms (offset: {race_clock_state['offset']}ms)")
-    
+
+    logger.info(
+        f"🕐 Race clock edited to {time_ms}ms (offset: {race_clock_state['offset']}ms)"
+    )
+
     # Broadcast clock update to all connected clients
-    await manager.broadcast(json.dumps({
-        "type": "clock_update", 
-        "data": race_clock_state
-    }))
-    
+    await manager.broadcast(
+        json.dumps({"type": "clock_update", "data": race_clock_state})
+    )
+
     return {"success": True, "data": race_clock_state}
 
 
@@ -995,21 +1136,20 @@ async def edit_race_clock(edit_data: Dict[str, Any]):
 async def reset_race_clock():
     """Reset the race clock."""
     global race_clock_state
-    
+
     race_clock_state = {
         "raceStartTime": None,
         "status": "stopped",
         "offset": 0,
     }
-    
+
     logger.info("🕐 Race clock reset")
-    
+
     # Broadcast clock update to all connected clients
-    await manager.broadcast(json.dumps({
-        "type": "clock_update", 
-        "data": race_clock_state
-    }))
-    
+    await manager.broadcast(
+        json.dumps({"type": "clock_update", "data": race_clock_state})
+    )
+
     return {"success": True, "data": race_clock_state}
 
 
@@ -1046,7 +1186,9 @@ if static_dir and os.path.exists(static_dir):
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
     logger.info(f"Mounted static files from: {static_dir}")
 else:
-    logger.warning("Frontend dist directory not found - static files will not be served")
+    logger.warning(
+        "Frontend dist directory not found - static files will not be served"
+    )
     logger.info("The server will still provide API endpoints and video streaming")
 
 
@@ -1196,59 +1338,87 @@ def main():
             """Callback function called when a racer finishes - calls the API endpoint directly"""
             try:
                 logger.info(f"🔍 DEBUG: === CALLBACK FUNCTION CALLED ===")
-                logger.info(f"🔍 DEBUG: Callback received finisher_data: {finisher_data}")
-                
+                logger.info(
+                    f"🔍 DEBUG: Callback received finisher_data: {finisher_data}"
+                )
+
                 # CRITICAL FIX: Call the actual API endpoint instead of manipulating data directly
                 # This ensures the proper WebSocket broadcast happens through the endpoint
-                import asyncio
-                
+
+
                 async def call_api_endpoint():
                     """Call the POST /api/results endpoint with the finisher data"""
                     try:
-                        logger.info(f"🔍 DEBUG: CALLBACK - Calling POST /api/results endpoint")
-                        
+                        logger.info(
+                            f"🔍 DEBUG: CALLBACK - Calling POST /api/results endpoint"
+                        )
+
                         # Call the endpoint function directly (since we're in the same process)
                         result = await update_finish_time(finisher_data)
-                        
-                        logger.info(f"✅ DEBUG: CALLBACK - API endpoint returned: {result}")
-                        
+
+                        logger.info(
+                            f"✅ DEBUG: CALLBACK - API endpoint returned: {result}"
+                        )
+
                         if result.get("success"):
-                            logger.info(f"✅ DEBUG: CALLBACK - Successfully processed finisher via API endpoint")
+                            logger.info(
+                                f"✅ DEBUG: CALLBACK - Successfully processed finisher via API endpoint"
+                            )
                         else:
-                            logger.error(f"❌ DEBUG: CALLBACK - API endpoint failed: {result.get('message', 'Unknown error')}")
-                            
+                            logger.error(
+                                f"❌ DEBUG: CALLBACK - API endpoint failed: {result.get('message', 'Unknown error')}"
+                            )
+
                     except Exception as api_error:
-                        logger.error(f"❌ DEBUG: CALLBACK - Error calling API endpoint: {api_error}")
-                        logger.error(f"❌ DEBUG: CALLBACK - API error details: {type(api_error).__name__}: {str(api_error)}")
-                
+                        logger.error(
+                            f"❌ DEBUG: CALLBACK - Error calling API endpoint: {api_error}"
+                        )
+                        logger.error(
+                            f"❌ DEBUG: CALLBACK - API error details: {type(api_error).__name__}: {str(api_error)}"
+                        )
+
                 # Schedule the API call in the event loop
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         # Schedule the API call to run in the event loop
-                        future = asyncio.run_coroutine_threadsafe(call_api_endpoint(), loop)
-                        logger.info(f"✅ DEBUG: CALLBACK - Scheduled API call in event loop")
+                        future = asyncio.run_coroutine_threadsafe(
+                            call_api_endpoint(), loop
+                        )
+                        logger.info(
+                            f"✅ DEBUG: CALLBACK - Scheduled API call in event loop"
+                        )
                     else:
-                        logger.warning("Event loop is not running - cannot schedule API call")
+                        logger.warning(
+                            "Event loop is not running - cannot schedule API call"
+                        )
                 except RuntimeError as e:
                     logger.warning(f"No event loop available for API call: {e}")
                     # Fallback: Try to run the API call synchronously (not ideal but better than nothing)
                     try:
-                        logger.info(f"🔍 DEBUG: CALLBACK - Attempting synchronous fallback")
+                        logger.info(
+                            f"🔍 DEBUG: CALLBACK - Attempting synchronous fallback"
+                        )
                         # Create a new event loop for this thread
                         new_loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(new_loop)
                         new_loop.run_until_complete(call_api_endpoint())
                         new_loop.close()
-                        logger.info(f"✅ DEBUG: CALLBACK - Synchronous fallback completed")
+                        logger.info(
+                            f"✅ DEBUG: CALLBACK - Synchronous fallback completed"
+                        )
                     except Exception as fallback_error:
-                        logger.error(f"❌ DEBUG: CALLBACK - Synchronous fallback failed: {fallback_error}")
-                
+                        logger.error(
+                            f"❌ DEBUG: CALLBACK - Synchronous fallback failed: {fallback_error}"
+                        )
+
                 logger.info(f"✅ DEBUG: CALLBACK - Callback processing completed")
-                
+
             except Exception as e:
                 logger.error(f"❌ DEBUG: CALLBACK - Error in result callback: {e}")
-                logger.error(f"❌ DEBUG: CALLBACK - Exception details: {type(e).__name__}: {str(e)}")
+                logger.error(
+                    f"❌ DEBUG: CALLBACK - Exception details: {type(e).__name__}: {str(e)}"
+                )
 
         processor = VideoInferenceProcessor(
             model_path=args.model,

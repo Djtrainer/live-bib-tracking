@@ -19,10 +19,54 @@ import easyocr
 import numpy as np
 from ultralytics import YOLO
 
+import threading
+import queue
 from image_processor.utils import get_logger
 
 logger = get_logger()
 dotenv.load_dotenv()
+
+
+class FrameReader:
+    def __init__(self, cap, max_queue_size=1):
+        self.cap = cap
+        self.queue = queue.Queue(maxsize=max_queue_size)
+        self.running = False
+        self.thread = threading.Thread(target=self._read_loop, daemon=True)
+
+    def _read_loop(self):
+        """Continuously reads frames from the camera and puts them in the queue."""
+        while self.running:
+            if not self.cap.isOpened():
+                break
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            # If the queue is full, drop the old frame and put the new one
+            if self.queue.full():
+                self.queue.get_nowait()
+            self.queue.put(frame)
+        self.running = False
+
+    def start(self):
+        """Starts the frame reading thread."""
+        self.running = True
+        self.thread.start()
+        logger.info("FrameReader thread started.")
+
+    def get_latest_frame(self):
+        """Gets the most recent frame from the queue without blocking."""
+        try:
+            return self.queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def stop(self):
+        """Stops the frame reading thread."""
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join()
+        logger.info("FrameReader thread stopped.")
 
 
 class VideoInferenceProcessor:
@@ -186,7 +230,10 @@ class VideoInferenceProcessor:
         self.original_fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.finish_zone_start_x = int(self.frame_width * finish_line_fraction)
+
+        self._get_finish_line()
+        
+        # self.finish_zone_start_x = int(self.frame_width * finish_line_fraction)
 
         self.inference_interval = 1
         self.last_annotated_frame = None
@@ -199,6 +246,47 @@ class VideoInferenceProcessor:
 
         # Callback function for when racers finish
         self.result_callback = result_callback
+
+    def _get_finish_line(self):
+        
+        self.guide_line_left = {
+            'p1': (self.frame_width*0.31, self.frame_height),  # Bottom-left (adjust X)
+            'p2': (self.frame_width*0.285, self.frame_height*0.49), # Mid-top (adjust both)
+            'color': (1000, 500, 0), 
+            'thickness': 3,
+            'dash_length': 10
+        }
+
+        self.guide_line_right = {
+            'p1': (self.frame_width, self.frame_height*0.78), # Bottom-right (adjust X)
+            'p2': (self.frame_width*0.32, self.frame_height*0.49), # Mid-top (adjust both)
+            'color': (1000, 500, 0), 
+            'thickness': 3,
+            'dash_length': 10
+        }
+
+        self.guide_line_horizon = {
+            'p1': (0, self.frame_height*0.49), # Bottom-right (adjust X)
+            'p2': (self.frame_width*0.35, self.frame_height*0.49), # Mid-top (adjust both)
+            'color': (1000, 500, 0), 
+            'thickness': 3,
+            'dash_length': 10
+        }
+
+        self.guide_finish_line = {
+            'p1': (0, self.frame_height*1.09), # Bottom-right (adjust X)
+            'p2': (self.frame_width, self.frame_height*0.78), # Mid-top (adjust both)
+            'color': (0, 0, 500), 
+            'thickness': 8,
+            'dash_length': 2
+        }
+
+        x1, y1 = self.guide_finish_line['p1']
+        x2, y2 = self.guide_finish_line['p2']
+        
+        # Calculate slope (m) and y-intercept (b)
+        self.finish_line_m = (y2 - y1) / (x2 - x1)
+        self.finish_line_b = y1 - self.finish_line_m * x1
 
     def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
         """
@@ -213,7 +301,7 @@ class VideoInferenceProcessor:
         return cv2.adaptiveThreshold(
             denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
-
+    
     def extract_bib_with_easyocr(
         self, image_crop: np.ndarray
     ) -> tuple[str | None, float | None]:
@@ -271,103 +359,63 @@ class VideoInferenceProcessor:
     ) -> None:
         """
         Checks if a tracked racer has entered the finish zone.
-        Records their time the first moment they enter the zone.
+        Records their time and sets a flag the first moment they enter the zone.
         """
-        # Use the center of the bounding box as the racer's position
-        x1, _, x2, _ = person_box.xyxy[0]
-        racer_position = (x1 + x2) / 2
-
         history = self.track_history.get(person_id)
-        # Proceed only if the racer is being tracked and hasn't finished yet
-        if history and not history["has_finished"]:
-            # Check if the racer has entered the finish zone
-            if racer_position >= self.finish_zone_start_x:
-                # Racer entered the finish zone! Record both video timestamp and wall-clock time.
-                finish_time = cap.get(cv2.CAP_PROP_POS_MSEC)
-                finish_wall_time = time.time()  # Capture current wall-clock time
-                history["finish_time_ms"] = finish_time
-                history["finish_wall_time"] = finish_wall_time
-                history["has_finished"] = True  # Set flag to prevent recording again
+        if not history or history.get("has_finished", False):
+            return
 
-                logger.info(
-                    f"Racer ID {person_id} entered finish zone at {finish_time / 1000:.2f}s"
-                )
+        # Get the four corner points of the bounding box
+        x1, y1, x2, y2 = person_box.xyxy[0]
+        corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+        
+        crossed_line = False
+        for (px, py) in corners:
+            # Calculate the line's y-value at the point's x-position
+            line_y_at_px = self.finish_line_m * px + self.finish_line_b
+            
+            # Check if the point is "below" the line (higher y-value in image coordinates)
+            if py >= line_y_at_px:
+                crossed_line = True
+                break
+        
+        if crossed_line:
+            # This is the first instance the box has crossed. Record the finish.
+            history["has_finished"] = True
+            history["finish_time_ms"] = cap.get(cv2.CAP_PROP_POS_MSEC)
+            history["finish_wall_time"] = time.time()
+            
+            logger.info(f"Racer ID {person_id} CROSSED hardcoded line at {history['finish_time_ms'] / 1000:.2f}s")
+            self._handle_finisher(person_id, history)
+            self.print_live_leaderboard()
 
-                # Get the final bib result for this racer
-                final_bib_results = self.determine_final_bibs()
-                bib_result = final_bib_results.get(person_id)
+    def _handle_finisher(self, person_id: int, history: dict) -> None:
+        """
+        Determines the final bib for a finisher and sends the result via callback.
+        """
+        if not self.result_callback:
+            return
 
-                if bib_result:
-                    logger.info(
-                        f"Racer finished: Bib #{bib_result['final_bib']} at {finish_time / 1000:.2f}s"
-                    )
-
-                    # Call the callback function to notify the server with wall-clock time
-                    if self.result_callback:
-                        try:
-                            payload = {
-                                "bibNumber": bib_result["final_bib"],
-                                "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
-                                "racerName": f"Racer {person_id}",
-                            }
-                            logger.info(
-                                "🔍 DEBUG: About to send finisher data via callback"
-                            )
-                            logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
-                            logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(
-                                f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)"
-                            )
-                            logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
-
-                            self.result_callback(payload)
-                            logger.info(
-                                f"✅ DEBUG: Successfully sent finisher data via callback: Bib #{payload['bibNumber']}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"❌ DEBUG: Error calling result callback: {e}"
-                            )
-                            logger.error(
-                                f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}"
-                            )
-                else:
-                    # No bib number found - send finisher with placeholder bib
-                    logger.info(
-                        f"Racer finished: No readable bib number for Racer ID {person_id} at {finish_time / 1000:.2f}s"
-                    )
-
-                    # Call the callback function to notify the server with placeholder bib and wall-clock time
-                    if self.result_callback:
-                        try:
-                            payload = {
-                                "bibNumber": f"Unknown-{person_id}",  # Use tracker ID as placeholder
-                                "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
-                                "racerName": f"Racer {person_id}",
-                            }
-                            logger.info(
-                                "🔍 DEBUG: About to send 'No Bib' finisher data via callback"
-                            )
-                            logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
-                            logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(
-                                f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)"
-                            )
-                            logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
-
-                            self.result_callback(payload)
-                            logger.info(
-                                f"✅ DEBUG: Successfully sent 'No Bib' finisher data via callback: {payload['bibNumber']}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"❌ DEBUG: Error calling result callback for 'No Bib' finisher: {e}"
-                            )
-                            logger.error(
-                                f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}"
-                            )
-
-                self.print_live_leaderboard()
+        # Determine the final bib number using the voting system
+        final_bib_results = self.determine_final_bibs()
+        bib_result = final_bib_results.get(person_id)
+        
+        bib_number = bib_result['final_bib'] if bib_result else f"Unknown-{person_id}"
+        
+        # Construct the payload
+        payload = {
+            "bibNumber": bib_number,
+            "wallClockTime": history["finish_wall_time"],
+            "racerName": f"Racer {person_id}" # Placeholder name
+        }
+        
+        # Send the data to the backend
+        try:
+            logger.info(f"Sending finisher data to backend: {payload}")
+            self.result_callback(payload)
+            logger.info(f"Successfully sent finisher data for Bib #{bib_number}")
+        except Exception as e:
+            logger.error(f"Error calling result callback for Bib #{bib_number}: {e}", exc_info=True)
 
     def determine_final_bibs(self):
         """
@@ -593,17 +641,43 @@ class VideoInferenceProcessor:
 
             annotated_image = frame.copy()
 
-            # Draw finish zone line
-            try:
-                cv2.line(
-                    annotated_image,
-                    (self.finish_zone_start_x, 0),
-                    (self.finish_zone_start_x, self.frame_height),
-                    (0, 255, 255),
-                    3,
-                )
-            except Exception as e:
-                logger.error(f"Error drawing finish zone line: {e}")
+            def draw_dashed_line(img, p1, p2, color=(1000, 500, 0), thickness=3, dash_length=10):
+                dist = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+                dashes = int(dist / dash_length)
+                for i in range(dashes):
+                    start = float(i) / dashes
+                    end = float(i + 0.5) / dashes  # Draw for half the dash length
+                    
+                    x_start = int(p1[0] + start * (p2[0] - p1[0]))
+                    y_start = int(p1[1] + start * (p2[1] - p1[1]))
+                    x_end = int(p1[0] + end * (p2[0] - p1[0]))
+                    y_end = int(p1[1] + end * (p2[1] - p1[1]))
+                    
+                    cv2.line(img, (x_start, y_start), (x_end, y_end), color, thickness)
+
+            draw_dashed_line(
+                annotated_image,
+                self.guide_line_left['p1'],
+                self.guide_line_left['p2'],
+            )
+            draw_dashed_line(
+                annotated_image,
+                self.guide_line_right['p1'],
+                self.guide_line_right['p2'],
+            )
+            draw_dashed_line(
+                annotated_image,
+                self.guide_line_horizon['p1'],
+                self.guide_line_horizon['p2']
+            )
+            draw_dashed_line(
+                annotated_image,
+                self.guide_finish_line['p1'],
+                self.guide_finish_line['p2'],
+                self.guide_finish_line['color'],
+                self.guide_finish_line['thickness'],
+                self.guide_finish_line['dash_length']
+            )
 
             # Draw detection boxes and tracked persons
             if (
