@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 PORT=8001
 
 # Default paths (can be overridden with environment variables)
-MODEL_PATH=${MODEL_PATH:-"$(pwd)/runs/detect/yolo11_white_bibs/weights/last.pt"}
+MODEL_PATH=${MODEL_PATH:-"$(pwd)/models/yolo11_white_bibs/weights/last.pt"}
 CAMERA_INDEX=${CAMERA_INDEX:-1}
 VIDEO_PATH=""
 
@@ -31,7 +31,7 @@ print_usage() {
     echo ""
     echo -e "${YELLOW}Options:${NC}"
     echo "  -h, --help       Show this help message"
-    echo "  -m, --model      Path to model file (default: ./runs/detect/yolo11_white_bibs/weights/last.pt)"
+    echo "  -m, --model      Path to model file (default: ./models/yolo11_white_bibs/weights/last.pt)"
     echo "  -c, --camera     Camera index (default: 1, iPhone; 0 for built-in)"
     echo "  -v, --video      Path to video file for testing (overrides camera)"
     echo "  -p, --port       Port to bind server to (default: 8001)"

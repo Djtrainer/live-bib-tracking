@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
             # Get configuration from environment variables
             video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
             model_path_str = os.getenv(
-                "MODEL_PATH", "/app/runs/detect/yolo11_white_bibs/weights/last.pt"
+                "MODEL_PATH", "/app/models/yolo11_white_bibs/weights/last.pt"
             )
             target_fps = int(os.getenv("TARGET_FPS", "8"))
             confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
