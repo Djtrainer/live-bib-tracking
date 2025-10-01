@@ -116,6 +116,9 @@ class VideoInferenceProcessor:
 
         # This will store history keyed by the PERSON's tracker ID
         self.track_history = {}
+        
+        # Track the previous frame's tracked persons for efficiency
+        self.previous_tracked_persons = set()
 
         logger.info("Loading models...")
         # This model instance will be used ONLY for tracking and will become stateful
@@ -384,10 +387,11 @@ class VideoInferenceProcessor:
             history["has_finished"] = True
             history["finish_time_ms"] = cap.get(cv2.CAP_PROP_POS_MSEC)
             history["finish_wall_time"] = time.time()
-            
+            history["post_finish_counter"] = 30 
+
             logger.info(f"Racer ID {person_id} CROSSED hardcoded line at {history['finish_time_ms'] / 1000:.2f}s")
-            self._handle_finisher(person_id, history)
-            self.print_live_leaderboard()
+            # self._handle_finisher(person_id, history)
+            # self.print_live_leaderboard()
 
     def _handle_finisher(self, person_id: int, history: dict) -> None:
         """
@@ -413,9 +417,44 @@ class VideoInferenceProcessor:
         try:
             logger.info(f"Sending finisher data to backend: {payload}")
             self.result_callback(payload)
+            history["result_sent"] = True
             logger.info(f"Successfully sent finisher data for Bib #{bib_number}")
         except Exception as e:
             logger.error(f"Error calling result callback for Bib #{bib_number}: {e}", exc_info=True)
+    
+    def _finalize_lost_trackers(self, tracked_person_ids: set) -> None:
+        """
+        Finds racers who have finished but are no longer tracked and finalizes their results.
+        """
+        # Create a list of IDs to avoid modifying the dictionary while iterating
+        finished_but_lost_ids = []
+        logger.debug(f"Checking for lost trackers among {len(self.track_history)} total tracked racers")
+        for person_id, history in self.track_history.items():
+            logger.debug(f"Racer ID {person_id}: {history}")
+            logger.debug(f"Currently tracked IDs: {tracked_person_ids}")
+            logger.debug(f"Racer ID {person_id}: has_finished={history.get('has_finished')}, result_sent={history.get('result_sent')}, in_tracked={person_id in tracked_person_ids}")
+            if (history.get("has_finished") and 
+                not history.get("result_sent") and 
+                person_id not in tracked_person_ids):
+                finished_but_lost_ids.append(person_id)
+                logger.debug(f"Racer ID {person_id}: Found finished racer who left frame - will finalize")
+
+        for person_id in finished_but_lost_ids:
+            logger.info(f"🏁 Racer ID {person_id} has left the frame. Finalizing result immediately.")
+            self._handle_finisher(person_id, self.track_history[person_id])
+            self.print_live_leaderboard()
+        
+        # Debug logging for tracking
+        if tracked_person_ids:
+            logger.debug(f"Currently tracked person IDs: {tracked_person_ids}")
+        
+        finished_not_sent = [
+            pid for pid, hist in self.track_history.items() 
+            if hist.get("has_finished") and not hist.get("result_sent")
+        ]
+        
+        if finished_not_sent:
+            logger.debug(f"Finished racers not yet sent: {finished_not_sent}")
 
     def determine_final_bibs(self):
         """
@@ -814,6 +853,9 @@ class VideoInferenceProcessor:
             timings["YOLO_Unified_Track"] += time.time() - t0
 
             # --- 2. Associate Bibs and Perform Smart OCR ---
+            tracked_persons = {}
+            detected_bibs = []
+            
             if results and results[0].boxes.id is not None:
                 boxes = results[0].boxes
 
@@ -822,7 +864,15 @@ class VideoInferenceProcessor:
                     int(b.id): b for b in boxes if int(b.cls) == 0 and b.id is not None
                 }
                 detected_bibs = [b for b in boxes if int(b.cls) == 1]
-
+            
+            # Only check for lost trackers if the set of tracked persons has changed
+            current_tracked_ids = set(tracked_persons.keys())
+            if current_tracked_ids != self.previous_tracked_persons:
+                self._finalize_lost_trackers(current_tracked_ids)
+                self.previous_tracked_persons = current_tracked_ids
+            
+            if tracked_persons:  # Only process OCR if there are currently tracked persons
+                
                 for person_id, person_box in tracked_persons.items():
                     # Initialize history for new racers
                     if person_id not in self.track_history:
@@ -834,15 +884,30 @@ class VideoInferenceProcessor:
                             "final_bib": None,
                             "final_bib_confidence": 0.0,
                             "has_finished": False,
+                            "result_sent": False,
+                            "post_finish_counter": 0,
                         }
 
                     history = self.track_history[person_id]
+                    # If the racer is still being processed post-finish, decrement the counter
+                    if history['has_finished'] and not history.get('result_sent', False):
+                        if history['post_finish_counter'] > 0:
+                            # Decrement the counter on each frame they are visible
+                            history['post_finish_counter'] -= 1
+                            logger.debug(f"Racer ID {person_id}: Buffer countdown {history['post_finish_counter']} frames remaining")
+                        
+                        # When the counter hits zero, finalize the result
+                        if history['post_finish_counter'] == 0:
+                            logger.info(f"🏁 Buffer period ended for Racer ID {person_id}. Finalizing result.")
+                            self._handle_finisher(person_id, history)
+                            self.print_live_leaderboard()
 
-                    # Check for finish line crossing
+                    # Check for finish line crossing FIRST - this must happen for every tracked racer on every frame
                     self.check_finish_line_crossings(person_id, person_box, cap)
-
-                    # Smart OCR: Skip if we already have a high-confidence bib
-                    if history["final_bib_confidence"] > 0.90:
+                    
+                    # The Smart OCR check: Skip OCR if bib is locked in AND not in post-finish buffer period
+                    if history['final_bib_confidence'] > 0.90 and history['post_finish_counter'] == 0:
+                        logger.debug(f"Racer ID {person_id}: Skipping OCR - bib locked in with confidence {history['final_bib_confidence']:.2f}")
                         continue
 
                     # Associate the closest bib if not yet found
@@ -873,11 +938,7 @@ class VideoInferenceProcessor:
                                         history["ocr_reads"].append(
                                             (bib_number, ocr_conf, yolo_bib_conf)
                                         )
-                                        # # Lock in the bib if confidence is high
-                                        # if ocr_conf > history["final_bib_confidence"]:
-                                        #     history["final_bib"] = bib_number
-                                        #     history["final_bib_confidence"] = ocr_conf
-
+                                        
                                 timings["EasyOCR"] += time.time() - t_ocr
                             break  # Move to the next person
 
