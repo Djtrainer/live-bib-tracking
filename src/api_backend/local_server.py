@@ -105,9 +105,7 @@ async def lifespan(app: FastAPI):
 
             processor = VideoInferenceProcessor(
                 model_path=model_path_str,
-                video_path=video_source,
-                target_fps=target_fps,
-                confidence_threshold=confidence_threshold,
+                video_path=video_source
             )
             app_state["processor"] = processor
 
@@ -376,7 +374,33 @@ async def video_feed(request: Request):
                             logger.warning(f"Invalid frame at count {frame_count}")
                             continue
 
-                        # Process every frame (no frame skipping)
+                        # If processor requested a skip cooldown, rapidly drop
+                        # frames from the FrameReader (or use cap.grab() as a
+                        # fallback) to avoid a visible pause caused by a slow
+                        # grab/read loop.
+                        if getattr(processor, "frames_to_skip", 0) > 0:
+                            skips = processor.frames_to_skip
+                            logger.info(f"Performing fast drop of {skips} frames to recover from idle period")
+                            # If we have a FrameReader, consume latest frames without blocking
+                            if frame_reader is not None:
+                                while processor.frames_to_skip > 0:
+                                    dropped = frame_reader.get_latest_frame()
+                                    # decrement counter even if no frame returned to ensure progress
+                                    processor.frames_to_skip -= 1
+                                # After dropping, get one fresh frame to process
+                                frame = frame_reader.get_latest_frame()
+                            else:
+                                # Fallback: use cap.grab() which is cheaper than full read
+                                cap = processor.cap
+                                while processor.frames_to_skip > 0 and cap.isOpened():
+                                    try:
+                                        cap.grab()
+                                    except Exception:
+                                        break
+                                    processor.frames_to_skip -= 1
+                                ret, frame = cap.read()
+
+                        # Process the frame (normal path)
                         processed_frame = processor._process_frame(
                             frame,
                             frame_count,
@@ -1423,8 +1447,6 @@ def main():
         processor = VideoInferenceProcessor(
             model_path=args.model,
             video_path=video_source,
-            target_fps=args.fps,
-            confidence_threshold=args.conf,
             result_callback=result_callback,
         )
 

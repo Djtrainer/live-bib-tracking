@@ -26,6 +26,8 @@ from image_processor.utils import get_logger
 logger = get_logger()
 dotenv.load_dotenv()
 
+COOL_DOWN_FRAMES = 30  # Number of frames for processing cooldown
+FRAME_SKIP_FRAMES = 400  # Number of frames to skip when no racers detected
 
 class FrameReader:
     def __init__(self, cap, max_queue_size=1):
@@ -78,9 +80,6 @@ class VideoInferenceProcessor:
         self,
         model_path: str | Path,
         video_path: str | Path | int,
-        target_fps: int = 1,
-        confidence_threshold: float = 0,
-        finish_line_fraction: float = 0.85,
         result_callback=None,
         camera_width: int | None = None,
         camera_height: int | None = None,
@@ -91,9 +90,9 @@ class VideoInferenceProcessor:
         Args:
             model_path (str | Path): Path to YOLO model weights.
             video_path (str | Path | int): Path to input video file or camera index for live mode.
-            target_fps (int, optional): Target FPS for processing. Defaults to 1.
-            confidence_threshold (float, optional): YOLO detection confidence threshold. Defaults to 0.
-            finish_line_fraction (float, optional): Fraction of frame width for finish line. Defaults to 0.85.
+            result_callback (callable, optional): Function to call with results when a racer finishes.
+            camera_width (int | None): Optional width to set for camera capture.
+            camera_height (int | None): Optional height to set for camera capture.
         """
         # Optional camera resolution requested by caller (may be None)
         self.requested_width = camera_width
@@ -111,9 +110,6 @@ class VideoInferenceProcessor:
             self.video_path = Path(video_path)
             self.is_live_mode = False
 
-        self.target_fps = target_fps
-        self.confidence_threshold = confidence_threshold
-
         # This will store history keyed by the PERSON's tracker ID
         self.track_history = {}
         
@@ -127,7 +123,7 @@ class VideoInferenceProcessor:
 
         # Initialize EasyOCR reader
         logger.info("Initializing EasyOCR reader...")
-        self.ocr_reader = easyocr.Reader(["en"], gpu=True)
+        self.ocr_reader = easyocr.Reader(["en"])
         logger.info("EasyOCR reader initialized!")
 
         # Video capture and properties
@@ -235,11 +231,6 @@ class VideoInferenceProcessor:
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         self._get_finish_line()
-        
-        # self.finish_zone_start_x = int(self.frame_width * finish_line_fraction)
-
-        self.inference_interval = 1
-        self.last_annotated_frame = None
 
         # Track when processing started for wall time calculations
         self.processing_start_time = None
@@ -249,6 +240,11 @@ class VideoInferenceProcessor:
 
         # Callback function for when racers finish
         self.result_callback = result_callback
+
+        self.frames_to_skip = 0
+        self.last_annotated_frame = None
+        self.cool_down_frames = 0
+        self.no_racers_frames_counter = 0 
 
     def _get_finish_line(self):
         
@@ -293,17 +289,37 @@ class VideoInferenceProcessor:
 
     def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
         """
-        Preprocesses an image crop for use with EasyOCR by converting it to grayscale,
-        applying denoising, and adaptive thresholding.
+        Faster preprocessing for EasyOCR:
+        - convert to gray
+        - resize to fixed height (maintain aspect)
+        - apply CLAHE for contrast
+        - apply Otsu threshold (fast)
         """
+        if image_crop is None or image_crop.size == 0:
+            return image_crop
+
         if len(image_crop.shape) == 3:
             gray = cv2.cvtColor(image_crop, cv2.COLOR_BGR2GRAY)
         else:
             gray = image_crop
-        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
-        return cv2.adaptiveThreshold(
-            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-        )
+
+        # scale crop to target height for OCR (improves recognition & is faster than heavy denoising)
+        target_h = 120  # tune: 80-160 commonly good for bib text
+        h, w = gray.shape[:2]
+        if h == 0 or w == 0:
+            return gray
+        scale = max(1.0, target_h / float(h))
+        if scale != 1.0:
+            new_w = int(w * scale)
+            gray = cv2.resize(gray, (new_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        # Apply CLAHE for contrast enhancement
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+
+        # Fast thresholding (Otsu)
+        _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return th
     
     def extract_bib_with_easyocr(
         self, image_crop: np.ndarray
@@ -836,9 +852,26 @@ class VideoInferenceProcessor:
         timings: defaultdict,
     ) -> np.ndarray:
         """
-        Processes a single frame for object detection, tracking, OCR, and annotation.
-        This version uses a single, unified model call for efficiency.
+        Processes a single frame with internal frame-skipping logic.
+        If no racers are detected, it will skip processing for the next 10 frames.
         """
+        # --- 0. Frame Skipping Cooldown Logic ---
+        if self.frames_to_skip > 0:
+            # NOTE: The actual dropping/decrementing of frames is handled by the
+            # video generator (local_server.py) which can rapidly consume frames
+            # from the FrameReader. Here we only short-circuit processing and
+            # return the last annotated frame (or decorate the current one) so
+            # the UI remains responsive while skipping occurs.
+            logger.debug(f"Skipping frame, {self.frames_to_skip} frames left to skip.")
+            # Return the last successfully annotated frame to prevent a blank or frozen screen
+            if self.last_annotated_frame is not None:
+                # We still need to update the UI overlays (like the timer) on the old frame
+                # to make it feel live.
+                return self.draw_ui_overlays(self.last_annotated_frame.copy(), start_time, cap)
+            else:
+                # If we skip on the very first run, just return the current raw frame with UI
+                return self.draw_ui_overlays(frame, start_time, cap)
+
         try:
             # --- 1. Perform a single, unified tracking call for all classes ---
             t0 = time.time()
@@ -847,107 +880,126 @@ class VideoInferenceProcessor:
                 persist=True,
                 tracker="config/custom_tracker.yaml",
                 classes=[0, 1],  # Track both persons (0) and bibs (1)
-                workers=4,
                 verbose=False,
             )
             timings["YOLO_Unified_Track"] += time.time() - t0
 
-            # --- 2. Associate Bibs and Perform Smart OCR ---
+            # --- 2. Separate objects and check for racers ---
             tracked_persons = {}
             detected_bibs = []
             
             if results and results[0].boxes.id is not None:
                 boxes = results[0].boxes
 
-                # Separate the tracked objects into persons and bibs
-                tracked_persons = {
-                    int(b.id): b for b in boxes if int(b.cls) == 0 and b.id is not None
-                }
+                # Helper: compute interpolated x on a guide line at a given y
+                def _interpolate_x_at_y(line, y_val: float) -> float:
+                    x1, y1 = line["p1"]
+                    x2, y2 = line["p2"]
+                    x1 = float(x1)
+                    y1 = float(y1)
+                    x2 = float(x2)
+                    y2 = float(y2)
+                    # If the guide line is (nearly) horizontal, just return x1
+                    if abs(y2 - y1) < 1e-6:
+                        return x1
+                    t = (y_val - y1) / (y2 - y1)
+                    return x1 + t * (x2 - x1)
+
+                def _point_between_guides(px: float, py: float) -> bool:
+                    xl = _interpolate_x_at_y(self.guide_line_left, py)
+                    xr = _interpolate_x_at_y(self.guide_line_right, py)
+                    left = min(xl, xr)
+                    right = max(xl, xr)
+                    return (px >= left) and (px <= right)
+
+                # Build tracked_persons but only include persons where any
+                # corner of their bbox lies between the two guide lines.
+                tracked_persons = {}
+                for b in boxes:
+                    if int(b.cls) != 0 or b.id is None:
+                        continue
+                    x1, y1, x2, y2 = [float(c) for c in b.xyxy[0]]
+                    corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+                    if any(_point_between_guides(cx, cy) for cx, cy in corners):
+                        tracked_persons[int(b.id)] = b
+
                 detected_bibs = [b for b in boxes if int(b.cls) == 1]
-            
-            # Only check for lost trackers if the set of tracked persons has changed
+
+            # --- NEW: Activate cooldown if no racers were found ---
+            if tracked_persons:
+                # Racers were detected, so reset our counter.
+                self.no_racers_frames_counter = 0
+            else:
+                # No racers were detected, so increment our counter.
+                self.no_racers_frames_counter += 1
+                logger.debug(f"No racers detected for {self.no_racers_frames_counter} consecutive frames.")
+
+                # Check if the counter has reached the cooldown threshold.
+                if self.no_racers_frames_counter >= COOL_DOWN_FRAMES:
+                    logger.info(
+                        f"No racers for {COOL_DOWN_FRAMES} frames. Activating skip for the next {FRAME_SKIP_FRAMES} frames."
+                    )
+                    # Activate the skip
+                    self.frames_to_skip = FRAME_SKIP_FRAMES
+                    # Reset the counter so we don't immediately skip again
+                    self.no_racers_frames_counter = 0  
+            # --- End of New Logic ---
+
             current_tracked_ids = set(tracked_persons.keys())
             if current_tracked_ids != self.previous_tracked_persons:
                 self._finalize_lost_trackers(current_tracked_ids)
                 self.previous_tracked_persons = current_tracked_ids
             
-            if tracked_persons:  # Only process OCR if there are currently tracked persons
-                
+            # --- 3. Process each tracked person (OCR, finishing logic, etc.) ---
+            if tracked_persons:
                 for person_id, person_box in tracked_persons.items():
-                    # Initialize history for new racers
+                    # (Your existing logic for processing each racer remains unchanged)
                     if person_id not in self.track_history:
                         self.track_history[person_id] = {
-                            "ocr_reads": [],
-                            "last_x_center": None,
-                            "finish_time_ms": None,
-                            "finish_wall_time": None,
-                            "final_bib": None,
-                            "final_bib_confidence": 0.0,
-                            "has_finished": False,
-                            "result_sent": False,
-                            "post_finish_counter": 0,
+                            "ocr_reads": [], "last_x_center": None, "finish_time_ms": None,
+                            "finish_wall_time": None, "final_bib": None, "final_bib_confidence": 0.0,
+                            "has_finished": False, "result_sent": False, "post_finish_counter": 0,
                         }
 
                     history = self.track_history[person_id]
-                    # If the racer is still being processed post-finish, decrement the counter
                     if history['has_finished'] and not history.get('result_sent', False):
                         if history['post_finish_counter'] > 0:
-                            # Decrement the counter on each frame they are visible
                             history['post_finish_counter'] -= 1
-                            logger.debug(f"Racer ID {person_id}: Buffer countdown {history['post_finish_counter']} frames remaining")
-                        
-                        # When the counter hits zero, finalize the result
                         if history['post_finish_counter'] == 0:
-                            logger.info(f"🏁 Buffer period ended for Racer ID {person_id}. Finalizing result.")
                             self._handle_finisher(person_id, history)
                             self.print_live_leaderboard()
 
-                    # Check for finish line crossing FIRST - this must happen for every tracked racer on every frame
                     self.check_finish_line_crossings(person_id, person_box, cap)
                     
-                    # The Smart OCR check: Skip OCR if bib is locked in AND not in post-finish buffer period
                     if history['final_bib_confidence'] > 0.90 and history['post_finish_counter'] == 0:
-                        logger.debug(f"Racer ID {person_id}: Skipping OCR - bib locked in with confidence {history['final_bib_confidence']:.2f}")
                         continue
 
-                    # Associate the closest bib if not yet found
                     px1, py1, px2, py2 = person_box.xyxy[0]
                     for bib_box in detected_bibs:
                         bx1, by1, bx2, by2 = bib_box.xyxy[0]
                         if px1 < (bx1 + bx2) / 2 < px2 and py1 < (by1 + by2) / 2 < py2:
-                            # Only run OCR if YOLO confidence for the bib is high enough
                             yolo_bib_conf = float(bib_box.conf)
                             if yolo_bib_conf > 0.70:
                                 t_ocr = time.time()
-                                bib_crop = self.crop_bib_from_prediction(
-                                    frame, bib_box.xyxy[0]
-                                )
+                                bib_crop = self.crop_bib_from_prediction(frame, bib_box.xyxy[0])
                                 if bib_crop.size > 0:
-                                    bib_number, ocr_conf = (
-                                        self.extract_bib_with_easyocr(
-                                            self.preprocess_for_easyocr(bib_crop)
-                                        )
+                                    bib_number, ocr_conf = self.extract_bib_with_easyocr(
+                                        self.preprocess_for_easyocr(bib_crop)
                                     )
-
-                                    # Add detailed OCR logging for every attempt
                                     if bib_number and ocr_conf:
-                                        logger.info(
-                                            f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Confidence: {ocr_conf:.2f})"
-                                        )
-
-                                        history["ocr_reads"].append(
-                                            (bib_number, ocr_conf, yolo_bib_conf)
-                                        )
-                                        
+                                        logger.info(f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Conf: {ocr_conf:.2f})")
+                                        history["ocr_reads"].append((bib_number, ocr_conf, yolo_bib_conf))
                                 timings["EasyOCR"] += time.time() - t_ocr
-                            break  # Move to the next person
+                            break
 
-            # --- 3. Draw Predictions and UI Overlays ---
+            # --- 4. Draw Predictions and UI Overlays ---
             t_draw = time.time()
             annotated_frame = self.draw_predictions(frame, results)
             annotated_frame = self.draw_ui_overlays(annotated_frame, start_time, cap)
             timings["Drawing"] += time.time() - t_draw
 
+            # --- 5. Store this frame for the skip logic and return ---
+            self.last_annotated_frame = annotated_frame.copy() # Use copy to prevent modification
             return annotated_frame
 
         except Exception as e:
@@ -955,8 +1007,9 @@ class VideoInferenceProcessor:
                 f"Critical error in _process_frame at frame {frame_count}: {e}",
                 exc_info=True,
             )
+            # On error, don't skip, just return the raw frame and try again
             return frame
-
+        
     def _print_timing_report(self):
         """
         Prints a detailed timing report of the video processing performance.
