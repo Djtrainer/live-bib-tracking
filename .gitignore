@@ -20,3 +20,4 @@ models.zip
 src/image_processor/direct_connect_phone.md
 *.log
 src/frontend/node_modules/*
+models/*

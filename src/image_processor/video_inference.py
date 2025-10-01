@@ -19,10 +19,56 @@ import easyocr
 import numpy as np
 from ultralytics import YOLO
 
+import threading
+import queue
 from image_processor.utils import get_logger
 
 logger = get_logger()
 dotenv.load_dotenv()
+
+COOL_DOWN_FRAMES = 30  # Number of frames for processing cooldown
+FRAME_SKIP_FRAMES = 400  # Number of frames to skip when no racers detected
+
+class FrameReader:
+    def __init__(self, cap, max_queue_size=1):
+        self.cap = cap
+        self.queue = queue.Queue(maxsize=max_queue_size)
+        self.running = False
+        self.thread = threading.Thread(target=self._read_loop, daemon=True)
+
+    def _read_loop(self):
+        """Continuously reads frames from the camera and puts them in the queue."""
+        while self.running:
+            if not self.cap.isOpened():
+                break
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            # If the queue is full, drop the old frame and put the new one
+            if self.queue.full():
+                self.queue.get_nowait()
+            self.queue.put(frame)
+        self.running = False
+
+    def start(self):
+        """Starts the frame reading thread."""
+        self.running = True
+        self.thread.start()
+        logger.info("FrameReader thread started.")
+
+    def get_latest_frame(self):
+        """Gets the most recent frame from the queue without blocking."""
+        try:
+            return self.queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def stop(self):
+        """Stops the frame reading thread."""
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join()
+        logger.info("FrameReader thread stopped.")
 
 
 class VideoInferenceProcessor:
@@ -34,9 +80,6 @@ class VideoInferenceProcessor:
         self,
         model_path: str | Path,
         video_path: str | Path | int,
-        target_fps: int = 1,
-        confidence_threshold: float = 0,
-        finish_line_fraction: float = 0.85,
         result_callback=None,
         camera_width: int | None = None,
         camera_height: int | None = None,
@@ -47,9 +90,9 @@ class VideoInferenceProcessor:
         Args:
             model_path (str | Path): Path to YOLO model weights.
             video_path (str | Path | int): Path to input video file or camera index for live mode.
-            target_fps (int, optional): Target FPS for processing. Defaults to 1.
-            confidence_threshold (float, optional): YOLO detection confidence threshold. Defaults to 0.
-            finish_line_fraction (float, optional): Fraction of frame width for finish line. Defaults to 0.85.
+            result_callback (callable, optional): Function to call with results when a racer finishes.
+            camera_width (int | None): Optional width to set for camera capture.
+            camera_height (int | None): Optional height to set for camera capture.
         """
         # Optional camera resolution requested by caller (may be None)
         self.requested_width = camera_width
@@ -67,11 +110,11 @@ class VideoInferenceProcessor:
             self.video_path = Path(video_path)
             self.is_live_mode = False
 
-        self.target_fps = target_fps
-        self.confidence_threshold = confidence_threshold
-
         # This will store history keyed by the PERSON's tracker ID
         self.track_history = {}
+        
+        # Track the previous frame's tracked persons for efficiency
+        self.previous_tracked_persons = set()
 
         logger.info("Loading models...")
         # This model instance will be used ONLY for tracking and will become stateful
@@ -80,7 +123,7 @@ class VideoInferenceProcessor:
 
         # Initialize EasyOCR reader
         logger.info("Initializing EasyOCR reader...")
-        self.ocr_reader = easyocr.Reader(["en"], gpu=True)
+        self.ocr_reader = easyocr.Reader(["en"])
         logger.info("EasyOCR reader initialized!")
 
         # Video capture and properties
@@ -186,10 +229,8 @@ class VideoInferenceProcessor:
         self.original_fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.finish_zone_start_x = int(self.frame_width * finish_line_fraction)
 
-        self.inference_interval = 1
-        self.last_annotated_frame = None
+        self._get_finish_line()
 
         # Track when processing started for wall time calculations
         self.processing_start_time = None
@@ -200,20 +241,86 @@ class VideoInferenceProcessor:
         # Callback function for when racers finish
         self.result_callback = result_callback
 
+        self.frames_to_skip = 0
+        self.last_annotated_frame = None
+        self.cool_down_frames = 0
+        self.no_racers_frames_counter = 0 
+
+    def _get_finish_line(self):
+        
+        self.guide_line_left = {
+            'p1': (self.frame_width*0.31, self.frame_height),  # Bottom-left (adjust X)
+            'p2': (self.frame_width*0.285, self.frame_height*0.49), # Mid-top (adjust both)
+            'color': (1000, 500, 0), 
+            'thickness': 3,
+            'dash_length': 10
+        }
+
+        self.guide_line_right = {
+            'p1': (self.frame_width, self.frame_height*0.78), # Bottom-right (adjust X)
+            'p2': (self.frame_width*0.32, self.frame_height*0.49), # Mid-top (adjust both)
+            'color': (1000, 500, 0), 
+            'thickness': 3,
+            'dash_length': 10
+        }
+
+        self.guide_line_horizon = {
+            'p1': (0, self.frame_height*0.49), # Bottom-right (adjust X)
+            'p2': (self.frame_width*0.35, self.frame_height*0.49), # Mid-top (adjust both)
+            'color': (1000, 500, 0), 
+            'thickness': 3,
+            'dash_length': 10
+        }
+
+        self.guide_finish_line = {
+            'p1': (0, self.frame_height*1.09), # Bottom-right (adjust X)
+            'p2': (self.frame_width, self.frame_height*0.78), # Mid-top (adjust both)
+            'color': (0, 0, 500), 
+            'thickness': 8,
+            'dash_length': 2
+        }
+
+        x1, y1 = self.guide_finish_line['p1']
+        x2, y2 = self.guide_finish_line['p2']
+        
+        # Calculate slope (m) and y-intercept (b)
+        self.finish_line_m = (y2 - y1) / (x2 - x1)
+        self.finish_line_b = y1 - self.finish_line_m * x1
+
     def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
         """
-        Preprocesses an image crop for use with EasyOCR by converting it to grayscale,
-        applying denoising, and adaptive thresholding.
+        Faster preprocessing for EasyOCR:
+        - convert to gray
+        - resize to fixed height (maintain aspect)
+        - apply CLAHE for contrast
+        - apply Otsu threshold (fast)
         """
+        if image_crop is None or image_crop.size == 0:
+            return image_crop
+
         if len(image_crop.shape) == 3:
             gray = cv2.cvtColor(image_crop, cv2.COLOR_BGR2GRAY)
         else:
             gray = image_crop
-        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
-        return cv2.adaptiveThreshold(
-            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-        )
 
+        # scale crop to target height for OCR (improves recognition & is faster than heavy denoising)
+        target_h = 120  # tune: 80-160 commonly good for bib text
+        h, w = gray.shape[:2]
+        if h == 0 or w == 0:
+            return gray
+        scale = max(1.0, target_h / float(h))
+        if scale != 1.0:
+            new_w = int(w * scale)
+            gray = cv2.resize(gray, (new_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+        # Apply CLAHE for contrast enhancement
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+
+        # Fast thresholding (Otsu)
+        _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return th
+    
     def extract_bib_with_easyocr(
         self, image_crop: np.ndarray
     ) -> tuple[str | None, float | None]:
@@ -271,103 +378,99 @@ class VideoInferenceProcessor:
     ) -> None:
         """
         Checks if a tracked racer has entered the finish zone.
-        Records their time the first moment they enter the zone.
+        Records their time and sets a flag the first moment they enter the zone.
         """
-        # Use the center of the bounding box as the racer's position
-        x1, _, x2, _ = person_box.xyxy[0]
-        racer_position = (x1 + x2) / 2
-
         history = self.track_history.get(person_id)
-        # Proceed only if the racer is being tracked and hasn't finished yet
-        if history and not history["has_finished"]:
-            # Check if the racer has entered the finish zone
-            if racer_position >= self.finish_zone_start_x:
-                # Racer entered the finish zone! Record both video timestamp and wall-clock time.
-                finish_time = cap.get(cv2.CAP_PROP_POS_MSEC)
-                finish_wall_time = time.time()  # Capture current wall-clock time
-                history["finish_time_ms"] = finish_time
-                history["finish_wall_time"] = finish_wall_time
-                history["has_finished"] = True  # Set flag to prevent recording again
+        if not history or history.get("has_finished", False):
+            return
 
-                logger.info(
-                    f"Racer ID {person_id} entered finish zone at {finish_time / 1000:.2f}s"
-                )
+        # Get the four corner points of the bounding box
+        x1, y1, x2, y2 = person_box.xyxy[0]
+        corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+        
+        crossed_line = False
+        for (px, py) in corners:
+            # Calculate the line's y-value at the point's x-position
+            line_y_at_px = self.finish_line_m * px + self.finish_line_b
+            
+            # Check if the point is "below" the line (higher y-value in image coordinates)
+            if py >= line_y_at_px:
+                crossed_line = True
+                break
+        
+        if crossed_line:
+            # This is the first instance the box has crossed. Record the finish.
+            history["has_finished"] = True
+            history["finish_time_ms"] = cap.get(cv2.CAP_PROP_POS_MSEC)
+            history["finish_wall_time"] = time.time()
+            history["post_finish_counter"] = 30 
 
-                # Get the final bib result for this racer
-                final_bib_results = self.determine_final_bibs()
-                bib_result = final_bib_results.get(person_id)
+            logger.info(f"Racer ID {person_id} CROSSED hardcoded line at {history['finish_time_ms'] / 1000:.2f}s")
+            # self._handle_finisher(person_id, history)
+            # self.print_live_leaderboard()
 
-                if bib_result:
-                    logger.info(
-                        f"Racer finished: Bib #{bib_result['final_bib']} at {finish_time / 1000:.2f}s"
-                    )
+    def _handle_finisher(self, person_id: int, history: dict) -> None:
+        """
+        Determines the final bib for a finisher and sends the result via callback.
+        """
+        if not self.result_callback:
+            return
 
-                    # Call the callback function to notify the server with wall-clock time
-                    if self.result_callback:
-                        try:
-                            payload = {
-                                "bibNumber": bib_result["final_bib"],
-                                "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
-                                "racerName": f"Racer {person_id}",
-                            }
-                            logger.info(
-                                "🔍 DEBUG: About to send finisher data via callback"
-                            )
-                            logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
-                            logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(
-                                f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)"
-                            )
-                            logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
+        # Determine the final bib number using the voting system
+        final_bib_results = self.determine_final_bibs()
+        bib_result = final_bib_results.get(person_id)
+        
+        bib_number = bib_result['final_bib'] if bib_result else f"Unknown-{person_id}"
+        
+        # Construct the payload
+        payload = {
+            "bibNumber": bib_number,
+            "wallClockTime": history["finish_wall_time"],
+            "racerName": f"Racer {person_id}" # Placeholder name
+        }
+        
+        # Send the data to the backend
+        try:
+            logger.info(f"Sending finisher data to backend: {payload}")
+            self.result_callback(payload)
+            history["result_sent"] = True
+            logger.info(f"Successfully sent finisher data for Bib #{bib_number}")
+        except Exception as e:
+            logger.error(f"Error calling result callback for Bib #{bib_number}: {e}", exc_info=True)
+    
+    def _finalize_lost_trackers(self, tracked_person_ids: set) -> None:
+        """
+        Finds racers who have finished but are no longer tracked and finalizes their results.
+        """
+        # Create a list of IDs to avoid modifying the dictionary while iterating
+        finished_but_lost_ids = []
+        logger.debug(f"Checking for lost trackers among {len(self.track_history)} total tracked racers")
+        for person_id, history in self.track_history.items():
+            logger.debug(f"Racer ID {person_id}: {history}")
+            logger.debug(f"Currently tracked IDs: {tracked_person_ids}")
+            logger.debug(f"Racer ID {person_id}: has_finished={history.get('has_finished')}, result_sent={history.get('result_sent')}, in_tracked={person_id in tracked_person_ids}")
+            if (history.get("has_finished") and 
+                not history.get("result_sent") and 
+                person_id not in tracked_person_ids):
+                finished_but_lost_ids.append(person_id)
+                logger.debug(f"Racer ID {person_id}: Found finished racer who left frame - will finalize")
 
-                            self.result_callback(payload)
-                            logger.info(
-                                f"✅ DEBUG: Successfully sent finisher data via callback: Bib #{payload['bibNumber']}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"❌ DEBUG: Error calling result callback: {e}"
-                            )
-                            logger.error(
-                                f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}"
-                            )
-                else:
-                    # No bib number found - send finisher with placeholder bib
-                    logger.info(
-                        f"Racer finished: No readable bib number for Racer ID {person_id} at {finish_time / 1000:.2f}s"
-                    )
-
-                    # Call the callback function to notify the server with placeholder bib and wall-clock time
-                    if self.result_callback:
-                        try:
-                            payload = {
-                                "bibNumber": f"Unknown-{person_id}",  # Use tracker ID as placeholder
-                                "wallClockTime": finish_wall_time,  # CRITICAL: Send wall-clock time instead of video time
-                                "racerName": f"Racer {person_id}",
-                            }
-                            logger.info(
-                                "🔍 DEBUG: About to send 'No Bib' finisher data via callback"
-                            )
-                            logger.info(f"🔍 DEBUG: Payload being sent: {payload}")
-                            logger.info(f"🔍 DEBUG: Bib Number: {payload['bibNumber']}")
-                            logger.info(
-                                f"🔍 DEBUG: Wall Clock Time: {payload['wallClockTime']} (Unix timestamp)"
-                            )
-                            logger.info(f"🔍 DEBUG: Racer Name: {payload['racerName']}")
-
-                            self.result_callback(payload)
-                            logger.info(
-                                f"✅ DEBUG: Successfully sent 'No Bib' finisher data via callback: {payload['bibNumber']}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"❌ DEBUG: Error calling result callback for 'No Bib' finisher: {e}"
-                            )
-                            logger.error(
-                                f"❌ DEBUG: Exception details: {type(e).__name__}: {str(e)}"
-                            )
-
-                self.print_live_leaderboard()
+        for person_id in finished_but_lost_ids:
+            logger.info(f"🏁 Racer ID {person_id} has left the frame. Finalizing result immediately.")
+            self._handle_finisher(person_id, self.track_history[person_id])
+            self.print_live_leaderboard()
+        
+        # Debug logging for tracking
+        if tracked_person_ids:
+            logger.debug(f"Currently tracked person IDs: {tracked_person_ids}")
+        
+        finished_not_sent = [
+            pid for pid, hist in self.track_history.items() 
+            if hist.get("has_finished") and not hist.get("result_sent")
+        ]
+        
+        if finished_not_sent:
+            logger.debug(f"Finished racers not yet sent: {finished_not_sent}")
 
     def determine_final_bibs(self):
         """
@@ -593,17 +696,43 @@ class VideoInferenceProcessor:
 
             annotated_image = frame.copy()
 
-            # Draw finish zone line
-            try:
-                cv2.line(
-                    annotated_image,
-                    (self.finish_zone_start_x, 0),
-                    (self.finish_zone_start_x, self.frame_height),
-                    (0, 255, 255),
-                    3,
-                )
-            except Exception as e:
-                logger.error(f"Error drawing finish zone line: {e}")
+            def draw_dashed_line(img, p1, p2, color=(1000, 500, 0), thickness=3, dash_length=10):
+                dist = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+                dashes = int(dist / dash_length)
+                for i in range(dashes):
+                    start = float(i) / dashes
+                    end = float(i + 0.5) / dashes  # Draw for half the dash length
+                    
+                    x_start = int(p1[0] + start * (p2[0] - p1[0]))
+                    y_start = int(p1[1] + start * (p2[1] - p1[1]))
+                    x_end = int(p1[0] + end * (p2[0] - p1[0]))
+                    y_end = int(p1[1] + end * (p2[1] - p1[1]))
+                    
+                    cv2.line(img, (x_start, y_start), (x_end, y_end), color, thickness)
+
+            draw_dashed_line(
+                annotated_image,
+                self.guide_line_left['p1'],
+                self.guide_line_left['p2'],
+            )
+            draw_dashed_line(
+                annotated_image,
+                self.guide_line_right['p1'],
+                self.guide_line_right['p2'],
+            )
+            draw_dashed_line(
+                annotated_image,
+                self.guide_line_horizon['p1'],
+                self.guide_line_horizon['p2']
+            )
+            draw_dashed_line(
+                annotated_image,
+                self.guide_finish_line['p1'],
+                self.guide_finish_line['p2'],
+                self.guide_finish_line['color'],
+                self.guide_finish_line['thickness'],
+                self.guide_finish_line['dash_length']
+            )
 
             # Draw detection boxes and tracked persons
             if (
@@ -723,9 +852,26 @@ class VideoInferenceProcessor:
         timings: defaultdict,
     ) -> np.ndarray:
         """
-        Processes a single frame for object detection, tracking, OCR, and annotation.
-        This version uses a single, unified model call for efficiency.
+        Processes a single frame with internal frame-skipping logic.
+        If no racers are detected, it will skip processing for the next 10 frames.
         """
+        # --- 0. Frame Skipping Cooldown Logic ---
+        if self.frames_to_skip > 0:
+            # NOTE: The actual dropping/decrementing of frames is handled by the
+            # video generator (local_server.py) which can rapidly consume frames
+            # from the FrameReader. Here we only short-circuit processing and
+            # return the last annotated frame (or decorate the current one) so
+            # the UI remains responsive while skipping occurs.
+            logger.debug(f"Skipping frame, {self.frames_to_skip} frames left to skip.")
+            # Return the last successfully annotated frame to prevent a blank or frozen screen
+            if self.last_annotated_frame is not None:
+                # We still need to update the UI overlays (like the timer) on the old frame
+                # to make it feel live.
+                return self.draw_ui_overlays(self.last_annotated_frame.copy(), start_time, cap)
+            else:
+                # If we skip on the very first run, just return the current raw frame with UI
+                return self.draw_ui_overlays(frame, start_time, cap)
+
         try:
             # --- 1. Perform a single, unified tracking call for all classes ---
             t0 = time.time()
@@ -734,85 +880,126 @@ class VideoInferenceProcessor:
                 persist=True,
                 tracker="config/custom_tracker.yaml",
                 classes=[0, 1],  # Track both persons (0) and bibs (1)
-                workers=4,
                 verbose=False,
             )
             timings["YOLO_Unified_Track"] += time.time() - t0
 
-            # --- 2. Associate Bibs and Perform Smart OCR ---
+            # --- 2. Separate objects and check for racers ---
+            tracked_persons = {}
+            detected_bibs = []
+            
             if results and results[0].boxes.id is not None:
                 boxes = results[0].boxes
 
-                # Separate the tracked objects into persons and bibs
-                tracked_persons = {
-                    int(b.id): b for b in boxes if int(b.cls) == 0 and b.id is not None
-                }
+                # Helper: compute interpolated x on a guide line at a given y
+                def _interpolate_x_at_y(line, y_val: float) -> float:
+                    x1, y1 = line["p1"]
+                    x2, y2 = line["p2"]
+                    x1 = float(x1)
+                    y1 = float(y1)
+                    x2 = float(x2)
+                    y2 = float(y2)
+                    # If the guide line is (nearly) horizontal, just return x1
+                    if abs(y2 - y1) < 1e-6:
+                        return x1
+                    t = (y_val - y1) / (y2 - y1)
+                    return x1 + t * (x2 - x1)
+
+                def _point_between_guides(px: float, py: float) -> bool:
+                    xl = _interpolate_x_at_y(self.guide_line_left, py)
+                    xr = _interpolate_x_at_y(self.guide_line_right, py)
+                    left = min(xl, xr)
+                    right = max(xl, xr)
+                    return (px >= left) and (px <= right)
+
+                # Build tracked_persons but only include persons where any
+                # corner of their bbox lies between the two guide lines.
+                tracked_persons = {}
+                for b in boxes:
+                    if int(b.cls) != 0 or b.id is None:
+                        continue
+                    x1, y1, x2, y2 = [float(c) for c in b.xyxy[0]]
+                    corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+                    if any(_point_between_guides(cx, cy) for cx, cy in corners):
+                        tracked_persons[int(b.id)] = b
+
                 detected_bibs = [b for b in boxes if int(b.cls) == 1]
 
+            # --- NEW: Activate cooldown if no racers were found ---
+            if tracked_persons:
+                # Racers were detected, so reset our counter.
+                self.no_racers_frames_counter = 0
+            else:
+                # No racers were detected, so increment our counter.
+                self.no_racers_frames_counter += 1
+                logger.debug(f"No racers detected for {self.no_racers_frames_counter} consecutive frames.")
+
+                # Check if the counter has reached the cooldown threshold.
+                if self.no_racers_frames_counter >= COOL_DOWN_FRAMES:
+                    logger.info(
+                        f"No racers for {COOL_DOWN_FRAMES} frames. Activating skip for the next {FRAME_SKIP_FRAMES} frames."
+                    )
+                    # Activate the skip
+                    self.frames_to_skip = FRAME_SKIP_FRAMES
+                    # Reset the counter so we don't immediately skip again
+                    self.no_racers_frames_counter = 0  
+            # --- End of New Logic ---
+
+            current_tracked_ids = set(tracked_persons.keys())
+            if current_tracked_ids != self.previous_tracked_persons:
+                self._finalize_lost_trackers(current_tracked_ids)
+                self.previous_tracked_persons = current_tracked_ids
+            
+            # --- 3. Process each tracked person (OCR, finishing logic, etc.) ---
+            if tracked_persons:
                 for person_id, person_box in tracked_persons.items():
-                    # Initialize history for new racers
+                    # (Your existing logic for processing each racer remains unchanged)
                     if person_id not in self.track_history:
                         self.track_history[person_id] = {
-                            "ocr_reads": [],
-                            "last_x_center": None,
-                            "finish_time_ms": None,
-                            "finish_wall_time": None,
-                            "final_bib": None,
-                            "final_bib_confidence": 0.0,
-                            "has_finished": False,
+                            "ocr_reads": [], "last_x_center": None, "finish_time_ms": None,
+                            "finish_wall_time": None, "final_bib": None, "final_bib_confidence": 0.0,
+                            "has_finished": False, "result_sent": False, "post_finish_counter": 0,
                         }
 
                     history = self.track_history[person_id]
+                    if history['has_finished'] and not history.get('result_sent', False):
+                        if history['post_finish_counter'] > 0:
+                            history['post_finish_counter'] -= 1
+                        if history['post_finish_counter'] == 0:
+                            self._handle_finisher(person_id, history)
+                            self.print_live_leaderboard()
 
-                    # Check for finish line crossing
                     self.check_finish_line_crossings(person_id, person_box, cap)
-
-                    # Smart OCR: Skip if we already have a high-confidence bib
-                    if history["final_bib_confidence"] > 0.90:
+                    
+                    if history['final_bib_confidence'] > 0.90 and history['post_finish_counter'] == 0:
                         continue
 
-                    # Associate the closest bib if not yet found
                     px1, py1, px2, py2 = person_box.xyxy[0]
                     for bib_box in detected_bibs:
                         bx1, by1, bx2, by2 = bib_box.xyxy[0]
                         if px1 < (bx1 + bx2) / 2 < px2 and py1 < (by1 + by2) / 2 < py2:
-                            # Only run OCR if YOLO confidence for the bib is high enough
                             yolo_bib_conf = float(bib_box.conf)
                             if yolo_bib_conf > 0.70:
                                 t_ocr = time.time()
-                                bib_crop = self.crop_bib_from_prediction(
-                                    frame, bib_box.xyxy[0]
-                                )
+                                bib_crop = self.crop_bib_from_prediction(frame, bib_box.xyxy[0])
                                 if bib_crop.size > 0:
-                                    bib_number, ocr_conf = (
-                                        self.extract_bib_with_easyocr(
-                                            self.preprocess_for_easyocr(bib_crop)
-                                        )
+                                    bib_number, ocr_conf = self.extract_bib_with_easyocr(
+                                        self.preprocess_for_easyocr(bib_crop)
                                     )
-
-                                    # Add detailed OCR logging for every attempt
                                     if bib_number and ocr_conf:
-                                        logger.info(
-                                            f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Confidence: {ocr_conf:.2f})"
-                                        )
-
-                                        history["ocr_reads"].append(
-                                            (bib_number, ocr_conf, yolo_bib_conf)
-                                        )
-                                        # # Lock in the bib if confidence is high
-                                        # if ocr_conf > history["final_bib_confidence"]:
-                                        #     history["final_bib"] = bib_number
-                                        #     history["final_bib_confidence"] = ocr_conf
-
+                                        logger.info(f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Conf: {ocr_conf:.2f})")
+                                        history["ocr_reads"].append((bib_number, ocr_conf, yolo_bib_conf))
                                 timings["EasyOCR"] += time.time() - t_ocr
-                            break  # Move to the next person
+                            break
 
-            # --- 3. Draw Predictions and UI Overlays ---
+            # --- 4. Draw Predictions and UI Overlays ---
             t_draw = time.time()
             annotated_frame = self.draw_predictions(frame, results)
             annotated_frame = self.draw_ui_overlays(annotated_frame, start_time, cap)
             timings["Drawing"] += time.time() - t_draw
 
+            # --- 5. Store this frame for the skip logic and return ---
+            self.last_annotated_frame = annotated_frame.copy() # Use copy to prevent modification
             return annotated_frame
 
         except Exception as e:
@@ -820,8 +1007,9 @@ class VideoInferenceProcessor:
                 f"Critical error in _process_frame at frame {frame_count}: {e}",
                 exc_info=True,
             )
+            # On error, don't skip, just return the raw frame and try again
             return frame
-
+        
     def _print_timing_report(self):
         """
         Prints a detailed timing report of the video processing performance.

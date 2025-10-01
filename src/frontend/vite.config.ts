@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => {
   return {
     server: {
       host: "::",
-      port: 8080,
+      port: process.env.PORT ? parseInt(process.env.PORT) : 8080,
       proxy: {
         // Proxy all /api requests to the FastAPI backend
         '/api': {
