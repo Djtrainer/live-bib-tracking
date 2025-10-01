@@ -1,6 +1,8 @@
 *.jpg
 *.MOV
-data/
+data/results/*
+data/processed/*
+data/raw/*
 __pycache__/
 *.egg-info
 *.pyc
