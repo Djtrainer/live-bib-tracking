@@ -12,6 +12,8 @@ import os
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+import csv
+from datetime import datetime
 
 import cv2
 import dotenv
@@ -83,6 +85,7 @@ class VideoInferenceProcessor:
         result_callback=None,
         camera_width: int | None = None,
         camera_height: int | None = None,
+        leaderboard_csv_path: str | Path | None = None,
     ):
         """
         Initializes the VideoInferenceProcessor for live bib tracking.
@@ -240,6 +243,24 @@ class VideoInferenceProcessor:
 
         # Callback function for when racers finish
         self.result_callback = result_callback
+
+        # Path to save leaderboard CSVs. If not provided, try env var or default to results/leaderboard_{timestamp}.csv
+        env_path = os.getenv("LEADERBOARD_CSV_PATH")
+        if leaderboard_csv_path is not None:
+            self.leaderboard_csv_path = Path(leaderboard_csv_path)
+        elif env_path:
+            self.leaderboard_csv_path = Path(env_path)
+        else:
+            # Default path inside repository results folder with timestamp
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.leaderboard_csv_path = Path("data/results") / f"leaderboard_{ts}.csv"
+
+        # Ensure parent directory exists
+        try:
+            self.leaderboard_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # If we can't create the directory, we'll log later when trying to write
+            pass
 
         self.frames_to_skip = 0
         self.last_annotated_frame = None
@@ -570,6 +591,24 @@ class VideoInferenceProcessor:
         logger.info(
             "\n(Processing video... Press Ctrl+C to stop and show final results)"
         )
+
+        # Save a local CSV copy of the live leaderboard each time it's updated
+        try:
+            # Use the frontend-format CSV so it matches the Download CSV from the Admin UI
+            # Map the live leaderboard entries into the expected server format where possible
+            results = []
+            for entry in leaderboard:
+                results.append({
+                    "id": entry.get("id"),
+                    "bibNumber": entry.get("bib"),
+                    "racerName": "",  # live processor does not have roster names
+                    "finishTime": entry.get("time_ms"),
+                    "gender": "",
+                    "team": "",
+                })
+            self.save_leaderboard_csv_frontend_format(results)
+        except Exception as e:
+            logger.warning(f"Failed to save live leaderboard CSV: {e}")
 
     def draw_ui_overlays(
         self, frame: np.ndarray, start_time: float, cap: cv2.VideoCapture
@@ -1096,3 +1135,87 @@ class VideoInferenceProcessor:
             logger.info("No finishers recorded.")
 
         logger.info("🏁" * 30)
+
+        # Save final leaderboard CSV in frontend format
+        try:
+            # Map to server-style finisher dicts so the frontend-format writer can include names/teams if present
+            results = []
+            for entry in leaderboard:
+                results.append({
+                    "id": entry.get("id"),
+                    "bibNumber": entry.get("bib"),
+                    "racerName": "",
+                    "finishTime": entry.get("time_ms"),
+                    "gender": "",
+                    "team": "",
+                })
+            self.save_leaderboard_csv_frontend_format(results, path=self.leaderboard_csv_path)
+        except Exception as e:
+            logger.error(f"Failed to save final leaderboard CSV: {e}")
+
+    # NOTE: `save_leaderboard_csv` (internal raw CSV writer) intentionally removed.
+    # Use `save_leaderboard_csv_frontend_format` for export that matches the front-end Download CSV.
+
+    def save_leaderboard_csv_frontend_format(self, results: list, path: Path | str | None = None) -> Path:
+        """
+        Save leaderboard in the exact CSV format produced by the front-end "Download CSV" button.
+
+        Expected columns: Rank,Bib Number,Racer Name,Finish Time,Gender,Team
+
+        Args:
+            results: A list of finisher dicts as stored in the server `race_results` (with keys like id, bibNumber, racerName, finishTime, gender, team)
+            path: Optional path to write to. If None, uses self.leaderboard_csv_path.
+
+        Returns:
+            Path to written CSV file.
+        """
+        csv_path = Path(path) if path is not None else self.leaderboard_csv_path
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def format_time_ms(ms: float | None) -> str:
+            if ms is None or ms == "" or ms is False:
+                return ""
+            try:
+                ms_val = float(ms)
+            except Exception:
+                return ""
+            total_seconds = int(ms_val // 1000)
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            centiseconds = int((ms_val % 1000) / 10)
+            return f"{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
+
+        # The front-end normalizes finishTime similarly: if it's a large epoch-like value (>1e12),
+        # it converts to elapsed using race clock. The server caller should pass normalized elapsed ms
+        # where possible; here we'll accept results as-is and format the provided finishTime.
+
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Rank", "Bib Number", "Racer Name", "Finish Time", "Gender", "Team"])
+
+            # Sort results by finishTime if present
+            try:
+                sorted_results = sorted(
+                    results, key=lambda r: (r.get("finishTime") is None, r.get("finishTime") or float("inf"))
+                )
+            except Exception:
+                sorted_results = list(results)
+
+            for idx, r in enumerate(sorted_results, start=1):
+                bib = r.get("bibNumber") or r.get("bib") or ""
+                name = r.get("racerName") or r.get("racer_name") or ""
+                finish_time_ms = r.get("finishTime") if "finishTime" in r else r.get("time_ms")
+                gender = r.get("gender") or ""
+                team = r.get("team") or ""
+
+                writer.writerow([
+                    idx,
+                    bib,
+                    name,
+                    format_time_ms(finish_time_ms),
+                    gender,
+                    team,
+                ])
+
+        logger.info(f"Saved frontend-format leaderboard CSV to: {csv_path}")
+        return csv_path
