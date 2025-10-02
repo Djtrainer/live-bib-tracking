@@ -221,6 +221,31 @@ race_results: List[Dict[str, Any]] = []
 # This should NEVER be modified after upload - it's our source of truth for lookups
 original_roster: Dict[str, Dict[str, Any]] = {}  # Key: bibNumber, Value: racer data
 
+
+def _save_server_leaderboard_snapshot():
+    """Build a leaderboard snapshot from `race_results` and ask the VideoInferenceProcessor to save it as CSV.
+
+    This keeps the local CSV in sync when admins edit results via the API/frontend.
+    """
+    try:
+        processor = app_state.get("processor")
+        if not processor:
+            logger.debug("No processor in app_state; skipping leaderboard CSV save.")
+            return
+
+        # Use the processor's frontend CSV writer to produce the same CSV format as the UI
+        # Only include racers who have a finishTime (finished racers only), sorted by finish time
+        try:
+            finished = [r for r in race_results if r.get("finishTime") is not None]
+            finished.sort(key=lambda x: x.get("finishTime") or float("inf"))
+            processor.save_leaderboard_csv_frontend_format(finished)
+        except Exception:
+            # Fallback: write an empty file using the generic saver
+            processor.save_leaderboard_csv_frontend_format([], path=processor.leaderboard_csv_path)
+    except Exception as e:
+        logger.warning(f"Failed to save server leaderboard snapshot: {e}")
+
+
 # --- Race Clock State (Source of Truth) ---
 # This stores the official race clock state
 race_clock_state = {
@@ -683,6 +708,12 @@ async def upload_roster(file: UploadFile = File(...)):
         # Broadcast roster update to all connected clients
         await manager.broadcast(json.dumps({"action": "reload"}))
 
+        # Persist a server-side CSV snapshot of the leaderboard after roster changes
+        try:
+            _save_server_leaderboard_snapshot()
+        except Exception as e:
+            logger.warning(f"Failed to save leaderboard after roster upload: {e}")
+
         total_processed = uploaded_count + updated_count
         logger.info(
             f"Roster merge completed: {uploaded_count} new racers, {updated_count} updated racers"
@@ -870,6 +901,12 @@ async def update_finish_time(finish_data: Dict[str, Any]):
     await manager.broadcast(json.dumps({"type": "add", "data": new_finisher}))
     logger.info(f"✅ DEBUG: Successfully broadcasted new finisher data")
 
+    # Persist leaderboard snapshot after adding a new finisher
+    try:
+        _save_server_leaderboard_snapshot()
+    except Exception as e:
+        logger.warning(f"Failed to save leaderboard after adding finisher: {e}")
+
     logger.info(
         f"✅ DEBUG: Added new finisher: Bib #{bib_number} - {new_finisher['racerName']} - {finish_time}ms"
     )
@@ -981,7 +1018,7 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                 # If bib number changed, broadcast reload to ensure all clients get fresh data
                 if bib_changed:
                     logger.info(
-                        f"🔍 DEBUG: Bib number changed - broadcasting reload signal"
+                        "🔍 DEBUG: Bib number changed - broadcasting reload signal"
                     )
                     await manager.broadcast(json.dumps({"action": "reload"}))
                 else:
@@ -989,6 +1026,12 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                     await manager.broadcast(
                         json.dumps({"type": "update", "data": merged_data})
                     )
+
+                # Persist leaderboard snapshot after update
+                try:
+                    _save_server_leaderboard_snapshot()
+                except Exception as e:
+                    logger.warning(f"Failed to save leaderboard after finisher update: {e}")
 
                 return {"success": True, "data": merged_data}
             else:
@@ -1019,6 +1062,12 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                     json.dumps({"type": "update", "data": updated_data})
                 )
 
+                # Persist leaderboard snapshot after update
+                try:
+                    _save_server_leaderboard_snapshot()
+                except Exception as e:
+                    logger.warning(f"Failed to save leaderboard after finisher update: {e}")
+
                 return {"success": True, "data": updated_data}
 
     return {"success": False, "message": "Finisher not found"}
@@ -1036,6 +1085,12 @@ async def delete_finisher(finisher_id: str):
 
             # Broadcast reload message to all connected WebSocket clients
             await manager.broadcast(json.dumps({"action": "reload"}))
+
+            # Persist leaderboard snapshot after deletion
+            try:
+                _save_server_leaderboard_snapshot()
+            except Exception as e:
+                logger.warning(f"Failed to save leaderboard after deletion: {e}")
 
             return {"success": True, "message": "Finisher deleted"}
 
