@@ -242,6 +242,12 @@ class VideoInferenceProcessor:
         # Initialize timing tracking
         self.timings = defaultdict(float)
 
+        # Frame counter used when processing batches
+        self._frame_counter = 0
+
+        # Default batch size for batched inference (can be tuned to 4 or 8)
+        self.batch_size = 8
+
         # Callback function for when racers finish
         self.result_callback = result_callback
 
@@ -331,9 +337,9 @@ class VideoInferenceProcessor:
             [
                 (
                     self.guide_line_left["p2"][0],
-                    self.guide_line_left["p2"][1]*0.9,
+                    self.guide_line_left["p2"][1]*0,
                 ),  # Top-left
-                (self.frame_width, self.guide_line_right["p2"][1]*0.9),  # Top-right
+                (self.frame_width, self.guide_line_right["p2"][1]*0),  # Top-right
                 (self.frame_width, self.frame_height),  # Bottom-right
                 (
                     self.guide_line_left["p1"][0],
@@ -846,104 +852,102 @@ class VideoInferenceProcessor:
             )
 
             # Draw detection boxes and tracked persons
-            if (
-                results
-                and hasattr(results[0], "boxes")
-                and results[0].boxes is not None
-            ):
-                try:
-                    for box in results[0].boxes:
-                        if not hasattr(box, "cls") or not hasattr(box, "xyxy"):
-                            continue
+            # Normalize results so we accept either a Results object or a list-like with [0]
+            if results and hasattr(results, 'boxes') and results.boxes.id is not None:
+                # try:
+                # 'boxes' is accessed directly from the 'results' object now.
+                for box in results.boxes:
+                    if not hasattr(box, "cls") or not hasattr(box, "xyxy"):
+                        continue
+            
+                    cls = int(box.cls)
+                    x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
 
-                        cls = int(box.cls)
-                        x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
+                    # Validate coordinates
+                    if not (
+                        0 <= x1 < x2 <= annotated_image.shape[1]
+                        and 0 <= y1 < y2 <= annotated_image.shape[0]
+                    ):
+                        continue
 
-                        # Validate coordinates
-                        if not (
-                            0 <= x1 < x2 <= annotated_image.shape[1]
-                            and 0 <= y1 < y2 <= annotated_image.shape[0]
-                        ):
-                            continue
+                    # Draw bib detection boxes (class 1) in red
+                    if cls == 1:
+                        cv2.rectangle(
+                            annotated_image,
+                            (x1, y1),
+                            (x2, y2),
+                            (0, 0, 255),
+                            2,
+                        )
 
-                        # Draw bib detection boxes (class 1) in red
-                        if cls == 1:
+                    # Draw tracked persons (class 0) in blue with ID and bib info
+                    elif cls == 0 and hasattr(box, "id") and box.id is not None:
+                        person_id = int(box.id.item())
+
+                        current_best_read = ""
+                        try:
+                            if (
+                                person_id in self.track_history
+                                and self.track_history[person_id]["ocr_reads"]
+                            ):
+                                reads = [
+                                    r[0]
+                                    for r in self.track_history[person_id][
+                                        "ocr_reads"
+                                    ]
+                                ]
+                                if reads:
+                                    current_best_read = Counter(reads).most_common(
+                                        1
+                                    )[0][0]
+                        except Exception as e:
+                            logger.warning(
+                                f"Error getting best OCR read for person {person_id}: {e}"
+                            )
+
+                        label_text = (
+                            f"Racer ID {person_id} | Bib: {current_best_read}"
+                        )
+
+                        # Draw rectangle
+                        cv2.rectangle(
+                            annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2
+                        )
+
+                        # Draw text with background for better visibility
+                        try:
+                            text_size = cv2.getTextSize(
+                                label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
+                            )[0]
+                            text_x = max(0, x1)
+                            text_y = max(text_size[1] + 10, y1 - 10)
+
+                            # Draw text background
                             cv2.rectangle(
                                 annotated_image,
-                                (x1, y1),
-                                (x2, y2),
-                                (0, 0, 255),
+                                (text_x - 5, text_y - text_size[1] - 5),
+                                (text_x + text_size[0] + 5, text_y + 5),
+                                (0, 0, 0),
+                                -1,
+                            )
+
+                            # Draw text
+                            cv2.putText(
+                                annotated_image,
+                                label_text,
+                                (text_x, text_y),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.9,
+                                (255, 0, 0),
                                 2,
                             )
-
-                        # Draw tracked persons (class 0) in blue with ID and bib info
-                        elif cls == 0 and hasattr(box, "id") and box.id is not None:
-                            person_id = int(box.id[0])
-
-                            current_best_read = ""
-                            try:
-                                if (
-                                    person_id in self.track_history
-                                    and self.track_history[person_id]["ocr_reads"]
-                                ):
-                                    reads = [
-                                        r[0]
-                                        for r in self.track_history[person_id][
-                                            "ocr_reads"
-                                        ]
-                                    ]
-                                    if reads:
-                                        current_best_read = Counter(reads).most_common(
-                                            1
-                                        )[0][0]
-                            except Exception as e:
-                                logger.warning(
-                                    f"Error getting best OCR read for person {person_id}: {e}"
-                                )
-
-                            label_text = (
-                                f"Racer ID {person_id} | Bib: {current_best_read}"
+                        except Exception as e:
+                            logger.warning(
+                                f"Error drawing text for person {person_id}: {e}"
                             )
 
-                            # Draw rectangle
-                            cv2.rectangle(
-                                annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2
-                            )
-
-                            # Draw text with background for better visibility
-                            try:
-                                text_size = cv2.getTextSize(
-                                    label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
-                                )[0]
-                                text_x = max(0, x1)
-                                text_y = max(text_size[1] + 10, y1 - 10)
-
-                                # Draw text background
-                                cv2.rectangle(
-                                    annotated_image,
-                                    (text_x - 5, text_y - text_size[1] - 5),
-                                    (text_x + text_size[0] + 5, text_y + 5),
-                                    (0, 0, 0),
-                                    -1,
-                                )
-
-                                # Draw text
-                                cv2.putText(
-                                    annotated_image,
-                                    label_text,
-                                    (text_x, text_y),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.9,
-                                    (255, 0, 0),
-                                    2,
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Error drawing text for person {person_id}: {e}"
-                                )
-
-                except Exception as e:
-                    logger.error(f"Error processing detection boxes: {e}")
+                # except Exception as e:
+                #     logger.error(f"Error processing detection boxes: {e}")
 
             return annotated_image
 
@@ -957,6 +961,7 @@ class VideoInferenceProcessor:
     def _process_frame(
         self,
         frame: np.ndarray,
+        results,
         frame_count: int,
         start_time: float,
         cap: cv2.VideoCapture,
@@ -986,32 +991,17 @@ class VideoInferenceProcessor:
                 return self.draw_ui_overlays(frame, start_time, cap)
 
         try:
-            # Create a black mask with the same dimensions as the frame
-            mask = np.zeros(frame.shape, dtype=np.uint8)
-
-            # Fill the ROI polygon with white
-            cv2.fillPoly(mask, [self.roi_points], (255, 255, 255))
-
-            # Apply the mask to the frame
-            masked_frame = cv2.bitwise_and(frame, mask)
-
-            # --- 1. Perform a single, unified tracking call for all classes ---
-            t0 = time.time()
-            results = self.model.track(
-                masked_frame,
-                persist=True,
-                tracker="config/custom_tracker.yaml",
-                classes=[0, 1],  # Track both persons (0) and bibs (1)
-                verbose=False,
-            )
-            timings["YOLO_Unified_Track"] += time.time() - t0
+            # Note: For batched processing, this method expects `results` to be
+            # passed in by the caller; it no longer calls the model itself.
 
             # --- 2. Separate objects and check for racers ---
             tracked_persons = {}
             detected_bibs = []
 
-            if results and results[0].boxes.id is not None:
-                boxes = results[0].boxes
+            # if results and results[0].boxes.id is not None:
+            #     boxes = results[0].boxes
+            if results and hasattr(results, 'boxes') and results.boxes.id is not None:
+                boxes = results.boxes
 
                 # Helper: compute interpolated x on a guide line at a given y
                 def _interpolate_x_at_y(line, y_val: float) -> float:
@@ -1038,14 +1028,17 @@ class VideoInferenceProcessor:
                 # corner of their bbox lies between the two guide lines.
                 tracked_persons = {}
                 for b in boxes:
-                    if int(b.cls) != 0 or b.id is None:
+                    if b.id is None:
                         continue
-                    x1, y1, x2, y2 = [float(c) for c in b.xyxy[0]]
-                    corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
-                    if any(_point_between_guides(cx, cy) for cx, cy in corners):
-                        tracked_persons[int(b.id)] = b
-
-                detected_bibs = [b for b in boxes if int(b.cls) == 1]
+                    
+                    if int(b.cls) == 0: # Person
+                        x1, y1, x2, y2 = [float(c) for c in b.xyxy[0]]
+                        corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
+                        if any(_point_between_guides(cx, cy) for cx, cy in corners):
+                            tracked_persons[int(b.id)] = b
+                    
+                    elif int(b.cls) == 1: # Bib
+                        detected_bibs.append(b)
 
             # --- NEW: Activate cooldown if no racers were found ---
             if tracked_persons:
@@ -1154,6 +1147,71 @@ class VideoInferenceProcessor:
             )
             # On error, don't skip, just return the raw frame and try again
             return frame
+
+    def _process_batch(self, frame_batch: list, start_time: float) -> list:
+        """
+        Processes a batch of frames by running a single YOLO track call on the
+        whole batch and delegating per-frame post-processing to _process_frame.
+        Returns a list of annotated frames in the same order as frame_batch.
+        """
+        annotated_frames = []
+        if not frame_batch:
+            return annotated_frames
+
+        # try:
+        # Build masked frames for the tracker (apply ROI mask per-frame)
+        masked_batch = []
+        for frame in frame_batch:
+            mask = np.zeros(frame.shape, dtype=np.uint8)
+            cv2.fillPoly(mask, [self.roi_points], (255, 255, 255))
+            masked = cv2.bitwise_and(frame, mask)
+            masked_batch.append(masked)
+
+        # Run track on the batch
+        t0 = time.time()
+        results_batch = self.model.track(
+            masked_batch,
+            # persist=True,
+            tracker="config/custom_tracker.yaml",
+            classes=[0, 1],
+            verbose=False,
+        )
+        self.timings["YOLO_Unified_Track"] += time.time() - t0
+
+        # Iterate through frames and corresponding results
+        for frame, results in zip(frame_batch, results_batch):
+            # increment global frame counter
+            self._frame_counter += 1
+            try:
+                annotated = self._process_frame(
+                    frame,
+                    results,
+                    self._frame_counter,
+                    start_time,
+                    self.cap,
+                    self.timings,
+                )
+            except Exception as e:
+                logger.error(f"Error processing frame in batch: {e}")
+                annotated = frame
+            annotated_frames.append(annotated)
+
+        return annotated_frames
+
+        # except Exception as e:
+        #     logger.error(f"Critical error in _process_batch: {e}")
+        #     # Fallback: process frames individually using the old method by passing None results
+        #     fallback = []
+        #     for frame in frame_batch:
+        #         try:
+        #             self._frame_counter += 1
+        #             fallback_frame = self._process_frame(
+        #                 frame, None, self._frame_counter, start_time, self.cap, self.timings
+        #             )
+        #         except Exception:
+        #             fallback_frame = frame
+        #         fallback.append(fallback_frame)
+        #     return fallback
 
     def _print_timing_report(self):
         """

@@ -365,129 +365,147 @@ async def video_feed(request: Request):
             # Set processing start time for timing calculations
             processor.processing_start_time = start_time
 
-            try:
-                logger.info("Starting video frame generation...")
+            # Batching configuration for improved throughput
+            batch_size = 4  # tune to 4 or 8
 
-                # Main video processing loop
-                frame_reader = app_state.get("frame_reader")
-                while True:
-                    try:
-                        # Non-blocking read from FrameReader (keeps only latest frame)
-                        frame = None
-                        if frame_reader is not None:
-                            frame = frame_reader.get_latest_frame()
-                        else:
-                            # Fallback to direct read if FrameReader isn't available
-                            ret, frame = processor.cap.read()
-                            if not ret:
-                                logger.info("End of video reached")
+            # try:
+            logger.info("Starting video frame generation...")
+
+            # Main video processing loop
+            frame_reader = app_state.get("frame_reader")
+            while True:
+                # try:
+                # Non-blocking read from FrameReader (keeps only latest frame)
+                frame = None
+                if frame_reader is not None:
+                    frame = frame_reader.get_latest_frame()
+                else:
+                    # Fallback to direct read if FrameReader isn't available
+                    ret, frame = processor.cap.read()
+                    if not ret:
+                        logger.info("End of video reached")
+                        break
+
+                # If no frame available yet, yield control briefly and continue
+                if frame is None:
+                    # For non-live (file) mode, if the reader has stopped and there are no frames, end stream
+                    if (not processor.is_live_mode) and (
+                        frame_reader is not None and not frame_reader.running
+                    ):
+                        logger.info("End of video reached (frame reader stopped and no frames left)")
+                        break
+
+                    await asyncio.sleep(0.005)
+                    continue
+
+                if frame is None or frame.size == 0:
+                    logger.warning(f"Invalid frame at count {frame_count}")
+                    continue
+
+                # If processor requested a skip cooldown, rapidly drop
+                # frames from the FrameReader (or use cap.grab() as a
+                # fallback) to avoid a visible pause caused by a slow
+                # grab/read loop.
+                if getattr(processor, "frames_to_skip", 0) > 0:
+                    skips = processor.frames_to_skip
+                    logger.info(f"Performing fast drop of {skips} frames to recover from idle period")
+                    # If we have a FrameReader, consume latest frames without blocking
+                    if frame_reader is not None:
+                        while processor.frames_to_skip > 0:
+                            dropped = frame_reader.get_latest_frame()
+                            # decrement counter even if no frame returned to ensure progress
+                            processor.frames_to_skip -= 1
+                        # After dropping, get one fresh frame to process
+                        frame = frame_reader.get_latest_frame()
+                    else:
+                        # Fallback: use cap.grab() which is cheaper than full read
+                        cap = processor.cap
+                        while processor.frames_to_skip > 0 and cap.isOpened():
+                            try:
+                                cap.grab()
+                            except Exception:
                                 break
+                            processor.frames_to_skip -= 1
+                        ret, frame = cap.read()
 
-                        # If no frame available yet, yield control briefly and continue
-                        if frame is None:
-                            # For non-live (file) mode, if the reader has stopped and there are no frames, end stream
-                            if (not processor.is_live_mode) and (
-                                frame_reader is not None and not frame_reader.running
-                            ):
-                                logger.info("End of video reached (frame reader stopped and no frames left)")
-                                break
+                # Append frame to batch for batched inference
+                batch_size = getattr(processor, "batch_size", 4)
+                if batch_size is None:
+                    batch_size = 4
+                # Initialize batch container on processor to preserve between iterations
+                if not hasattr(processor, "_frame_batch"):
+                    processor._frame_batch = []
 
-                            await asyncio.sleep(0.005)
-                            continue
+                processor._frame_batch.append(frame)
 
-                        if frame is None or frame.size == 0:
-                            logger.warning(f"Invalid frame at count {frame_count}")
-                            continue
+                # Wait until batch is full
+                if len(processor._frame_batch) < batch_size:
+                    # Small yield to avoid busy loop
+                    await asyncio.sleep(0.001)
+                    continue
 
-                        # If processor requested a skip cooldown, rapidly drop
-                        # frames from the FrameReader (or use cap.grab() as a
-                        # fallback) to avoid a visible pause caused by a slow
-                        # grab/read loop.
-                        if getattr(processor, "frames_to_skip", 0) > 0:
-                            skips = processor.frames_to_skip
-                            logger.info(f"Performing fast drop of {skips} frames to recover from idle period")
-                            # If we have a FrameReader, consume latest frames without blocking
-                            if frame_reader is not None:
-                                while processor.frames_to_skip > 0:
-                                    dropped = frame_reader.get_latest_frame()
-                                    # decrement counter even if no frame returned to ensure progress
-                                    processor.frames_to_skip -= 1
-                                # After dropping, get one fresh frame to process
-                                frame = frame_reader.get_latest_frame()
-                            else:
-                                # Fallback: use cap.grab() which is cheaper than full read
-                                cap = processor.cap
-                                while processor.frames_to_skip > 0 and cap.isOpened():
-                                    try:
-                                        cap.grab()
-                                    except Exception:
-                                        break
-                                    processor.frames_to_skip -= 1
-                                ret, frame = cap.read()
+                # Process the full batch
+                processed_batch = processor._process_batch(processor._frame_batch, start_time)
 
-                        # Process the frame (normal path)
-                        processed_frame = processor._process_frame(
-                            frame,
-                            frame_count,
-                            start_time,
-                            processor.cap,
-                            processor.timings,
+                # Loop through processed frames and yield them individually
+                for processed_frame in processed_batch:
+                    # Validate processed frame
+                    if processed_frame is None or getattr(processed_frame, "size", 0) == 0:
+                        logger.warning(
+                            f"Invalid processed frame at count {frame_count}"
                         )
+                        continue
 
-                        # Validate processed frame
-                        if processed_frame is None or processed_frame.size == 0:
-                            logger.warning(
-                                f"Invalid processed frame at count {frame_count}"
-                            )
-                            continue
+                    ret, buffer = cv2.imencode(
+                        ".jpg", processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                    )
 
-                        ret, buffer = cv2.imencode(
-                            ".jpg", processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
-                        )
-
-                        if not ret or buffer is None:
-                            logger.warning(f"Failed to encode frame {frame_count}")
-                            error_count += 1
-                            if error_count > max_errors:
-                                logger.error(
-                                    "Too many encoding errors, stopping stream"
-                                )
-                                break
-                            continue
-
-                        frame_bytes = buffer.tobytes()
-
-                        if len(frame_bytes) == 0:
-                            logger.warning(f"Empty frame bytes at count {frame_count}")
-                            continue
-
-                        # Yield the frame in MJPEG format
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-                        )
-
-                        frame_count += 1
-
-                        # Reset error count on successful frame
-                        if error_count > 0:
-                            error_count = 0
-
-                        # Allow the server to handle other tasks
-                        await asyncio.sleep(0.01)  # Small delay to prevent overwhelming
-
-                    except Exception as frame_error:
+                    if not ret or buffer is None:
+                        logger.warning(f"Failed to encode frame {frame_count}")
                         error_count += 1
-                        logger.error(
-                            f"Error processing frame {frame_count}: {frame_error}"
-                        )
-
                         if error_count > max_errors:
                             logger.error(
-                                "Too many frame processing errors, stopping stream"
+                                "Too many encoding errors, stopping stream"
                             )
                             break
                         continue
+
+                    frame_bytes = buffer.tobytes()
+
+                    if len(frame_bytes) == 0:
+                        logger.warning(f"Empty frame bytes at count {frame_count}")
+                        continue
+
+                    # Yield the frame in MJPEG format
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+                    )
+
+                    frame_count += 1
+
+                    # Reset error count on successful frame
+                    if error_count > 0:
+                        error_count = 0
+
+                    # Allow the server to handle other tasks
+                    await asyncio.sleep(0.01)  # Small delay to prevent overwhelming
+
+                # Clear batch for next round
+                processor._frame_batch.clear()
+
+                # except Exception as frame_error:
+                #     error_count += 1
+                #     logger.error(
+                #         f"Error processing frame {frame_count}: {frame_error}"
+                #     )
+
+                #     if error_count > max_errors:
+                #         logger.error(
+                #             "Too many frame processing errors, stopping stream"
+                #         )
+                #         break
+                #     continue
 
                 logger.info(
                     f"Video stream ended. Processed {frame_count} frames with {error_count} errors."
@@ -497,40 +515,40 @@ async def video_feed(request: Request):
                 processor._print_timing_report()
                 processor._generate_final_leaderboard()
 
-            except Exception as generator_error:
-                logger.error(f"Critical error in video generator: {generator_error}")
+            # except Exception as generator_error:
+                # logger.error(f"Critical error in video generator: {generator_error}")
                 # Yield an error frame
-                try:
+                # try:
 
-                    error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(
-                        error_frame,
-                        "Video Processing Error",
-                        (50, 240),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 0, 255),
-                        2,
-                    )
-                    cv2.putText(
-                        error_frame,
-                        str(generator_error)[:50],
-                        (50, 280),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 0, 255),
-                        2,
-                    )
+                #     error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                #     cv2.putText(
+                #         error_frame,
+                #         "Video Processing Error",
+                #         (50, 240),
+                #         cv2.FONT_HERSHEY_SIMPLEX,
+                #         1,
+                #         (0, 0, 255),
+                #         2,
+                #     )
+                #     cv2.putText(
+                #         error_frame,
+                #         str(generator_error)[:50],
+                #         (50, 280),
+                #         cv2.FONT_HERSHEY_SIMPLEX,
+                #         0.7,
+                #         (0, 0, 255),
+                #         2,
+                #     )
 
-                    ret, buffer = cv2.imencode(".jpg", error_frame)
-                    if ret:
-                        frame_bytes = buffer.tobytes()
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-                        )
-                except Exception as error_frame_error:
-                    logger.error(f"Failed to generate error frame: {error_frame_error}")
+                #     ret, buffer = cv2.imencode(".jpg", error_frame)
+                #     if ret:
+                #         frame_bytes = buffer.tobytes()
+                #         yield (
+                #             b"--frame\r\n"
+                #             b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+                #         )
+                # except Exception as error_frame_error:
+                #     logger.error(f"Failed to generate error frame: {error_frame_error}")
 
         return StreamingResponse(
             generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame"
