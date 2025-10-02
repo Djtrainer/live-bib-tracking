@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 PORT=8001
 
 # Default paths (can be overridden with environment variables)
-MODEL_PATH=${MODEL_PATH:-"$(pwd)/models/yolo11_white_bibs/weights/last.pt"}
+MODEL_PATH=${MODEL_PATH:-"$(pwd)/models/yolo11_white_bibs/weights/last.mlpackage"}
 CAMERA_INDEX=${CAMERA_INDEX:-1}
 VIDEO_PATH=""
 
@@ -31,7 +31,7 @@ print_usage() {
     echo ""
     echo -e "${YELLOW}Options:${NC}"
     echo "  -h, --help       Show this help message"
-    echo "  -m, --model      Path to model file (default: ./models/yolo11_white_bibs/weights/last.pt)"
+    echo "  -m, --model      Path to model file (default: ./models/yolo11_white_bibs/weights/last.mlpackage)"
     echo "  -c, --camera     Camera index (default: 1, iPhone; 0 for built-in)"
     echo "  -v, --video      Path to video file for testing (overrides camera)"
     echo "  -p, --port       Port to bind server to (default: 8001)"
@@ -180,11 +180,11 @@ check_dependencies() {
 check_model() {
     echo -e "${YELLOW}🤖 Checking model file...${NC}"
     
-    if [[ ! -f "$MODEL_PATH" ]]; then
-        echo -e "${RED}❌ Model file not found: $MODEL_PATH${NC}"
-        echo -e "${BLUE}💡 Make sure you have trained a model or download a pre-trained one${NC}"
-        exit 1
-    fi
+    # if [[ ! -f "$MODEL_PATH" ]]; then
+    #     echo -e "${RED}❌ Model file not found: $MODEL_PATH${NC}"
+    #     echo -e "${BLUE}💡 Make sure you have trained a model or download a pre-trained one${NC}"
+    #     exit 1
+    # fi
     
     # Check file size
     MODEL_SIZE=$(stat -f%z "$MODEL_PATH" 2>/dev/null || echo "0")

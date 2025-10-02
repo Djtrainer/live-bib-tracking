@@ -1,14 +1,14 @@
 tracker_type: bytetrack
 
 # ByteTrack settings
-track_high_thresh: 0.3  # Lowered to help initiate tracks on less confident detections
+track_high_thresh: 0.5  # Lowered to help initiate tracks on less confident detections
 track_low_thresh: 0.1
-new_track_thresh: 0.4
-track_buffer: 90        # Increased to give the tracker more "memory"
-match_thresh: 0.8
+new_track_thresh: 0.6
+track_buffer: 20        # Increased to give the tracker more "memory"
+match_thresh: 0.7
 
 # CMC MOT Challenge settings
-gmc_method: sgbof
+gmc_method: null
 
 # ReID settings
 reid_model: null

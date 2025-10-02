@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
             # Get configuration from environment variables
             video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
             model_path_str = os.getenv(
-                "MODEL_PATH", "/app/models/yolo11_white_bibs/weights/last.pt"
+                "MODEL_PATH", "/app/models/yolo11_white_bibs/weights/last.mlpackage"
             )
             target_fps = int(os.getenv("TARGET_FPS", "8"))
             confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
@@ -1283,7 +1283,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="/app/models/last.pt",
+        default="/app/models/last.mlpackage",
         help="Path to trained YOLO model",
     )
     parser.add_argument(
@@ -1359,18 +1359,19 @@ def main():
             logger.info("Please check the path and ensure the model file exists.")
             return
 
-        if not model_path.is_file():
-            logger.error(f"Model path is not a file: {args.model}")
-            return
+        # if not model_path.is_file():
+        #     logger.error(f"Model path is not a file: {args.model}")
+        #     return
 
         # Check model file size (basic validation)
-        model_size = model_path.stat().st_size
-
-        if model_size == 0:
-            logger.error(f"Model file is empty: {args.model}")
-            return
-
-        logger.info(f"Model file size: {model_size / (1024 * 1024):.1f} MB")
+        if model_path.is_file():
+            model_size = model_path.stat().st_size
+            if model_size == 0:
+                logger.error(f"Model file is empty: {args.model}")
+                return
+            logger.info(f"Model file size: {model_size / (1024 * 1024):.1f} MB")
+        else:
+            logger.info(f"Model package found at: {args.model}")
 
         # Only validate video file for test mode
         if args.inference_mode == "test":
