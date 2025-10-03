@@ -329,19 +329,17 @@ class VideoInferenceProcessor:
 
         self.roi_points = np.array(
             [
-                (
-                    self.guide_line_left["p2"][0],
-                    self.guide_line_left["p2"][1]*0.9,
-                ),  # Top-left
-                (self.frame_width, self.guide_line_right["p2"][1]*0.9),  # Top-right
-                (self.frame_width, self.frame_height),  # Bottom-right
-                (
-                    self.guide_line_left["p1"][0],
-                    self.guide_line_left["p1"][1],
-                ),  # Bottom-left
+                (self.guide_line_left['p2'][0], self.guide_line_left['p2'][1]*0.8),      # Top-left
+                (self.frame_width, self.guide_line_right['p2'][1]*0.8), # Top-right
+                (self.frame_width, self.frame_height), # Bottom-right
+                (self.guide_line_left['p2'][0],self.frame_height),  
             ],
             dtype=np.int32,
         )
+        self.crop_x1 = self.roi_points[:, 0].min()
+        self.crop_y1 = self.roi_points[:, 1].min()
+        self.crop_x2 = self.roi_points[:, 0].max()
+        self.crop_y2 = self.roi_points[:, 1].max()
 
     def preprocess_for_easyocr(self, image_crop: np.ndarray) -> np.ndarray:
         """
@@ -430,7 +428,7 @@ class VideoInferenceProcessor:
         return image[y1:y2, x1:x2]
 
     def check_finish_line_crossings(
-        self, person_id: int, person_box, cap: cv2.VideoCapture
+        self, person_id: int, person_data: dict, cap: cv2.VideoCapture
     ) -> None:
         """
         Checks if a tracked racer has entered the finish zone.
@@ -440,8 +438,8 @@ class VideoInferenceProcessor:
         if not history or history.get("has_finished", False):
             return
 
-        # Get the four corner points of the bounding box
-        x1, y1, x2, y2 = person_box.xyxy[0]
+        # Get the four corner points of the bounding box from the translated dict
+        x1, y1, x2, y2 = person_data.get("xyxy", (0, 0, 0, 0))
         corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
 
         crossed_line = False
@@ -550,6 +548,13 @@ class VideoInferenceProcessor:
         """
         final_results = {}
         for tracker_id, data in self.track_history.items():
+            # If OCR was locked for this tracker, return that immediately
+            if data.get("ocr_locked") and data.get("final_bib"):
+                final_results[tracker_id] = {
+                    "final_bib": data.get("final_bib"),
+                    "score": data.get("final_bib_confidence", 1.0),
+                }
+                continue
             ocr_reads = data.get("ocr_reads", [])
             if not ocr_reads:
                 continue
@@ -845,105 +850,102 @@ class VideoInferenceProcessor:
                 thickness=3,
             )
 
-            # Draw detection boxes and tracked persons
-            if (
-                results
-                and hasattr(results[0], "boxes")
-                and results[0].boxes is not None
-            ):
-                try:
-                    for box in results[0].boxes:
-                        if not hasattr(box, "cls") or not hasattr(box, "xyxy"):
-                            continue
+            # Draw detection boxes and tracked persons from translated_boxes list
+            try:
+                if results:
+                    for box_data in results:
+                        try:
+                            cls = int(box_data.get("cls", -1))
+                            x1, y1, x2, y2 = [int(c) for c in box_data.get("xyxy", (0, 0, 0, 0))]
 
-                        cls = int(box.cls)
-                        x1, y1, x2, y2 = [int(c) for c in box.xyxy[0]]
+                            # Validate coordinates
+                            if not (
+                                0 <= x1 < x2 <= annotated_image.shape[1]
+                                and 0 <= y1 < y2 <= annotated_image.shape[0]
+                            ):
+                                continue
 
-                        # Validate coordinates
-                        if not (
-                            0 <= x1 < x2 <= annotated_image.shape[1]
-                            and 0 <= y1 < y2 <= annotated_image.shape[0]
-                        ):
-                            continue
-
-                        # Draw bib detection boxes (class 1) in red
-                        if cls == 1:
-                            cv2.rectangle(
-                                annotated_image,
-                                (x1, y1),
-                                (x2, y2),
-                                (0, 0, 255),
-                                2,
-                            )
-
-                        # Draw tracked persons (class 0) in blue with ID and bib info
-                        elif cls == 0 and hasattr(box, "id") and box.id is not None:
-                            person_id = int(box.id[0])
-
-                            current_best_read = ""
-                            try:
-                                if (
-                                    person_id in self.track_history
-                                    and self.track_history[person_id]["ocr_reads"]
-                                ):
-                                    reads = [
-                                        r[0]
-                                        for r in self.track_history[person_id][
-                                            "ocr_reads"
-                                        ]
-                                    ]
-                                    if reads:
-                                        current_best_read = Counter(reads).most_common(
-                                            1
-                                        )[0][0]
-                            except Exception as e:
-                                logger.warning(
-                                    f"Error getting best OCR read for person {person_id}: {e}"
-                                )
-
-                            label_text = (
-                                f"Racer ID {person_id} | Bib: {current_best_read}"
-                            )
-
-                            # Draw rectangle
-                            cv2.rectangle(
-                                annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2
-                            )
-
-                            # Draw text with background for better visibility
-                            try:
-                                text_size = cv2.getTextSize(
-                                    label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
-                                )[0]
-                                text_x = max(0, x1)
-                                text_y = max(text_size[1] + 10, y1 - 10)
-
-                                # Draw text background
+                            # Draw bib detection boxes (class 1) in red
+                            if cls == 1:
                                 cv2.rectangle(
                                     annotated_image,
-                                    (text_x - 5, text_y - text_size[1] - 5),
-                                    (text_x + text_size[0] + 5, text_y + 5),
-                                    (0, 0, 0),
-                                    -1,
-                                )
-
-                                # Draw text
-                                cv2.putText(
-                                    annotated_image,
-                                    label_text,
-                                    (text_x, text_y),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.9,
-                                    (255, 0, 0),
+                                    (x1, y1),
+                                    (x2, y2),
+                                    (0, 0, 255),
                                     2,
                                 )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Error drawing text for person {person_id}: {e}"
+
+                            # Draw tracked persons (class 0) with ID and bib info
+                            elif cls == 0 and box_data.get("id") is not None:
+                                person_id = int(box_data.get("id"))
+
+                                current_best_read = ""
+                                try:
+                                    if (
+                                        person_id in self.track_history
+                                        and self.track_history[person_id]["ocr_reads"]
+                                    ):
+                                        reads = [r[0] for r in self.track_history[person_id]["ocr_reads"]]
+                                        if reads:
+                                            current_best_read = Counter(reads).most_common(1)[0][0]
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Error getting best OCR read for person {person_id}: {e}"
+                                    )
+
+                                # If a final bib was locked for this racer, prefer that label
+                                final_bib = None
+                                final_conf = None
+                                try:
+                                    if person_id in self.track_history:
+                                        final_bib = self.track_history[person_id].get("final_bib")
+                                        final_conf = self.track_history[person_id].get("final_bib_confidence")
+                                except Exception:
+                                    pass
+
+                                displayed_bib = final_bib if final_bib else current_best_read
+                                if final_bib and final_conf is not None:
+                                    label_text = f"Racer ID {person_id} | Bib: {displayed_bib} ({final_conf:.2f})"
+                                else:
+                                    label_text = f"Racer ID {person_id} | Bib: {displayed_bib}"
+
+                                # Draw rectangle
+                                cv2.rectangle(
+                                    annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2
                                 )
 
-                except Exception as e:
-                    logger.error(f"Error processing detection boxes: {e}")
+                                # Draw text with background for better visibility
+                                try:
+                                    text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+                                    text_x = max(0, x1)
+                                    text_y = max(text_size[1] + 10, y1 - 10)
+
+                                    # Draw text background
+                                    cv2.rectangle(
+                                        annotated_image,
+                                        (text_x - 5, text_y - text_size[1] - 5),
+                                        (text_x + text_size[0] + 5, text_y + 5),
+                                        (0, 0, 0),
+                                        -1,
+                                    )
+
+                                    # Draw text
+                                    cv2.putText(
+                                        annotated_image,
+                                        label_text,
+                                        (text_x, text_y),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.9,
+                                        (255, 0, 0),
+                                        2,
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"Error drawing text for person {person_id}: {e}")
+
+                        except Exception as e:
+                            logger.warning(f"Skipping a box in draw_predictions due to error: {e}")
+            except Exception as e:
+                logger.error(f"Error processing detection boxes: {e}")
 
             return annotated_image
 
@@ -986,19 +988,13 @@ class VideoInferenceProcessor:
                 return self.draw_ui_overlays(frame, start_time, cap)
 
         try:
-            # Create a black mask with the same dimensions as the frame
-            mask = np.zeros(frame.shape, dtype=np.uint8)
-
-            # Fill the ROI polygon with white
-            cv2.fillPoly(mask, [self.roi_points], (255, 255, 255))
-
-            # Apply the mask to the frame
-            masked_frame = cv2.bitwise_and(frame, mask)
-
+        
+            cropped_frame = frame[self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
+        
             # --- 1. Perform a single, unified tracking call for all classes ---
             t0 = time.time()
             results = self.model.track(
-                masked_frame,
+                cropped_frame,
                 persist=True,
                 tracker="config/custom_tracker.yaml",
                 classes=[0, 1],  # Track both persons (0) and bibs (1)
@@ -1009,10 +1005,25 @@ class VideoInferenceProcessor:
             # --- 2. Separate objects and check for racers ---
             tracked_persons = {}
             detected_bibs = []
-
+            translated_boxes = []
             if results and results[0].boxes.id is not None:
-                boxes = results[0].boxes
-
+                for box in results[0].boxes:
+                    # Extract coordinates and clone to make them writable
+                    x1, y1, x2, y2 = box.xyxy[0].clone()
+                    
+                    # Translate the coordinates
+                    x1 += self.crop_x1
+                    y1 += self.crop_y1
+                    x2 += self.crop_x1
+                    y2 += self.crop_y1
+                    
+                    # Create our own dictionary with all necessary info
+                    translated_boxes.append({
+                        'xyxy': (x1, y1, x2, y2),
+                        'id': int(box.id.item()),
+                        'conf': float(box.conf.item()),
+                        'cls': int(box.cls.item())
+                    })
                 # Helper: compute interpolated x on a guide line at a given y
                 def _interpolate_x_at_y(line, y_val: float) -> float:
                     x1, y1 = line["p1"]
@@ -1034,18 +1045,17 @@ class VideoInferenceProcessor:
                     right = max(xl, xr)
                     return (px >= left) and (px <= right)
 
-                # Build tracked_persons but only include persons where any
-                # corner of their bbox lies between the two guide lines.
-                tracked_persons = {}
-                for b in boxes:
-                    if int(b.cls) != 0 or b.id is None:
-                        continue
-                    x1, y1, x2, y2 = [float(c) for c in b.xyxy[0]]
-                    corners = [(x1, y1), (x2, y1), (x1, y2), (x2, y2)]
-                    if any(_point_between_guides(cx, cy) for cx, cy in corners):
-                        tracked_persons[int(b.id)] = b
-
-                detected_bibs = [b for b in boxes if int(b.cls) == 1]
+                # Now, loop over our clean, translated data
+                for box_data in translated_boxes:
+                    if box_data['cls'] == 0: # Person
+                        # Check if the person is within the visual guide lines
+                        px1, py1, px2, py2 = box_data['xyxy']
+                        corners = [(px1, py1), (px2, py1), (px1, py2), (px2, py2)]
+                        if any(_point_between_guides(cx, cy) for cx, cy in corners):
+                            tracked_persons[box_data['id']] = box_data
+                    
+                    elif box_data['cls'] == 1: # Bib
+                        detected_bibs.append(box_data)
 
             # --- NEW: Activate cooldown if no racers were found ---
             if tracked_persons:
@@ -1085,7 +1095,8 @@ class VideoInferenceProcessor:
                             "finish_time_ms": None,
                             "finish_wall_time": None,
                             "final_bib": None,
-                            "final_bib_confidence": 0.0,
+                                "final_bib_confidence": 0.0,
+                                "ocr_locked": False,
                             "has_finished": False,
                             "result_sent": False,
                             "post_finish_counter": 0,
@@ -1103,21 +1114,23 @@ class VideoInferenceProcessor:
 
                     self.check_finish_line_crossings(person_id, person_box, cap)
 
-                    if (
+                    # If OCR has been locked (very high confidence) or we already
+                    # have a high-confidence final bib, skip additional OCR work
+                    if history.get("ocr_locked", False) or (
                         history["final_bib_confidence"] > 0.90
                         and history["post_finish_counter"] == 0
                     ):
                         continue
 
-                    px1, py1, px2, py2 = person_box.xyxy[0]
+                    px1, py1, px2, py2 = person_box.get("xyxy", (0, 0, 0, 0))
                     for bib_box in detected_bibs:
-                        bx1, by1, bx2, by2 = bib_box.xyxy[0]
+                        bx1, by1, bx2, by2 = bib_box.get("xyxy", (0, 0, 0, 0))
                         if px1 < (bx1 + bx2) / 2 < px2 and py1 < (by1 + by2) / 2 < py2:
-                            yolo_bib_conf = float(bib_box.conf)
+                            yolo_bib_conf = float(bib_box.get("conf", 0.0))
                             if yolo_bib_conf > 0.70:
                                 t_ocr = time.time()
                                 bib_crop = self.crop_bib_from_prediction(
-                                    frame, bib_box.xyxy[0]
+                                    frame, bib_box.get("xyxy", (0, 0, 0, 0))
                                 )
                                 if bib_crop.size > 0:
                                     bib_number, ocr_conf = (
@@ -1129,15 +1142,25 @@ class VideoInferenceProcessor:
                                         logger.info(
                                             f"OCR Guess for Racer ID {person_id}: '{bib_number}' (Conf: {ocr_conf:.2f})"
                                         )
+                                        # Record the OCR read
                                         history["ocr_reads"].append(
                                             (bib_number, ocr_conf, yolo_bib_conf)
                                         )
+
+                                        # If the OCR is extremely confident, lock this bib to the racer
+                                        if ocr_conf is not None and float(ocr_conf) > 0.99:
+                                            history["final_bib"] = bib_number
+                                            history["final_bib_confidence"] = float(ocr_conf)
+                                            history["ocr_locked"] = True
+                                            logger.info(
+                                                f"Locked OCR bib for Racer ID {person_id}: '{bib_number}' (Conf: {ocr_conf:.3f})"
+                                            )
                                 timings["EasyOCR"] += time.time() - t_ocr
                             break
 
             # --- 4. Draw Predictions and UI Overlays ---
             t_draw = time.time()
-            annotated_frame = self.draw_predictions(frame, results)
+            annotated_frame = self.draw_predictions(frame, translated_boxes)
             annotated_frame = self.draw_ui_overlays(annotated_frame, start_time, cap)
             timings["Drawing"] += time.time() - t_draw
 
