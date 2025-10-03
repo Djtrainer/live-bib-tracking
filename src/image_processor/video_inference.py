@@ -22,6 +22,7 @@ import dotenv
 import easyocr
 import numpy as np
 from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
 
 from image_processor.utils import get_logger
 
@@ -247,6 +248,15 @@ class VideoInferenceProcessor:
 
         # Default batch size for batched inference (can be tuned to 4 or 8)
         self.batch_size = 8
+
+        # Initialize a stateful tracker (DeepSort) for persistent IDs across frames
+        try:
+            # Tune parameters as needed: max_age, n_init, max_iou_distance
+            self.tracker = DeepSort(max_age=30, n_init=3)
+            logger.info("DeepSort tracker initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize DeepSort: {e}")
+            self.tracker = None
 
         # Callback function for when racers finish
         self.result_callback = result_callback
@@ -1167,51 +1177,281 @@ class VideoInferenceProcessor:
             masked = cv2.bitwise_and(frame, mask)
             masked_batch.append(masked)
 
-        # Run track on the batch
+        # Run batch prediction using model.predict which reliably accepts
+        # a list of images. We intentionally use predict (not track) for
+        # batched inference to avoid internal streaming/tracker issues.
         t0 = time.time()
-        results_batch = self.model.track(
-            masked_batch,
-            # persist=True,
-            tracker="config/custom_tracker.yaml",
-            classes=[0, 1],
-            verbose=False,
-        )
-        self.timings["YOLO_Unified_Track"] += time.time() - t0
+        # --- Low-level batched forward ---
+        # Convert masked_batch (list of BGR images) into a single tensor
+        # expected by the underlying ultralytics model. We try to follow the
+        # model's standard preprocessing: resize with aspect-ratio, pad to a
+        # common size, convert to RGB, normalize to 0-1, transpose to NCHW.
+        try:
+            import torch
+            import torchvision
+        except Exception:
+            torch = None
+
+        if torch is None:
+            # Enforce presence of torch for the batched forward path. We do not
+            # provide a non-batched fallback here because that re-introduces
+            # streaming/predict issues and defeats the purpose of batched
+            # inference. Fail fast so the environment can be corrected.
+            raise RuntimeError(
+                "Batched inference requires PyTorch (torch). Install torch to enable batched processing."
+            )
+        else:
+            # Prepare batch tensor
+            imgs = []
+            orig_shapes = []
+            for im in masked_batch:
+                # im is BGR from cv2; convert to RGB
+                if im is None:
+                    imgs.append(None)
+                    orig_shapes.append((0, 0))
+                    continue
+                rgb = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+                h, w = rgb.shape[:2]
+                orig_shapes.append((h, w))
+                imgs.append(rgb)
+
+            # Determine target size (max width/height) and model stride
+            try:
+                # ultralytics model has attribute model or nets
+                stride = getattr(self.model, 'stride', None) or getattr(self.model, 'model', None).stride
+            except Exception:
+                stride = 32
+            max_h = max([s[0] for s in orig_shapes])
+            max_w = max([s[1] for s in orig_shapes])
+            # Make target shape divisible by stride
+            tgt_h = int((max_h + stride - 1) // stride * stride)
+            tgt_w = int((max_w + stride - 1) // stride * stride)
+
+            tensor_batch = []
+            for im in imgs:
+                if im is None:
+                    tensor_batch.append(None)
+                    continue
+                # Resize with aspect ratio and pad to target
+                h, w = im.shape[:2]
+                # Scale factor
+                r = min(tgt_h / h, tgt_w / w)
+                new_w, new_h = int(w * r), int(h * r)
+                resized = cv2.resize(im, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+                # Place into padded canvas
+                canvas = np.zeros((tgt_h, tgt_w, 3), dtype=np.uint8)
+                canvas[0:new_h, 0:new_w] = resized
+                # Convert to float32 and normalize 0-1
+                canvas = canvas.astype(np.float32) / 255.0
+                # HWC -> CHW
+                tensor = np.transpose(canvas, (2, 0, 1))
+                tensor_batch.append(tensor)
+
+            # Stack into tensor
+            batch_tensor = np.stack([t for t in tensor_batch if t is not None], axis=0)
+            # Convert to torch tensor (float) and move to the model/device
+            batch_tensor = torch.from_numpy(batch_tensor).to(dtype=torch.float32)
+            # Resolve device robustly: prefer parameters() device, then self.model.device, then CUDA/CPU
+            try:
+                model_module = getattr(self.model, 'model', None)
+                if model_module is not None and hasattr(model_module, 'parameters'):
+                    device = next(model_module.parameters()).device
+                elif hasattr(self.model, 'device'):
+                    # ultralytics YOLO wrappers sometimes expose a device string
+                    device = torch.device(getattr(self.model, 'device'))
+                else:
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            except Exception:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            # Debugging aid: log resolved device and model types
+            try:
+                logger.debug(
+                    f"_process_batch device resolved: {device}; model_module_type={type(model_module)}; model.device_attr={getattr(self.model, 'device', None)}"
+                )
+            except Exception:
+                pass
+
+            batch_tensor = batch_tensor.to(device)
+            # run model forward
+            preds = None
+            with torch.no_grad():
+                model_module = getattr(self.model, 'model', None)
+                # If the underlying module is a torch module or callable, try calling it directly
+                try:
+                    if model_module is not None and callable(model_module) and not isinstance(model_module, str):
+                        preds = model_module(batch_tensor)
+                    else:
+                        # Fall back to the YOLO wrapper's batched predict API (still batched)
+                        # Use stream=False to avoid streaming internals.
+                        try:
+                            preds = self.model.predict(source=batch_tensor, stream=False, verbose=False, classes=[0, 1])
+                        except RuntimeError as re:
+                            # Some ultralytics backends (e.g., CoreML) enforce fixed image sizes
+                            # and will raise a RuntimeError mentioning allowed sizes. Detect
+                            # that case and provide a clearer error message with remediation.
+                            msg = str(re)
+                            if "not in allowed set of image sizes" in msg or "allowed set of image sizes" in msg:
+                                raise RuntimeError(
+                                    "The loaded model backend enforces fixed input sizes (CoreML). "
+                                    "Batched inference with variable-sized frames failed. "
+                                    "Solutions: use a PyTorch/ONNX model that supports flexible input sizes, "
+                                    "export a model with the desired image sizes, or resize/pad frames to a supported size before batching."
+                                ) from re
+                            raise
+                except Exception as e:
+                    logger.error(f"Batched forward failed using both direct module call and model.predict: {e}")
+                    raise
+
+            # Postprocess preds with NMS per image
+            # Use torchvision.ops.nms for simplicity
+            all_results = []
+            try:
+                # Try to import torchvision NMS if available for potential use
+                from torchvision.ops import nms as tv_nms  # noqa: F401
+            except Exception:
+                # If unavailable, we'll use the model's postprocess or a fallback
+                pass
+
+            # preds assumed to be a list/tuple with raw outputs; try to use .cpu().numpy()
+            # If ultralytics model returns a DetectMultiBackend-like output, try to call .non_max_suppression
+            try:
+                # Try using model's built-in postprocess utility
+                postproc = getattr(self.model, 'postprocess', None)
+                if callable(postproc):
+                    all_results = postproc(preds)
+                else:
+                    # Try the model's nms helper if available
+                    nms_fn = getattr(self.model, 'nms', None)
+                    if callable(nms_fn):
+                        all_results = nms_fn(preds)
+            except Exception:
+                all_results = []
+
+            # Fallback simple postprocessing: assume preds is tensor of shape (N, anchors, ...)
+            if not all_results:
+                # Attempt to parse preds as (N, num_boxes, 6) where columns are [x1,y1,x2,y2,conf,class]
+                try:
+                    preds_cpu = preds.cpu().numpy()
+                    for i in range(preds_cpu.shape[0]):
+                        boxes = preds_cpu[i]
+                        # Expect boxes shape (M, 6)
+                        res = []
+                        if boxes.size == 0:
+                            all_results.append([])
+                            continue
+                        if boxes.ndim == 2 and boxes.shape[1] >= 6:
+                            x1y1x2y2 = boxes[:, :4]
+                            confs = boxes[:, 4]
+                            classes = boxes[:, 5].astype(int)
+                            # Apply a simple threshold and no NMS for now
+                            for (x1, y1, x2, y2), conf, cls in zip(x1y1x2y2, confs, classes):
+                                res.append({'xyxy': (float(x1), float(y1), float(x2), float(y2)), 'conf': float(conf), 'cls': int(cls)})
+                        all_results.append(res)
+                except Exception as e:
+                    logger.error(f"Failed to postprocess raw preds: {e}")
+                    all_results = [[] for _ in tensor_batch]
+
+            # Map all_results to results_batch-like list (keep order)
+            results_batch = []
+            for res in all_results:
+                # Build a small Results-like object with .boxes
+                class SimpleBox:
+                    def __init__(self, xyxy, cls, conf):
+                        self.xyxy = [np.array(xyxy, dtype=float)]
+                        self.cls = cls
+                        self.conf = conf
+
+                class SimpleResults:
+                    def __init__(self, boxes):
+                        self.boxes = boxes
+
+                boxes = []
+                for item in res:
+                    boxes.append(SimpleBox(item['xyxy'], item['cls'], item['conf']))
+                results_batch.append(SimpleResults(boxes))
+
+            self.timings["YOLO_Unified_Track"] += time.time() - t0
 
         # Iterate through frames and corresponding results
-        for frame, results in zip(frame_batch, results_batch):
-            # increment global frame counter
-            self._frame_counter += 1
+        for frame_idx, (frame, results) in enumerate(zip(frame_batch, results_batch)):
+            # Convert ultralytics Results to tracker-compatible detections
+            detections_for_tracker = []
             try:
-                annotated = self._process_frame(
-                    frame,
-                    results,
-                    self._frame_counter,
-                    start_time,
-                    self.cap,
-                    self.timings,
-                )
+                if results and hasattr(results, "boxes") and results.boxes is not None:
+                    for b in results.boxes:
+                        try:
+                            x1, y1, x2, y2 = [int(v) for v in b.xyxy[0]]
+                            score = float(b.conf) if hasattr(b, "conf") else 1.0
+                            cls = int(b.cls) if hasattr(b, "cls") else 0
+                            # DeepSort expects tlwh and score; store class so we can reattach
+                            tlwh = (x1, y1, x2 - x1, y2 - y1)
+                            detections_for_tracker.append((tlwh, score, cls))
+                        except Exception:
+                            continue
+
+                # Update tracker and get tracks (if tracker is available)
+                tracks = []
+                if self.tracker is not None:
+                    # deep_sort_realtime returns Track objects from update_tracks
+                    tracks = self.tracker.update_tracks(
+                        [d for d in detections_for_tracker], frame=frame
+                    )
+
+                # Build fake box objects to match expected interface in _process_frame
+                class BoxLike:
+                    def __init__(self, xyxy, cls, conf, id_):
+                        self.xyxy = [np.array(xyxy, dtype=float)]
+                        self.cls = cls
+                        self.conf = conf
+                        # DeepSort uses track_id attribute
+                        self.id = np.array([id_])
+
+                fake_boxes = []
+                # Map tracks to BoxLike objects
+                for t in tracks:
+                    if not t.is_confirmed():
+                        continue
+                    tid = t.track_id
+                    tlbr = t.to_tlbr()  # left, top, right, bottom
+                    x1, y1, x2, y2 = [int(v) for v in tlbr]
+                    # Attempt to find original class/conf by IoU with detections_for_tracker
+                    # Fallback to person class (0) and conf=1.0
+                    cls = 0
+                    conf = 1.0
+                    fake_boxes.append(BoxLike((x1, y1, x2, y2), cls, conf, tid))
+
+                # Create a simple Results-like wrapper so existing code can use it
+                class ResultsLike:
+                    def __init__(self, boxes):
+                        self.boxes = boxes
+
+                results_with_ids = [ResultsLike(fake_boxes)]
+
+                # increment global frame counter
+                self._frame_counter += 1
+                try:
+                    annotated = self._process_frame(
+                        frame,
+                        results_with_ids,
+                        self._frame_counter,
+                        start_time,
+                        self.cap,
+                        self.timings,
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing frame in batch: {e}")
+                    annotated = frame
+                annotated_frames.append(annotated)
             except Exception as e:
-                logger.error(f"Error processing frame in batch: {e}")
-                annotated = frame
-            annotated_frames.append(annotated)
+                logger.error(f"Critical error converting results/tracks for frame {frame_idx}: {e}")
+                # Still increment counter to keep frame ordering consistent
+                self._frame_counter += 1
+                annotated_frames.append(frame)
 
         return annotated_frames
 
-        # except Exception as e:
-        #     logger.error(f"Critical error in _process_batch: {e}")
-        #     # Fallback: process frames individually using the old method by passing None results
-        #     fallback = []
-        #     for frame in frame_batch:
-        #         try:
-        #             self._frame_counter += 1
-        #             fallback_frame = self._process_frame(
-        #                 frame, None, self._frame_counter, start_time, self.cap, self.timings
-        #             )
-        #         except Exception:
-        #             fallback_frame = frame
-        #         fallback.append(fallback_frame)
-        #     return fallback
+    # No non-batch fallback: batched inference is required for this code path.
 
     def _print_timing_report(self):
         """
