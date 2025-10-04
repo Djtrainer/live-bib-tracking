@@ -28,10 +28,11 @@ from image_processor.utils import get_logger
 logger = get_logger()
 dotenv.load_dotenv()
 
-COOL_DOWN_FRAMES = 0  # Number of frames for processing cooldown
-FRAME_SKIP_FRAMES = 0  # Number of frames to skip when no racers detected
-
-
+COOL_DOWN_FRAMES = 10  # Number of frames for processing cooldown
+FRAME_SKIP_FRAMES = 30  # Number of frames to skip when no racers detected
+# Define the scaling factor to halve the pixel count (sqrt(0.5))
+SCALE_FACTOR = 0.5
+CROP_SCALE_FACTOR = 0.9  # Scale factor for cropping bib regions for OCR
 class FrameReader:
     def __init__(self, cap, max_queue_size=1):
         self.cap = cap
@@ -84,6 +85,7 @@ class VideoInferenceProcessor:
         model_path: str | Path,
         video_path: str | Path | int,
         result_callback=None,
+        testing_mode: bool = False,
         camera_width: int | None = None,
         camera_height: int | None = None,
         leaderboard_csv_path: str | Path | None = None,
@@ -267,6 +269,10 @@ class VideoInferenceProcessor:
         self.last_annotated_frame = None
         self.cool_down_frames = 0
         self.no_racers_frames_counter = 0
+        # Testing mode: when True, allows the same tracked person to be recorded as finished
+        # multiple times. Finish events are appended to `history['finish_events']` for each
+        # crossing; the processor will send each event separately.
+        self.testing_mode = bool(testing_mode)
 
     def _get_finish_line(self):
 
@@ -329,8 +335,8 @@ class VideoInferenceProcessor:
 
         self.roi_points = np.array(
             [
-                (self.guide_line_left['p2'][0], self.guide_line_left['p2'][1]*0.8),      # Top-left
-                (self.frame_width, self.guide_line_right['p2'][1]*0.8), # Top-right
+                (self.guide_line_left['p2'][0], self.guide_line_left['p2'][1]*CROP_SCALE_FACTOR),      # Top-left
+                (self.frame_width, self.guide_line_right['p2'][1]*CROP_SCALE_FACTOR), # Top-right
                 (self.frame_width, self.frame_height), # Bottom-right
                 (self.guide_line_left['p2'][0],self.frame_height),  
             ],
@@ -435,7 +441,11 @@ class VideoInferenceProcessor:
         Records their time and sets a flag the first moment they enter the zone.
         """
         history = self.track_history.get(person_id)
-        if not history or history.get("has_finished", False):
+        if not history:
+            return
+
+        # In normal mode, if the racer has already been marked finished, ignore further crossings.
+        if not self.testing_mode and history.get("has_finished", False):
             return
 
         # Get the four corner points of the bounding box from the translated dict
@@ -453,17 +463,36 @@ class VideoInferenceProcessor:
                 break
 
         if crossed_line:
-            # This is the first instance the box has crossed. Record the finish.
-            history["has_finished"] = True
-            history["finish_time_ms"] = cap.get(cv2.CAP_PROP_POS_MSEC)
-            history["finish_wall_time"] = time.time()
-            history["post_finish_counter"] = 30
+            finish_time_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            finish_wall_time = time.time()
 
             logger.info(
-                f"Racer ID {person_id} CROSSED hardcoded line at {history['finish_time_ms'] / 1000:.2f}s"
+                f"Racer ID {person_id} CROSSED hardcoded line at {finish_time_ms / 1000:.2f}s"
             )
-            # self._handle_finisher(person_id, history)
-            # self.print_live_leaderboard()
+
+            if self.testing_mode:
+                # Append a finish event for testing so we can record multiple passes.
+                events = history.setdefault("finish_events", [])
+                events.append(
+                    {
+                        "finish_time_ms": finish_time_ms,
+                        "finish_wall_time": finish_wall_time,
+                        "sent": False,
+                    }
+                )
+                # Also mark has_finished True to keep backwards compatibility for other logic
+                history["has_finished"] = True
+                # Optionally send the result immediately for testing to simulate finalization
+                try:
+                    self._handle_finisher(person_id, history)
+                except Exception:
+                    logger.exception("Error handling finisher in testing mode")
+            else:
+                # This is the first instance the box has crossed. Record the finish.
+                history["has_finished"] = True
+                history["finish_time_ms"] = finish_time_ms
+                history["finish_wall_time"] = finish_wall_time
+                history["post_finish_counter"] = 30
 
     def _handle_finisher(self, person_id: int, history: dict) -> None:
         """
@@ -472,7 +501,40 @@ class VideoInferenceProcessor:
         if not self.result_callback:
             return
 
-        # Determine the final bib number using the voting system
+        # If testing_mode is enabled, the history may contain multiple finish_events.
+        # Send each unsent event as a separate payload. Use determine_final_bibs() to
+        # get the current best bib for the tracker at send time.
+        if self.testing_mode:
+            events = history.get("finish_events", [])
+            for ev in events:
+                if ev.get("sent"):
+                    continue
+                final_bib_results = self.determine_final_bibs()
+                bib_result = final_bib_results.get(person_id)
+                bib_number = bib_result["final_bib"] if bib_result else f"Unknown-{person_id}"
+
+                payload = {
+                    "bibNumber": bib_number,
+                    "wallClockTime": ev.get("finish_wall_time"),
+                    "racerName": f"Racer {person_id}",
+                }
+
+                try:
+                    logger.info(f"[TEST MODE] Sending finisher data to backend: {payload}")
+                    self.result_callback(payload)
+                    ev["sent"] = True
+                    logger.info(f"[TEST MODE] Successfully sent finisher data for Bib #{bib_number}")
+                except Exception as e:
+                    logger.error(
+                        f"Error calling result callback for Bib #{bib_number}: {e}",
+                        exc_info=True,
+                    )
+            # Keep result_sent flag if any events were sent
+            if any(ev.get("sent") for ev in events):
+                history["result_sent"] = True
+            return
+
+        # Normal mode: send the single recorded finish_time
         final_bib_results = self.determine_final_bibs()
         bib_result = final_bib_results.get(person_id)
 
@@ -481,7 +543,7 @@ class VideoInferenceProcessor:
         # Construct the payload
         payload = {
             "bibNumber": bib_number,
-            "wallClockTime": history["finish_wall_time"],
+            "wallClockTime": history.get("finish_wall_time"),
             "racerName": f"Racer {person_id}",  # Placeholder name
         }
 
@@ -512,11 +574,16 @@ class VideoInferenceProcessor:
             logger.debug(
                 f"Racer ID {person_id}: has_finished={history.get('has_finished')}, result_sent={history.get('result_sent')}, in_tracked={person_id in tracked_person_ids}"
             )
+            # In testing mode, we may have multiple finish_events; consider racer finished
+            # and needing finalization if any finish event exists that hasn't been sent.
+            has_unsent_events = False
+            if self.testing_mode and history.get("finish_events"):
+                has_unsent_events = any(not ev.get("sent") for ev in history.get("finish_events", []))
+
             if (
-                history.get("has_finished")
-                and not history.get("result_sent")
-                and person_id not in tracked_person_ids
-            ):
+                (history.get("has_finished") and not history.get("result_sent"))
+                or has_unsent_events
+            ) and person_id not in tracked_person_ids:
                 finished_but_lost_ids.append(person_id)
                 logger.debug(
                     f"Racer ID {person_id}: Found finished racer who left frame - will finalize"
@@ -592,8 +659,8 @@ class VideoInferenceProcessor:
 
         leaderboard = []
         for tracker_id, history_data in self.track_history.items():
-            # Check if this racer has a recorded finish time
-            if history_data and history_data.get("finish_time_ms") is not None:
+            # Normal mode: use single finish_time_ms
+            if not self.testing_mode and history_data and history_data.get("finish_time_ms") is not None:
                 bib_result = current_bib_results.get(tracker_id)
                 # If the bib number is determined, use it. Otherwise, show "No Bib".
                 bib_number = bib_result["final_bib"] if bib_result else "No Bib"
@@ -623,6 +690,32 @@ class VideoInferenceProcessor:
                         "wall_time": wall_time_str,
                     }
                 )
+
+            # Testing mode: include each finish event as a separate entry
+            if self.testing_mode and history_data and history_data.get("finish_events"):
+                for ev in history_data.get("finish_events", []):
+                    bib_result = current_bib_results.get(tracker_id)
+                    bib_number = bib_result["final_bib"] if bib_result else "No Bib"
+
+                    if (
+                        self.processing_start_time is not None
+                        and ev.get("finish_wall_time") is not None
+                    ):
+                        elapsed_seconds = ev["finish_wall_time"] - self.processing_start_time
+                        minutes = int(elapsed_seconds // 60)
+                        seconds = int(elapsed_seconds % 60)
+                        wall_time_str = f"{minutes:02d}:{seconds:02d}"
+                    else:
+                        wall_time_str = "N/A"
+
+                    leaderboard.append(
+                        {
+                            "id": tracker_id,
+                            "bib": bib_number,
+                            "time_ms": ev.get("finish_time_ms"),
+                            "wall_time": wall_time_str,
+                        }
+                    )
 
         leaderboard.sort(key=lambda x: x["time_ms"])
 
@@ -955,7 +1048,7 @@ class VideoInferenceProcessor:
             return (
                 frame if frame is not None else np.zeros((480, 640, 3), dtype=np.uint8)
             )
-
+    
     def _process_frame(
         self,
         frame: np.ndarray,
@@ -964,66 +1057,70 @@ class VideoInferenceProcessor:
         cap: cv2.VideoCapture,
         timings: defaultdict,
     ) -> np.ndarray:
-        """
-        Processes a single frame with internal frame-skipping logic.
-        If no racers are detected, it will skip processing for the next 10 frames.
-        """
-        # --- 0. Frame Skipping Cooldown Logic ---
+    
+        # --- 0. Frame Skipping Cooldown Logic (No changes needed) ---
         if self.frames_to_skip > 0:
-            # NOTE: The actual dropping/decrementing of frames is handled by the
-            # video generator (local_server.py) which can rapidly consume frames
-            # from the FrameReader. Here we only short-circuit processing and
-            # return the last annotated frame (or decorate the current one) so
-            # the UI remains responsive while skipping occurs.
             logger.debug(f"Skipping frame, {self.frames_to_skip} frames left to skip.")
-            # Return the last successfully annotated frame to prevent a blank or frozen screen
             if self.last_annotated_frame is not None:
-                # We still need to update the UI overlays (like the timer) on the old frame
-                # to make it feel live.
                 return self.draw_ui_overlays(
                     self.last_annotated_frame.copy(), start_time, cap
                 )
             else:
-                # If we skip on the very first run, just return the current raw frame with UI
                 return self.draw_ui_overlays(frame, start_time, cap)
 
         try:
-        
-            cropped_frame = frame[self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
-        
-            # --- 1. Perform a single, unified tracking call for all classes ---
+            # --- 1. CROP original frame and CREATE LOW-RES version ---
+            # Crop the high-resolution ROI from the original frame
+            high_res_crop = frame[self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
+
+            # Get the target dimensions for the low-resolution version
+            low_res_width = int(high_res_crop.shape[1] * SCALE_FACTOR)
+            low_res_height = int(high_res_crop.shape[0] * SCALE_FACTOR)
+
+            # Create the small, low-resolution image for the model
+            low_res_crop = cv2.resize(
+                high_res_crop, (low_res_width, low_res_height), interpolation=cv2.INTER_AREA
+            )
+
+            # --- 2. Run model on the SMALL, LOW-RESOLUTION image ---
             t0 = time.time()
             results = self.model.track(
-                cropped_frame,
-                persist=True,
+                low_res_crop, # <-- Feed the small image to the model
                 tracker="config/custom_tracker.yaml",
-                classes=[0, 1],  # Track both persons (0) and bibs (1)
+                classes=[0,1], # Recommend tracking only persons for speed
                 verbose=False,
             )
-            timings["YOLO_Unified_Track"] += time.time() - t0
-
-            # --- 2. Separate objects and check for racers ---
+            self.timings["YOLO_Unified_Track"] += time.time() - t0
+            
             tracked_persons = {}
             detected_bibs = []
+            # --- 3. EXTRACT and perform TWO-STEP TRANSLATION of coordinates ---
             translated_boxes = []
             if results and results[0].boxes.id is not None:
                 for box in results[0].boxes:
-                    # Extract coordinates and clone to make them writable
+                    # Extract coordinates from the low-res results
                     x1, y1, x2, y2 = box.xyxy[0].clone()
                     
-                    # Translate the coordinates
+                    # STEP A: Scale coordinates UP to match the high-res crop's dimensions
+                    x1 /= SCALE_FACTOR
+                    y1 /= SCALE_FACTOR
+                    x2 /= SCALE_FACTOR
+                    y2 /= SCALE_FACTOR
+                    
+                    # STEP B: Add the crop's top-left offset to match the full frame's dimensions
                     x1 += self.crop_x1
                     y1 += self.crop_y1
                     x2 += self.crop_x1
                     y2 += self.crop_y1
                     
-                    # Create our own dictionary with all necessary info
+                    # Create our own dictionary with fully translated coordinates
                     translated_boxes.append({
                         'xyxy': (x1, y1, x2, y2),
                         'id': int(box.id.item()),
                         'conf': float(box.conf.item()),
                         'cls': int(box.cls.item())
                     })
+            
                 # Helper: compute interpolated x on a guide line at a given y
                 def _interpolate_x_at_y(line, y_val: float) -> float:
                     x1, y1 = line["p1"]
@@ -1064,15 +1161,15 @@ class VideoInferenceProcessor:
             else:
                 # No racers were detected, so increment our counter.
                 self.no_racers_frames_counter += 1
-                logger.debug(
-                    f"No racers detected for {self.no_racers_frames_counter} consecutive frames."
-                )
+                # logger.debug(
+                #     f"No racers detected for {self.no_racers_frames_counter} consecutive frames."
+                # )
 
                 # Check if the counter has reached the cooldown threshold.
                 if self.no_racers_frames_counter >= COOL_DOWN_FRAMES:
-                    logger.info(
-                        f"No racers for {COOL_DOWN_FRAMES} frames. Activating skip for the next {FRAME_SKIP_FRAMES} frames."
-                    )
+                    # logger.info(
+                    #     f"No racers for {COOL_DOWN_FRAMES} frames. Activating skip for the next {FRAME_SKIP_FRAMES} frames."
+                    # )
                     # Activate the skip
                     self.frames_to_skip = FRAME_SKIP_FRAMES
                     # Reset the counter so we don't immediately skip again
@@ -1094,6 +1191,9 @@ class VideoInferenceProcessor:
                             "last_x_center": None,
                             "finish_time_ms": None,
                             "finish_wall_time": None,
+                            # When testing_mode is enabled we may record multiple finish events
+                            # as a list of dicts: {"finish_time_ms": ..., "finish_wall_time": ..., "sent": False}
+                            "finish_events": [],
                             "final_bib": None,
                                 "final_bib_confidence": 0.0,
                                 "ocr_locked": False,
@@ -1215,8 +1315,8 @@ class VideoInferenceProcessor:
 
         leaderboard = []
         for tracker_id, history_data in self.track_history.items():
-            # Check if this racer has a recorded finish time
-            if history_data and history_data.get("finish_time_ms") is not None:
+            # Normal mode: single finish_time
+            if not self.testing_mode and history_data and history_data.get("finish_time_ms") is not None:
                 bib_result = current_bib_results.get(tracker_id)
                 bib_number = bib_result["final_bib"] if bib_result else "No Bib"
 
@@ -1242,6 +1342,32 @@ class VideoInferenceProcessor:
                         "wall_time": wall_time_str,
                     }
                 )
+
+            # Testing mode: include all finish_events as separate entries
+            if self.testing_mode and history_data and history_data.get("finish_events"):
+                for ev in history_data.get("finish_events", []):
+                    bib_result = current_bib_results.get(tracker_id)
+                    bib_number = bib_result["final_bib"] if bib_result else "No Bib"
+
+                    if (
+                        self.processing_start_time is not None
+                        and ev.get("finish_wall_time") is not None
+                    ):
+                        elapsed_seconds = ev["finish_wall_time"] - self.processing_start_time
+                        minutes = int(elapsed_seconds // 60)
+                        seconds = int(elapsed_seconds % 60)
+                        wall_time_str = f"{minutes:02d}:{seconds:02d}"
+                    else:
+                        wall_time_str = "N/A"
+
+                    leaderboard.append(
+                        {
+                            "id": tracker_id,
+                            "bib": bib_number,
+                            "time_ms": ev.get("finish_time_ms"),
+                            "wall_time": wall_time_str,
+                        }
+                    )
 
         leaderboard.sort(key=lambda x: x["time_ms"])
 
@@ -1285,9 +1411,6 @@ class VideoInferenceProcessor:
             )
         except Exception as e:
             logger.error(f"Failed to save final leaderboard CSV: {e}")
-
-    # NOTE: `save_leaderboard_csv` (internal raw CSV writer) intentionally removed.
-    # Use `save_leaderboard_csv_frontend_format` for export that matches the front-end Download CSV.
 
     def save_leaderboard_csv_frontend_format(
         self, results: list, path: Path | str | None = None
