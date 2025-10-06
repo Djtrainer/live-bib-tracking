@@ -85,30 +85,18 @@ const ModernLeaderboard = ({
     originalBodyHeightRef.current = 0;
   };
 
-  const setupAutoScroll = () => {
-    clearAutoScroll();
-    const viewport = scrollViewportRef.current;
-    const tbody = tableBodyRef.current;
-    if (!viewport || !tbody) return;
+  const startScrollInterval = (tbody: HTMLTableSectionElement, origHeight: number) => {
+    // ensure any previous interval is cleared
+    if (scrollIntervalRef.current) {
+      window.clearInterval(scrollIntervalRef.current);
+      scrollIntervalRef.current = null;
+    }
 
-  const originalHeight = Array.from(tbody.children).reduce((acc: number, row) => acc + (row as HTMLElement).offsetHeight, 0);
-    const viewportHeight = viewport.clientHeight;
-    if (originalHeight <= viewportHeight) return; // no autoscroll needed
-
-    originalBodyHeightRef.current = originalHeight;
-
-    // clone original rows to create seamless loop
-    const originalRows = Array.from(tbody.children).map(r => (r as HTMLElement).cloneNode(true) as HTMLElement);
-    originalRows.forEach(r => {
-      r.setAttribute('data-clone', 'true');
-      tbody.appendChild(r);
-    });
-
-    translateYRef.current = 0;
     const speedPxPerSec = 30; // pixels per second, tweakable
     const intervalMs = 16; // ~60fps
     const pxPerInterval = (speedPxPerSec * intervalMs) / 1000;
 
+    // start interval that updates transform based on translateYRef
     scrollIntervalRef.current = window.setInterval(() => {
       translateYRef.current -= pxPerInterval;
       // reset when we've scrolled the height of the original content
@@ -119,14 +107,83 @@ const ModernLeaderboard = ({
     }, intervalMs);
   };
 
+  const setupAutoScroll = () => {
+    // full setup: clear everything then build clones and start scrolling
+    clearAutoScroll();
+    const viewport = scrollViewportRef.current;
+    const tbody = tableBodyRef.current;
+    if (!viewport || !tbody) return;
+
+    // compute height of the rendered (non-cloned) rows
+    const rows = Array.from(tbody.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
+    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
+    const viewportHeight = viewport.clientHeight;
+    if (originalHeight <= viewportHeight) return; // no autoscroll needed
+
+    originalBodyHeightRef.current = originalHeight;
+
+    // clone original rows to create seamless loop
+    rows.forEach(r => {
+      const clone = r.cloneNode(true) as HTMLElement;
+      clone.setAttribute('data-clone', 'true');
+      tbody.appendChild(clone);
+    });
+
+    // start from current translate (fresh setup starts at 0)
+    translateYRef.current = 0;
+    startScrollInterval(tbody, originalHeight);
+  };
+
+  // Called when finishers change but autoscroll is already running.
+  // Refreshes clones and original height without resetting translateY or interval.
+  const refreshAutoScrollPreservePosition = () => {
+    const viewport = scrollViewportRef.current;
+    const tbody = tableBodyRef.current;
+    if (!viewport || !tbody) return;
+
+    // remove any existing clones
+    Array.from(tbody.querySelectorAll('[data-clone="true"]') as NodeListOf<HTMLElement>).forEach(n => n.remove());
+
+    // compute height of the rendered (non-cloned) rows
+    const rows = Array.from(tbody.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
+    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
+    const viewportHeight = viewport.clientHeight;
+    if (originalHeight <= viewportHeight) {
+      // no autoscroll needed anymore
+      clearAutoScroll();
+      return;
+    }
+
+    originalBodyHeightRef.current = originalHeight;
+
+    // append fresh clones
+    rows.forEach(r => {
+      const clone = r.cloneNode(true) as HTMLElement;
+      clone.setAttribute('data-clone', 'true');
+      tbody.appendChild(clone);
+    });
+
+    // ensure interval is running
+    if (!scrollIntervalRef.current) {
+      startScrollInterval(tbody, originalHeight);
+    }
+    // keep translateYRef.current as-is so it doesn't jump
+  };
+
   // Recreate/reset autoscroll whenever finishers change (pause and include new row)
   useEffect(() => {
     // brief delay to allow DOM update
-    clearAutoScroll();
-    const t = setTimeout(() => setupAutoScroll(), 120);
+    const t = setTimeout(() => {
+      // If autoscroll is already running, refresh clones and sizes without
+      // resetting the translate/position. Otherwise do a full setup.
+      if (scrollIntervalRef.current) {
+        refreshAutoScrollPreservePosition();
+      } else {
+        setupAutoScroll();
+      }
+    }, 120);
     return () => {
       clearTimeout(t);
-      clearAutoScroll();
     };
   }, [finishers.length]);
 
