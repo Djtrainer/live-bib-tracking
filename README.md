@@ -184,7 +184,7 @@ Notes:
 
 Default behavior and ports:
 - Binds the backend server to port 8001 by default
-- Uses `models/yolo11_white_bibs/weights/last.pt` as the default model path (relative to repo root)
+- Uses `models/yolo11_white_bibs/weights/last.mlpackage` as the default model path (relative to repo root)
 
 CLI options (copy-paste):
 
