@@ -1,18 +1,16 @@
-# tracker_config.yaml (Prioritizing Accuracy)
 tracker_type: bytetrack
 
 # ByteTrack settings
-track_high_thresh: 0.3  # Lowered to initiate tracks on less confident detections
+track_high_thresh: 0.5  # Lowered to help initiate tracks on less confident detections
 track_low_thresh: 0.1
-new_track_thresh: 0.5   # Slightly lowered to create new tracks more easily
-track_buffer: 120       # GREATLY increased to remember lost racers for 4 seconds
-match_thresh: 0.8       # Kept high to ensure confident re-matching
+new_track_thresh: 0.6
+track_buffer: 20        # Increased to give the tracker more "memory"
+match_thresh: 0.7
 
-# CMC (Camera Motion Compensation) settings
-# Re-enabled to handle camera shake, improving robustness.
-gmc_method: sgbof
+# CMC MOT Challenge settings
+gmc_method: null
 
-# ReID settings (Not used by ByteTrack)
+# ReID settings
 reid_model: null
 reid_verbose: True
-fuse_score: false
+fuse_score: false       # This parameter is required by the library

@@ -85,7 +85,6 @@ class VideoInferenceProcessor:
         model_path: str | Path,
         video_path: str | Path | int,
         result_callback=None,
-        testing_mode: bool = False,
         camera_width: int | None = None,
         camera_height: int | None = None,
         leaderboard_csv_path: str | Path | None = None,
@@ -269,10 +268,7 @@ class VideoInferenceProcessor:
         self.last_annotated_frame = None
         self.cool_down_frames = 0
         self.no_racers_frames_counter = 0
-        # Testing mode: when True, allows the same tracked person to be recorded as finished
-        # multiple times. Finish events are appended to `history['finish_events']` for each
-        # crossing; the processor will send each event separately.
-        self.testing_mode = bool(testing_mode)
+    # no testing_mode field (restored original behavior)
 
     def _get_finish_line(self):
 
@@ -441,11 +437,7 @@ class VideoInferenceProcessor:
         Records their time and sets a flag the first moment they enter the zone.
         """
         history = self.track_history.get(person_id)
-        if not history:
-            return
-
-        # In normal mode, if the racer has already been marked finished, ignore further crossings.
-        if not self.testing_mode and history.get("has_finished", False):
+        if not history or history.get("has_finished", False):
             return
 
         # Get the four corner points of the bounding box from the translated dict
@@ -463,36 +455,15 @@ class VideoInferenceProcessor:
                 break
 
         if crossed_line:
-            finish_time_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-            finish_wall_time = time.time()
+            # This is the first instance the box has crossed. Record the finish.
+            history["has_finished"] = True
+            history["finish_time_ms"] = cap.get(cv2.CAP_PROP_POS_MSEC)
+            history["finish_wall_time"] = time.time()
+            history["post_finish_counter"] = 30
 
             logger.info(
-                f"Racer ID {person_id} CROSSED hardcoded line at {finish_time_ms / 1000:.2f}s"
+                f"Racer ID {person_id} CROSSED hardcoded line at {history['finish_time_ms'] / 1000:.2f}s"
             )
-
-            if self.testing_mode:
-                # Append a finish event for testing so we can record multiple passes.
-                events = history.setdefault("finish_events", [])
-                events.append(
-                    {
-                        "finish_time_ms": finish_time_ms,
-                        "finish_wall_time": finish_wall_time,
-                        "sent": False,
-                    }
-                )
-                # Also mark has_finished True to keep backwards compatibility for other logic
-                history["has_finished"] = True
-                # Optionally send the result immediately for testing to simulate finalization
-                try:
-                    self._handle_finisher(person_id, history)
-                except Exception:
-                    logger.exception("Error handling finisher in testing mode")
-            else:
-                # This is the first instance the box has crossed. Record the finish.
-                history["has_finished"] = True
-                history["finish_time_ms"] = finish_time_ms
-                history["finish_wall_time"] = finish_wall_time
-                history["post_finish_counter"] = 30
 
     def _handle_finisher(self, person_id: int, history: dict) -> None:
         """
@@ -501,40 +472,7 @@ class VideoInferenceProcessor:
         if not self.result_callback:
             return
 
-        # If testing_mode is enabled, the history may contain multiple finish_events.
-        # Send each unsent event as a separate payload. Use determine_final_bibs() to
-        # get the current best bib for the tracker at send time.
-        if self.testing_mode:
-            events = history.get("finish_events", [])
-            for ev in events:
-                if ev.get("sent"):
-                    continue
-                final_bib_results = self.determine_final_bibs()
-                bib_result = final_bib_results.get(person_id)
-                bib_number = bib_result["final_bib"] if bib_result else f"Unknown-{person_id}"
-
-                payload = {
-                    "bibNumber": bib_number,
-                    "wallClockTime": ev.get("finish_wall_time"),
-                    "racerName": f"Racer {person_id}",
-                }
-
-                try:
-                    logger.info(f"[TEST MODE] Sending finisher data to backend: {payload}")
-                    self.result_callback(payload)
-                    ev["sent"] = True
-                    logger.info(f"[TEST MODE] Successfully sent finisher data for Bib #{bib_number}")
-                except Exception as e:
-                    logger.error(
-                        f"Error calling result callback for Bib #{bib_number}: {e}",
-                        exc_info=True,
-                    )
-            # Keep result_sent flag if any events were sent
-            if any(ev.get("sent") for ev in events):
-                history["result_sent"] = True
-            return
-
-        # Normal mode: send the single recorded finish_time
+        # Determine the final bib number using the voting system
         final_bib_results = self.determine_final_bibs()
         bib_result = final_bib_results.get(person_id)
 
@@ -543,7 +481,7 @@ class VideoInferenceProcessor:
         # Construct the payload
         payload = {
             "bibNumber": bib_number,
-            "wallClockTime": history.get("finish_wall_time"),
+            "wallClockTime": history["finish_wall_time"],
             "racerName": f"Racer {person_id}",  # Placeholder name
         }
 
@@ -574,16 +512,11 @@ class VideoInferenceProcessor:
             logger.debug(
                 f"Racer ID {person_id}: has_finished={history.get('has_finished')}, result_sent={history.get('result_sent')}, in_tracked={person_id in tracked_person_ids}"
             )
-            # In testing mode, we may have multiple finish_events; consider racer finished
-            # and needing finalization if any finish event exists that hasn't been sent.
-            has_unsent_events = False
-            if self.testing_mode and history.get("finish_events"):
-                has_unsent_events = any(not ev.get("sent") for ev in history.get("finish_events", []))
-
             if (
-                (history.get("has_finished") and not history.get("result_sent"))
-                or has_unsent_events
-            ) and person_id not in tracked_person_ids:
+                history.get("has_finished")
+                and not history.get("result_sent")
+                and person_id not in tracked_person_ids
+            ):
                 finished_but_lost_ids.append(person_id)
                 logger.debug(
                     f"Racer ID {person_id}: Found finished racer who left frame - will finalize"
@@ -659,8 +592,8 @@ class VideoInferenceProcessor:
 
         leaderboard = []
         for tracker_id, history_data in self.track_history.items():
-            # Normal mode: use single finish_time_ms
-            if not self.testing_mode and history_data and history_data.get("finish_time_ms") is not None:
+            # Check if this racer has a recorded finish time
+            if history_data and history_data.get("finish_time_ms") is not None:
                 bib_result = current_bib_results.get(tracker_id)
                 # If the bib number is determined, use it. Otherwise, show "No Bib".
                 bib_number = bib_result["final_bib"] if bib_result else "No Bib"
@@ -691,31 +624,7 @@ class VideoInferenceProcessor:
                     }
                 )
 
-            # Testing mode: include each finish event as a separate entry
-            if self.testing_mode and history_data and history_data.get("finish_events"):
-                for ev in history_data.get("finish_events", []):
-                    bib_result = current_bib_results.get(tracker_id)
-                    bib_number = bib_result["final_bib"] if bib_result else "No Bib"
-
-                    if (
-                        self.processing_start_time is not None
-                        and ev.get("finish_wall_time") is not None
-                    ):
-                        elapsed_seconds = ev["finish_wall_time"] - self.processing_start_time
-                        minutes = int(elapsed_seconds // 60)
-                        seconds = int(elapsed_seconds % 60)
-                        wall_time_str = f"{minutes:02d}:{seconds:02d}"
-                    else:
-                        wall_time_str = "N/A"
-
-                    leaderboard.append(
-                        {
-                            "id": tracker_id,
-                            "bib": bib_number,
-                            "time_ms": ev.get("finish_time_ms"),
-                            "wall_time": wall_time_str,
-                        }
-                    )
+            # (no testing-mode multiple entries; original single finish entry above)
 
         leaderboard.sort(key=lambda x: x["time_ms"])
 
@@ -1191,9 +1100,6 @@ class VideoInferenceProcessor:
                             "last_x_center": None,
                             "finish_time_ms": None,
                             "finish_wall_time": None,
-                            # When testing_mode is enabled we may record multiple finish events
-                            # as a list of dicts: {"finish_time_ms": ..., "finish_wall_time": ..., "sent": False}
-                            "finish_events": [],
                             "final_bib": None,
                                 "final_bib_confidence": 0.0,
                                 "ocr_locked": False,
@@ -1316,7 +1222,7 @@ class VideoInferenceProcessor:
         leaderboard = []
         for tracker_id, history_data in self.track_history.items():
             # Normal mode: single finish_time
-            if not self.testing_mode and history_data and history_data.get("finish_time_ms") is not None:
+            if history_data and history_data.get("finish_time_ms") is not None:
                 bib_result = current_bib_results.get(tracker_id)
                 bib_number = bib_result["final_bib"] if bib_result else "No Bib"
 
@@ -1343,31 +1249,7 @@ class VideoInferenceProcessor:
                     }
                 )
 
-            # Testing mode: include all finish_events as separate entries
-            if self.testing_mode and history_data and history_data.get("finish_events"):
-                for ev in history_data.get("finish_events", []):
-                    bib_result = current_bib_results.get(tracker_id)
-                    bib_number = bib_result["final_bib"] if bib_result else "No Bib"
-
-                    if (
-                        self.processing_start_time is not None
-                        and ev.get("finish_wall_time") is not None
-                    ):
-                        elapsed_seconds = ev["finish_wall_time"] - self.processing_start_time
-                        minutes = int(elapsed_seconds // 60)
-                        seconds = int(elapsed_seconds % 60)
-                        wall_time_str = f"{minutes:02d}:{seconds:02d}"
-                    else:
-                        wall_time_str = "N/A"
-
-                    leaderboard.append(
-                        {
-                            "id": tracker_id,
-                            "bib": bib_number,
-                            "time_ms": ev.get("finish_time_ms"),
-                            "wall_time": wall_time_str,
-                        }
-                    )
+            # (original single finish entry handled above)
 
         leaderboard.sort(key=lambda x: x["time_ms"])
 
