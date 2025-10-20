@@ -33,8 +33,6 @@ FRAME_SKIP_FRAMES = 30  # Number of frames to skip when no racers detected
 # Define the scaling factor to halve the pixel count (sqrt(0.5))
 SCALE_FACTOR = 0.5
 CROP_SCALE_FACTOR = 0.9  # Scale factor for cropping bib regions for OCR
-
-
 class FrameReader:
     def __init__(self, cap, max_queue_size=1):
         self.cap = cap
