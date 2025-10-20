@@ -998,6 +998,7 @@ class VideoInferenceProcessor:
                 tracker="config/custom_tracker.yaml",
                 classes=[0,1], # Recommend tracking only persons for speed
                 verbose=False,
+                persist=True,
             )
             self.timings["YOLO_Unified_Track"] += time.time() - t0
             
