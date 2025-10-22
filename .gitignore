@@ -11,7 +11,10 @@ __pycache__/
 
 src/dataloader.py
 src/extract_images.py
-notebooks/*
+notebooks/analyze_results.ipynb
+notebooks/extract_images.ipynb
+notebooks/organize_documents.ipynb
+notebooks/yolo_inference.ipynb
 README_video*
 .env
 ec2_instructions.md

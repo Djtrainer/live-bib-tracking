@@ -9,7 +9,7 @@ import time
 import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, AsyncGenerator, Tuple
 
 import cv2
 import dotenv
@@ -39,7 +39,18 @@ app_state = {}
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Lifespan context manager for FastAPI application startup and shutdown.
+
+    Args:
+        app: The FastAPI application instance.
+
+    Yields:
+        None: This is used as an async context manager for FastAPI lifespan.
+
+    Raises:
+        Exception: Any unexpected initialization error will be logged and handled.
+    """
     # Code to run on startup
     logger.info("Application startup: FastAPI server ready")
 
@@ -148,10 +159,28 @@ async def lifespan(app: FastAPI):
 
 
 class ConnectionManager:
-    def __init__(self):
+    def __init__(self) -> None:
+        """Manage active WebSocket connections.
+
+        Initializes the connection list used to track currently connected WebSocket clients.
+
+        Returns:
+            None
+        """
         self.active_connections: List[WebSocket] = []
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket) -> None:
+        """Accept and register a new WebSocket connection.
+
+        Args:
+            websocket: The incoming WebSocket connection to accept and track.
+
+        Returns:
+            None
+
+        Raises:
+            Exception: If accepting the WebSocket or appending to the internal list fails.
+        """
         await websocket.accept()
         self.active_connections.append(websocket)
         print(
@@ -161,7 +190,15 @@ class ConnectionManager:
             f"🔗 WebSocket client connected. Total clients: {len(self.active_connections)}"
         )
 
-    def disconnect(self, websocket: WebSocket):
+    def disconnect(self, websocket: WebSocket) -> None:
+        """Unregister a WebSocket connection.
+
+        Args:
+            websocket: The WebSocket connection to remove from active connections.
+
+        Returns:
+            None
+        """
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
         print(
@@ -171,7 +208,19 @@ class ConnectionManager:
             f"❌ WebSocket client disconnected. Total clients: {len(self.active_connections)}"
         )
 
-    async def broadcast(self, message: str):
+    async def broadcast(self, message: str) -> None:
+        """Broadcast a text message to all active WebSocket clients.
+
+        Args:
+            message: The text message to send to all connected clients.
+
+        Returns:
+            None
+
+        Raises:
+            Exception: Errors encountered while sending to individual clients are logged
+                and the failing connections are removed.
+        """
         print(
             f"📡 BROADCAST DEBUG: Attempting to broadcast to {len(self.active_connections)} clients"
         )
@@ -221,10 +270,22 @@ race_results: List[Dict[str, Any]] = []
 original_roster: Dict[str, Dict[str, Any]] = {}  # Key: bibNumber, Value: racer data
 
 
-def _save_server_leaderboard_snapshot():
-    """Build a leaderboard snapshot from `race_results` and ask the VideoInferenceProcessor to save it as CSV.
+def _save_server_leaderboard_snapshot() -> None:
+    """Build and persist a leaderboard snapshot from the in-memory `race_results`.
 
-    This keeps the local CSV in sync when admins edit results via the API/frontend.
+    This function asks the configured VideoInferenceProcessor to write the leaderboard CSV
+    in the same format used by the frontend. If the processor is not available, the function
+    returns early.
+
+    Args:
+        None
+
+    Returns:
+        None
+
+    Raises:
+        Exception: Any exception that occurs while asking the processor to save the CSV
+            will be logged and suppressed to avoid crashing the server.
     """
     try:
         processor = app_state.get("processor")
@@ -269,7 +330,18 @@ app.add_middleware(
 
 
 def time_string_to_milliseconds(time_str: str) -> float:
-    """Converts a MM:SS.ms string to total milliseconds."""
+    """Converts a MM:SS.ms string to total milliseconds.
+
+    Args:
+        time_str: A string in the format MM:SS.ms (e.g. "01:23.45").
+
+    Returns:
+        The total time in milliseconds as a float. Returns -1.0 if the input format is invalid.
+
+    Raises:
+        ValueError: If the time components cannot be converted to integers. Handled internally
+            and results in -1.0 being returned.
+    """
     try:
         minutes, seconds_ms = time_str.split(":")
         seconds, centiseconds = seconds_ms.split(".")
@@ -286,8 +358,19 @@ def time_string_to_milliseconds(time_str: str) -> float:
 
 
 @app.get("/")
-async def root():
-    """Root endpoint that serves the viewer HTML page."""
+async def root() -> HTMLResponse:
+    """Serve the viewer HTML page at the root URL.
+
+    Args:
+        None
+
+    Returns:
+        HTMLResponse: The rendered HTML content for the viewer page.
+
+    Raises:
+        Exception: Unexpected errors while generating the HTML response will propagate as
+            HTTP errors handled by FastAPI.
+    """
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -345,8 +428,18 @@ async def root():
 
 
 @app.get("/video_feed")
-async def video_feed(request: Request):
-    """Endpoint that streams the processed video as MJPEG."""
+async def video_feed(request: Request) -> Response:
+    """Stream processed video frames as an MJPEG multipart response.
+
+    Args:
+        request: The incoming FastAPI Request object (used to check client disconnects if needed).
+
+    Returns:
+        Response: A StreamingResponse that yields MJPEG frame bytes.
+
+    Raises:
+        HTTPException: If the processor is not initialized or a critical error occurs.
+    """
     try:
         # Get the processor from our state dictionary
         processor = app_state.get("processor")
@@ -356,8 +449,16 @@ async def video_feed(request: Request):
             logger.error(error_msg)
             return Response(error_msg, status_code=500)
 
-        async def generate_frames():
-            """Generator function that yields MJPEG frames asynchronously."""
+        async def generate_frames() -> AsyncGenerator[bytes, None]:
+            """Asynchronous generator yielding MJPEG frame byte chunks.
+
+            Yields:
+                bytes: A single MJPEG frame chunk including multipart boundaries.
+
+            Raises:
+                Exception: Errors during frame processing are logged and may lead to
+                    yielding an error frame or terminating the generator.
+            """
             frame_count = 0
             error_count = 0
             max_errors = 10
@@ -414,7 +515,7 @@ async def video_feed(request: Request):
                             # If we have a FrameReader, consume latest frames without blocking
                             if frame_reader is not None:
                                 while processor.frames_to_skip > 0:
-                                    dropped = frame_reader.get_latest_frame()
+                                    _ = frame_reader.get_latest_frame()
                                     # decrement counter even if no frame returned to ensure progress
                                     processor.frames_to_skip -= 1
                                 # After dropping, get one fresh frame to process
@@ -548,8 +649,12 @@ async def video_feed(request: Request):
 
 
 @app.get("/api/results")
-async def get_results():
-    """Endpoint to get the current list of finishers (only racers who have completed the race)."""
+async def get_results() -> Dict[str, Any]:
+    """Return the current list of finished racers.
+
+    Returns:
+        A dictionary with success flag and data containing a list of finished racers sorted by finishTime.
+    """
     # Filter out racers who haven't finished (finishTime is None or null)
     finished_racers = [
         racer for racer in race_results if racer.get("finishTime") is not None
@@ -562,8 +667,18 @@ async def get_results():
 
 
 @app.post("/api/roster/upload")
-async def upload_roster(file: UploadFile = File(...)):
-    """Endpoint to upload a CSV roster file and merge with existing race data."""
+async def upload_roster(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Upload and merge a roster CSV file into the in-memory race results.
+
+    Args:
+        file: The uploaded CSV file (must be UTF-8 encoded and contain 'bibNumber' and 'racerName' headers).
+
+    Returns:
+        A dictionary containing success status, counts of uploaded/updated racers, any errors, and a message.
+
+    Raises:
+        HTTPException: If the file is not a CSV, is not UTF-8, or required headers are missing.
+    """
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="File must be a CSV file")
 
@@ -631,6 +746,10 @@ async def upload_roster(file: UploadFile = File(...)):
                     if row.get("team"):
                         racer["team"] = str(row["team"]).strip()
 
+                    # Update optional age field if present
+                    if row.get("age"):
+                        racer["age"] = str(row["age"]).strip()
+
                     updated_count += 1
                     logger.info(
                         f"Updated existing racer: Bib #{bib_number} - {racer['racerName']}"
@@ -658,6 +777,9 @@ async def upload_roster(file: UploadFile = File(...)):
 
                     if row.get("team"):
                         racer["team"] = str(row["team"]).strip()
+
+                    if row.get("age"):
+                        racer["age"] = str(row["age"]).strip()
 
                     existing_data[bib_number] = racer
                     uploaded_count += 1
@@ -694,7 +816,15 @@ async def upload_roster(file: UploadFile = File(...)):
         )
 
         # Sort the results to maintain proper order (finished racers first, then by bib number)
-        def sort_key(x):
+        def sort_key(x: Dict[str, Any]) -> Tuple[bool, float, Any]:
+            """Sort key used to order race results after roster upload.
+
+            Args:
+                x: A racer dict from race_results.
+
+            Returns:
+                A tuple used for sorting: (has_finished_flag, finish_time_or_inf, bib_sort_key)
+            """
             # First sort by whether they've finished (finished racers first)
             has_finished = x.get("finishTime") is None
             # Then by finish time (if they've finished)
@@ -749,24 +879,36 @@ async def upload_roster(file: UploadFile = File(...)):
 
 
 @app.post("/api/results")
-async def update_finish_time(finish_data: Dict[str, Any]):
-    """Endpoint to add new finisher - ALWAYS creates a new entry to allow duplicates."""
-    logger.info(f"🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
-    logger.info(f"🔍 DEBUG: Raw finish_data received: {finish_data}")
-    logger.info(f"🔍 DEBUG: Type of finish_data: {type(finish_data)}")
+async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Add a new finisher entry to the in-memory leaderboard.
+
+    This endpoint always creates a new record (unique ID generated) to allow duplicate bib numbers.
+
+    Args:
+        finish_data: A dictionary containing either 'wallClockTime' or 'finishTime' and 'bibNumber',
+            and optionally 'racerName', 'gender', or 'team'.
+
+    Returns:
+        A dict with success flag and the created finisher data on success.
+
+    Raises:
+        HTTPException: For invalid inputs or when the race clock is not running and a wallClockTime is provided.
+    """
+    logger.info("🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
+    logger.info("🔍 DEBUG: Raw finish_data received: %s", finish_data)
+    logger.info("🔍 DEBUG: Type of finish_data: %s", type(finish_data))
     logger.info(
-        f"🔍 DEBUG: Keys in finish_data: {list(finish_data.keys()) if isinstance(finish_data, dict) else 'Not a dict'}"
+        "🔍 DEBUG: Keys in finish_data: %s",
+        list(finish_data.keys()) if isinstance(finish_data, dict) else "Not a dict",
     )
 
     # Validate required fields
     if "bibNumber" not in finish_data:
-        logger.error(f"❌ DEBUG: Missing bibNumber field")
+        logger.error("❌ DEBUG: Missing bibNumber field")
         return {"success": False, "message": "bibNumber is required"}
 
     bib_number = str(finish_data["bibNumber"])
-    logger.info(
-        f"🔍 DEBUG: Extracted bib_number: '{bib_number}' (type: {type(bib_number)})"
-    )
+    logger.info("🔍 DEBUG: Extracted bib_number: '%s' (type: %s)", bib_number, type(bib_number))
 
     # CRITICAL CHANGE: Handle both wall-clock time and legacy finish time formats
     finish_time = None
@@ -774,7 +916,7 @@ async def update_finish_time(finish_data: Dict[str, Any]):
     if "wallClockTime" in finish_data:
         # NEW: Wall-clock time from video processor - calculate official finish time
         wall_clock_time = float(finish_data["wallClockTime"])
-        logger.info(f"🔍 DEBUG: Received wall-clock time: {wall_clock_time}")
+        logger.info("🔍 DEBUG: Received wall-clock time: %s", wall_clock_time)
 
         if (
             race_clock_state["raceStartTime"] is not None
@@ -788,12 +930,13 @@ async def update_finish_time(finish_data: Dict[str, Any]):
             official_finish_time_ms += race_clock_state["offset"]
             finish_time = official_finish_time_ms
             logger.info(
-                f"🔍 DEBUG: Calculated official finish time: {finish_time}ms (race started at {race_clock_state['raceStartTime']}, offset: {race_clock_state['offset']}ms)"
+                "🔍 DEBUG: Calculated official finish time: %sms (race started at %s, offset: %sms)",
+                finish_time,
+                race_clock_state["raceStartTime"],
+                race_clock_state["offset"],
             )
         else:
-            logger.warning(
-                f"⚠️ DEBUG: Race clock not running - cannot calculate official finish time"
-            )
+            logger.warning("⚠️ DEBUG: Race clock not running - cannot calculate official finish time")
             return {
                 "success": False,
                 "message": "Race clock is not running. Please start the race clock first.",
@@ -802,37 +945,34 @@ async def update_finish_time(finish_data: Dict[str, Any]):
     elif "finishTime" in finish_data:
         # LEGACY: Direct finish time (for manual entry or backward compatibility)
         raw_finish_time = finish_data["finishTime"]
-        logger.info(
-            f"🔍 DEBUG: Raw finish_time: {raw_finish_time} (type: {type(raw_finish_time)})"
-        )
+        logger.info("🔍 DEBUG: Raw finish_time: %s (type: %s)", raw_finish_time, type(raw_finish_time))
 
         if isinstance(raw_finish_time, str):
             time_ms = time_string_to_milliseconds(raw_finish_time)
             if time_ms < 0:
-                logger.error(f"❌ DEBUG: Invalid time format: {raw_finish_time}")
+                logger.error("❌ DEBUG: Invalid time format: %s", raw_finish_time)
                 return {
                     "success": False,
                     "message": "Invalid time format. Use MM:SS.ms",
                 }
             finish_time = time_ms
-            logger.info(
-                f"🔍 DEBUG: Converted string time to milliseconds: {finish_time}"
-            )
+            logger.info("🔍 DEBUG: Converted string time to milliseconds: %s", finish_time)
         else:
             finish_time = float(raw_finish_time)
-            logger.info(f"🔍 DEBUG: Finish time is already numeric: {finish_time}")
+            logger.info("🔍 DEBUG: Finish time is already numeric: %s", finish_time)
 
     else:
-        logger.error(f"❌ DEBUG: Missing both wallClockTime and finishTime fields")
+        logger.error("❌ DEBUG: Missing both wallClockTime and finishTime fields")
         return {
             "success": False,
             "message": "Either wallClockTime or finishTime is required",
         }
 
     # Debug: Show current race_results state
-    logger.info(f"🔍 DEBUG: Current race_results count: {len(race_results)}")
+    logger.info("🔍 DEBUG: Current race_results count: %d", len(race_results))
     logger.info(
-        f"🔍 DEBUG: Current race_results bib numbers: {[r.get('bibNumber', 'NO_BIB') for r in race_results]}"
+        "🔍 DEBUG: Current race_results bib numbers: %s",
+        [r.get("bibNumber", "NO_BIB") for r in race_results],
     )
 
     # CRITICAL FIX: Always create a new entry to allow duplicate bib numbers
@@ -892,7 +1032,7 @@ async def update_finish_time(finish_data: Dict[str, Any]):
     # Recalculate ranks for all finished racers
     finished_racers = [r for r in race_results if r.get("finishTime") is not None]
     finished_racers.sort(key=lambda x: x["finishTime"])
-    logger.info(f"🔍 DEBUG: Total finished racers: {len(finished_racers)}")
+    logger.info("🔍 DEBUG: Total finished racers: %d", len(finished_racers))
 
     # Update ranks for all finished racers
     for rank, finished_racer in enumerate(finished_racers, 1):
@@ -902,9 +1042,9 @@ async def update_finish_time(finish_data: Dict[str, Any]):
                 break
 
     # Broadcast the new finisher to all connected WebSocket clients
-    logger.info(f"🔍 DEBUG: About to broadcast new finisher data")
+    logger.info("🔍 DEBUG: About to broadcast new finisher data")
     await manager.broadcast(json.dumps({"type": "add", "data": new_finisher}))
-    logger.info(f"✅ DEBUG: Successfully broadcasted new finisher data")
+    logger.info("✅ DEBUG: Successfully broadcasted new finisher data")
 
     # Persist leaderboard snapshot after adding a new finisher
     try:
@@ -919,8 +1059,19 @@ async def update_finish_time(finish_data: Dict[str, Any]):
 
 
 @app.put("/api/results/{finisher_id}")
-async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
-    """Endpoint to update an existing finisher with immutable roster lookup."""
+async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Update an existing finisher by ID, merging immutable roster data when appropriate.
+
+    Args:
+        finisher_id: The unique ID of the finisher to update.
+        finisher_data: Dictionary of fields to update. 'finishTime' may be a string (MM:SS.ms) or numeric.
+
+    Returns:
+        A dict with success flag and the updated finisher data on success.
+
+    Raises:
+        HTTPException: Not raised directly here, but invalid time formats return a failure response.
+    """
     logger.info(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
     logger.info(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
     logger.info(
@@ -971,14 +1122,17 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                     new_bib
                 ].copy()  # Make a copy to avoid mutation
                 logger.info(
-                    f"✅ DEBUG: Bib changed - Found in original_roster for bib #{new_bib}: {roster_racer}"
+                    "✅ DEBUG: Bib changed - Found in original_roster for bib #%s: %s",
+                    new_bib,
+                    roster_racer,
                 )
             elif bib_changed:
                 logger.info(
-                    f"🔍 DEBUG: Bib changed but #{new_bib} not found in original_roster"
+                    "🔍 DEBUG: Bib changed but #%s not found in original_roster",
+                    new_bib,
                 )
             else:
-                logger.info(f"🔍 DEBUG: Bib not changed - skipping roster lookup")
+                logger.info("🔍 DEBUG: Bib not changed - skipping roster lookup")
 
             if roster_racer and bib_changed:
                 # Create new finisher object by merging roster data with existing finish data
@@ -1083,14 +1237,21 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
 
 
 @app.delete("/api/results/{finisher_id}")
-async def delete_finisher(finisher_id: str):
-    """Endpoint to delete a finisher."""
+async def delete_finisher(finisher_id: str) -> Dict[str, Any]:
+    """Delete a finisher by its unique ID.
+
+    Args:
+        finisher_id: Unique ID of the finisher to remove.
+
+    Returns:
+        A dict indicating success or failure and a message.
+    """
     print(f"Deleting finisher {finisher_id}")
 
     # Find and remove the finisher by ID
     for i, finisher in enumerate(race_results):
         if finisher["id"] == finisher_id:
-            deleted_finisher = race_results.pop(i)
+            _ = race_results.pop(i)
 
             # Broadcast reload message to all connected WebSocket clients
             await manager.broadcast(json.dumps({"action": "reload"}))
@@ -1107,8 +1268,15 @@ async def delete_finisher(finisher_id: str):
 
 
 @app.post("/api/reorder")
-async def reorder_finishers(order_data: Dict[str, Any]):
-    """Endpoint to reorder finishers manually."""
+async def reorder_finishers(order_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Reorder finishers using client-provided order information.
+
+    Args:
+        order_data: A dictionary that must contain an 'order' list of objects with 'id' and 'rank'.
+
+    Returns:
+        A dict indicating success and a message.
+    """
     print(f"Reordering finishers: {order_data}")
 
     new_order = order_data.get("order", [])
@@ -1140,14 +1308,22 @@ async def reorder_finishers(order_data: Dict[str, Any]):
 
 
 @app.get("/api/clock/status")
-async def get_clock_status():
-    """Get the current race clock status."""
+async def get_clock_status() -> Dict[str, Any]:
+    """Return the current race clock status.
+
+    Returns:
+        A dict with success flag and the race clock state data.
+    """
     return {"success": True, "data": race_clock_state}
 
 
 @app.post("/api/clock/start")
-async def start_race_clock():
-    """Start the race clock."""
+async def start_race_clock() -> Dict[str, Any]:
+    """Start the official race clock and broadcast the update.
+
+    Returns:
+        A dict containing the updated race clock state.
+    """
     global race_clock_state
 
     current_time = time.time()
@@ -1165,8 +1341,12 @@ async def start_race_clock():
 
 
 @app.post("/api/clock/stop")
-async def stop_race_clock():
-    """Stop the race clock."""
+async def stop_race_clock() -> Dict[str, Any]:
+    """Stop the official race clock and broadcast the update.
+
+    Returns:
+        A dict containing the updated race clock state.
+    """
     global race_clock_state
 
     race_clock_state["status"] = "stopped"
@@ -1182,8 +1362,15 @@ async def stop_race_clock():
 
 
 @app.post("/api/clock/edit")
-async def edit_race_clock(edit_data: Dict[str, Any]):
-    """Edit the race clock time."""
+async def edit_race_clock(edit_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Edit the race clock to a specific time (MM:SS.ms or numeric milliseconds).
+
+    Args:
+        edit_data: Dict with a 'time' key containing either a time string or numeric milliseconds.
+
+    Returns:
+        A dict with success flag and the updated race clock state.
+    """
     global race_clock_state
 
     if "time" not in edit_data:
@@ -1221,8 +1408,12 @@ async def edit_race_clock(edit_data: Dict[str, Any]):
 
 
 @app.post("/api/clock/reset")
-async def reset_race_clock():
-    """Reset the race clock."""
+async def reset_race_clock() -> Dict[str, Any]:
+    """Reset the race clock to its initial stopped state and broadcast the update.
+
+    Returns:
+        A dict with success flag and the reset race clock state.
+    """
     global race_clock_state
 
     race_clock_state = {
@@ -1242,8 +1433,18 @@ async def reset_race_clock():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for live leaderboard and admin sync."""
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    """Handle incoming WebSocket connections for real-time updates.
+
+    Args:
+        websocket: The WebSocket connection for this client.
+
+    Returns:
+        None
+
+    Raises:
+        WebSocketDisconnect: When the client disconnects.
+    """
     await manager.connect(websocket)
     print(
         f"WebSocket client connected. Total clients: {len(manager.active_connections)}"
@@ -1280,8 +1481,19 @@ else:
     logger.info("The server will still provide API endpoints and video streaming")
 
 
-def main():
-    """Main function that initializes the processor and starts the FastAPI server."""
+def main() -> None:
+    """Initialize the VideoInferenceProcessor and start the FastAPI/uvicorn server.
+
+    This function parses CLI arguments, validates inputs, initializes the video processor,
+    and starts the server. It is intended to be invoked when running the module directly.
+
+    Returns:
+        None
+
+    Raises:
+        SystemExit: When argparse fails to parse CLI arguments.
+        Exception: Initialization errors are logged and cause an early return.
+    """
     parser = argparse.ArgumentParser(description="Live Bib Tracking - Unified Server")
     parser.add_argument(
         "--video",
@@ -1423,46 +1635,60 @@ def main():
         logger.info(f"Confidence threshold: {args.conf}")
 
         # Define callback function to handle race results
-        def result_callback(finisher_data):
-            """Callback function called when a racer finishes - calls the API endpoint directly"""
+        def result_callback(finisher_data: Dict[str, Any]) -> None:
+            """Callback invoked by the VideoInferenceProcessor when a racer finishes.
+
+            This schedules a call to the internal API endpoint to create the finisher record.
+
+            Args:
+                finisher_data: A dictionary containing finisher information as produced by the processor.
+
+            Returns:
+                None
+
+            Raises:
+                Exception: Any unexpected error during callback processing will be logged.
+            """
             try:
-                logger.info(f"🔍 DEBUG: === CALLBACK FUNCTION CALLED ===")
-                logger.info(
-                    f"🔍 DEBUG: Callback received finisher_data: {finisher_data}"
-                )
+                logger.info("🔍 DEBUG: === CALLBACK FUNCTION CALLED ===")
+                logger.info("🔍 DEBUG: Callback received finisher_data: %s", finisher_data)
 
                 # CRITICAL FIX: Call the actual API endpoint instead of manipulating data directly
                 # This ensures the proper WebSocket broadcast happens through the endpoint
 
-                async def call_api_endpoint():
-                    """Call the POST /api/results endpoint with the finisher data"""
+                async def call_api_endpoint() -> None:
+                    """Asynchronously call the POST /api/results endpoint handler.
+
+                    Returns:
+                        None
+
+                    Raises:
+                        Exception: Errors from the API endpoint call are logged.
+                    """
                     try:
-                        logger.info(
-                            f"🔍 DEBUG: CALLBACK - Calling POST /api/results endpoint"
-                        )
+                        logger.info("🔍 DEBUG: CALLBACK - Calling POST /api/results endpoint")
 
                         # Call the endpoint function directly (since we're in the same process)
                         result = await update_finish_time(finisher_data)
 
-                        logger.info(
-                            f"✅ DEBUG: CALLBACK - API endpoint returned: {result}"
-                        )
+                        logger.info("✅ DEBUG: CALLBACK - API endpoint returned: %s", result)
 
                         if result.get("success"):
                             logger.info(
-                                f"✅ DEBUG: CALLBACK - Successfully processed finisher via API endpoint"
+                                "✅ DEBUG: CALLBACK - Successfully processed finisher via API endpoint"
                             )
                         else:
                             logger.error(
-                                f"❌ DEBUG: CALLBACK - API endpoint failed: {result.get('message', 'Unknown error')}"
+                                "❌ DEBUG: CALLBACK - API endpoint failed: %s",
+                                result.get("message", "Unknown error"),
                             )
 
                     except Exception as api_error:
+                        logger.error("❌ DEBUG: CALLBACK - Error calling API endpoint: %s", api_error)
                         logger.error(
-                            f"❌ DEBUG: CALLBACK - Error calling API endpoint: {api_error}"
-                        )
-                        logger.error(
-                            f"❌ DEBUG: CALLBACK - API error details: {type(api_error).__name__}: {str(api_error)}"
+                            "❌ DEBUG: CALLBACK - API error details: %s: %s",
+                            type(api_error).__name__,
+                            str(api_error),
                         )
 
                 # Schedule the API call in the event loop
@@ -1470,12 +1696,9 @@ def main():
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         # Schedule the API call to run in the event loop
-                        future = asyncio.run_coroutine_threadsafe(
-                            call_api_endpoint(), loop
-                        )
-                        logger.info(
-                            f"✅ DEBUG: CALLBACK - Scheduled API call in event loop"
-                        )
+                        # Schedule the API call to run in the event loop
+                        asyncio.run_coroutine_threadsafe(call_api_endpoint(), loop)
+                        logger.info("✅ DEBUG: CALLBACK - Scheduled API call in event loop")
                     else:
                         logger.warning(
                             "Event loop is not running - cannot schedule API call"
@@ -1484,23 +1707,19 @@ def main():
                     logger.warning(f"No event loop available for API call: {e}")
                     # Fallback: Try to run the API call synchronously (not ideal but better than nothing)
                     try:
-                        logger.info(
-                            f"🔍 DEBUG: CALLBACK - Attempting synchronous fallback"
-                        )
+                        logger.info("🔍 DEBUG: CALLBACK - Attempting synchronous fallback")
                         # Create a new event loop for this thread
                         new_loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(new_loop)
                         new_loop.run_until_complete(call_api_endpoint())
                         new_loop.close()
-                        logger.info(
-                            f"✅ DEBUG: CALLBACK - Synchronous fallback completed"
-                        )
+                        logger.info("✅ DEBUG: CALLBACK - Synchronous fallback completed")
                     except Exception as fallback_error:
                         logger.error(
                             f"❌ DEBUG: CALLBACK - Synchronous fallback failed: {fallback_error}"
                         )
 
-                logger.info(f"✅ DEBUG: CALLBACK - Callback processing completed")
+                logger.info("✅ DEBUG: CALLBACK - Callback processing completed")
 
             except Exception as e:
                 logger.error(f"❌ DEBUG: CALLBACK - Error in result callback: {e}")

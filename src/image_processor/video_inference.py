@@ -16,6 +16,7 @@ import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+import statistics
 
 import cv2
 import dotenv
@@ -1376,38 +1377,141 @@ class VideoInferenceProcessor:
 
         with csv_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(
-                ["Rank", "Bib Number", "Racer Name", "Finish Time", "Gender", "Team"]
-            )
+            # New required columns
+            writer.writerow([
+                "Place",
+                "Bib",
+                "Name",
+                "First name",
+                "Last name",
+                "Age",
+                "Gender",
+                "Time",
+                "Difference",
+                "% Back",
+                "% Winning",
+                "% Average",
+                "% Median",
+                "team",
+            ])
 
             # Sort results by finishTime if present
             try:
                 sorted_results = sorted(
-                    results,
+                    [dict(r) for r in results],
                     key=lambda r: (
                         r.get("finishTime") is None,
-                        r.get("finishTime") or float("inf"),
+                        r.get("finishTime") or r.get("time_ms") or float("inf"),
                     ),
                 )
             except Exception:
-                sorted_results = list(results)
+                sorted_results = [dict(r) for r in results]
 
-            for idx, r in enumerate(sorted_results, start=1):
+            # Extract finish times in ms for finished racers (None or missing -> inf)
+            finish_times = []
+            for r in sorted_results:
+                ft = r.get("finishTime") if "finishTime" in r else r.get("time_ms")
+                try:
+                    ft_val = float(ft) if ft is not None and ft != "" else None
+                except Exception:
+                    ft_val = None
+                finish_times.append(ft_val)
+
+            # Identify winner time (smallest non-None finish time)
+            valid_times = [t for t in finish_times if t is not None]
+            winner_time = min(valid_times) if valid_times else None
+
+            # Compute % winning for each racer to be used for average/median calculations
+            percent_winning_list = []
+            for t in finish_times:
+                if t is None or winner_time is None or t == 0:
+                    percent_winning_list.append(None)
+                else:
+                    percent_winning_list.append(winner_time / t)
+
+            # compute mean and median of percent_winning ignoring None
+            pw_vals = [v for v in percent_winning_list if v is not None]
+            mean_pw = float(sum(pw_vals) / len(pw_vals)) if pw_vals else None
+            try:
+                median_pw = float(statistics.median(pw_vals)) if pw_vals else None
+            except Exception:
+                median_pw = None
+
+            for idx, (r, ft, pw) in enumerate(
+                zip(sorted_results, finish_times, percent_winning_list), start=1
+            ):
                 bib = r.get("bibNumber") or r.get("bib") or ""
                 name = r.get("racerName") or r.get("racer_name") or ""
-                finish_time_ms = (
-                    r.get("finishTime") if "finishTime" in r else r.get("time_ms")
-                )
-                gender = r.get("gender") or ""
                 team = r.get("team") or ""
+                gender = r.get("gender") or ""
+                age = r.get("age") or ""
+
+                # Split first/last name by first space; leave last empty if not present
+                first_name = ""
+                last_name = ""
+                if isinstance(name, str) and name.strip():
+                    parts = name.strip().split()
+                    first_name = parts[0]
+                    last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+                # Time formatting
+                time_display = format_time_ms(ft)
+
+                # Difference to winner
+                if ft is None or winner_time is None:
+                    diff_ms = None
+                else:
+                    diff_ms = float(ft) - float(winner_time)
+
+                diff_display = format_time_ms(diff_ms) if diff_ms is not None else ""
+
+                # % Back = difference / time
+                pct_back = ""
+                if diff_ms is not None and ft and float(ft) != 0:
+                    try:
+                        pct_back = diff_ms / float(ft)
+                    except Exception:
+                        pct_back = ""
+
+                # % Winning = winner_time / racer_time
+                pct_winning = ""
+                if pw is not None:
+                    pct_winning = pw
+
+                # % Average = % Winning - mean(%Winning)
+                pct_average = ""
+                if isinstance(pct_winning, float) and mean_pw is not None:
+                    pct_average = pct_winning - mean_pw
+
+                # % Median = % Winning - median(%Winning)
+                pct_median = ""
+                if isinstance(pct_winning, float) and median_pw is not None:
+                    pct_median = pct_winning - median_pw
+
+                # Helper to format percentage values as decimal (e.g., 0.98) or blank
+                def fmt_pct(v):
+                    if v is None or v == "":
+                        return ""
+                    try:
+                        return f"{float(v):.6f}"
+                    except Exception:
+                        return ""
 
                 writer.writerow(
                     [
                         idx,
                         bib,
                         name,
-                        format_time_ms(finish_time_ms),
+                        first_name,
+                        last_name,
+                        age,
                         gender,
+                        time_display,
+                        diff_display,
+                        fmt_pct(pct_back),
+                        fmt_pct(pct_winning),
+                        fmt_pct(pct_average),
+                        fmt_pct(pct_median),
                         team,
                     ]
                 )
