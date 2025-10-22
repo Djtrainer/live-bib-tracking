@@ -104,8 +104,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"Target FPS: {target_fps}, Confidence: {confidence_threshold}")
 
             processor = VideoInferenceProcessor(
-                model_path=model_path_str,
-                video_path=video_source
+                model_path=model_path_str, video_path=video_source
             )
             app_state["processor"] = processor
 
@@ -241,7 +240,9 @@ def _save_server_leaderboard_snapshot():
             processor.save_leaderboard_csv_frontend_format(finished)
         except Exception:
             # Fallback: write an empty file using the generic saver
-            processor.save_leaderboard_csv_frontend_format([], path=processor.leaderboard_csv_path)
+            processor.save_leaderboard_csv_frontend_format(
+                [], path=processor.leaderboard_csv_path
+            )
     except Exception as e:
         logger.warning(f"Failed to save server leaderboard snapshot: {e}")
 
@@ -389,7 +390,9 @@ async def video_feed(request: Request):
                             if (not processor.is_live_mode) and (
                                 frame_reader is not None and not frame_reader.running
                             ):
-                                logger.info("End of video reached (frame reader stopped and no frames left)")
+                                logger.info(
+                                    "End of video reached (frame reader stopped and no frames left)"
+                                )
                                 break
 
                             await asyncio.sleep(0.005)
@@ -405,7 +408,9 @@ async def video_feed(request: Request):
                         # grab/read loop.
                         if getattr(processor, "frames_to_skip", 0) > 0:
                             skips = processor.frames_to_skip
-                            logger.info(f"Performing fast drop of {skips} frames to recover from idle period")
+                            logger.info(
+                                f"Performing fast drop of {skips} frames to recover from idle period"
+                            )
                             # If we have a FrameReader, consume latest frames without blocking
                             if frame_reader is not None:
                                 while processor.frames_to_skip > 0:
@@ -1031,7 +1036,9 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                 try:
                     _save_server_leaderboard_snapshot()
                 except Exception as e:
-                    logger.warning(f"Failed to save leaderboard after finisher update: {e}")
+                    logger.warning(
+                        f"Failed to save leaderboard after finisher update: {e}"
+                    )
 
                 return {"success": True, "data": merged_data}
             else:
@@ -1066,7 +1073,9 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]):
                 try:
                     _save_server_leaderboard_snapshot()
                 except Exception as e:
-                    logger.warning(f"Failed to save leaderboard after finisher update: {e}")
+                    logger.warning(
+                        f"Failed to save leaderboard after finisher update: {e}"
+                    )
 
                 return {"success": True, "data": updated_data}
 
@@ -1424,7 +1433,6 @@ def main():
 
                 # CRITICAL FIX: Call the actual API endpoint instead of manipulating data directly
                 # This ensures the proper WebSocket broadcast happens through the endpoint
-
 
                 async def call_api_endpoint():
                     """Call the POST /api/results endpoint with the finisher data"""

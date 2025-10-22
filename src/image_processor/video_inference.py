@@ -33,6 +33,8 @@ FRAME_SKIP_FRAMES = 30  # Number of frames to skip when no racers detected
 # Define the scaling factor to halve the pixel count (sqrt(0.5))
 SCALE_FACTOR = 0.5
 CROP_SCALE_FACTOR = 0.9  # Scale factor for cropping bib regions for OCR
+
+
 class FrameReader:
     def __init__(self, cap, max_queue_size=1):
         self.cap = cap
@@ -78,7 +80,8 @@ class FrameReader:
 class VideoInferenceProcessor:
     """Processes race video footage to track racers, extract bib numbers using OCR, and determine finish times.
     This class uses YOLO models for object detection and tracking, and EasyOCR for reading bib numbers.
-    It maintains a history of tracked racers, detects when they cross a virtual finish line, and produces live and final leaderboards."""
+    It maintains a history of tracked racers, detects when they cross a virtual finish line, and produces live and final leaderboards.
+    """
 
     def __init__(
         self,
@@ -268,13 +271,14 @@ class VideoInferenceProcessor:
         self.last_annotated_frame = None
         self.cool_down_frames = 0
         self.no_racers_frames_counter = 0
+
     # no testing_mode field (restored original behavior)
 
     def _get_finish_line(self):
 
         base_thickness = max(1, int(self.frame_width / 640))
         finish_line_thickness = max(2, int(self.frame_width / 240))
-        
+
         self.guide_line_left = {
             "p1": (
                 self.frame_width * 0.31,
@@ -331,10 +335,16 @@ class VideoInferenceProcessor:
 
         self.roi_points = np.array(
             [
-                (self.guide_line_left['p2'][0], self.guide_line_left['p2'][1]*CROP_SCALE_FACTOR),      # Top-left
-                (self.frame_width, self.guide_line_right['p2'][1]*CROP_SCALE_FACTOR), # Top-right
-                (self.frame_width, self.frame_height), # Bottom-right
-                (self.guide_line_left['p2'][0],self.frame_height),  
+                (
+                    self.guide_line_left["p2"][0],
+                    self.guide_line_left["p2"][1] * CROP_SCALE_FACTOR,
+                ),  # Top-left
+                (
+                    self.frame_width,
+                    self.guide_line_right["p2"][1] * CROP_SCALE_FACTOR,
+                ),  # Top-right
+                (self.frame_width, self.frame_height),  # Bottom-right
+                (self.guide_line_left["p2"][0], self.frame_height),
             ],
             dtype=np.int32,
         )
@@ -858,7 +868,9 @@ class VideoInferenceProcessor:
                     for box_data in results:
                         try:
                             cls = int(box_data.get("cls", -1))
-                            x1, y1, x2, y2 = [int(c) for c in box_data.get("xyxy", (0, 0, 0, 0))]
+                            x1, y1, x2, y2 = [
+                                int(c) for c in box_data.get("xyxy", (0, 0, 0, 0))
+                            ]
 
                             # Validate coordinates
                             if not (
@@ -887,9 +899,16 @@ class VideoInferenceProcessor:
                                         person_id in self.track_history
                                         and self.track_history[person_id]["ocr_reads"]
                                     ):
-                                        reads = [r[0] for r in self.track_history[person_id]["ocr_reads"]]
+                                        reads = [
+                                            r[0]
+                                            for r in self.track_history[person_id][
+                                                "ocr_reads"
+                                            ]
+                                        ]
                                         if reads:
-                                            current_best_read = Counter(reads).most_common(1)[0][0]
+                                            current_best_read = Counter(
+                                                reads
+                                            ).most_common(1)[0][0]
                                 except Exception as e:
                                     logger.warning(
                                         f"Error getting best OCR read for person {person_id}: {e}"
@@ -900,16 +919,24 @@ class VideoInferenceProcessor:
                                 final_conf = None
                                 try:
                                     if person_id in self.track_history:
-                                        final_bib = self.track_history[person_id].get("final_bib")
-                                        final_conf = self.track_history[person_id].get("final_bib_confidence")
+                                        final_bib = self.track_history[person_id].get(
+                                            "final_bib"
+                                        )
+                                        final_conf = self.track_history[person_id].get(
+                                            "final_bib_confidence"
+                                        )
                                 except Exception:
                                     pass
 
-                                displayed_bib = final_bib if final_bib else current_best_read
+                                displayed_bib = (
+                                    final_bib if final_bib else current_best_read
+                                )
                                 if final_bib and final_conf is not None:
                                     label_text = f"Racer ID {person_id} | Bib: {displayed_bib} ({final_conf:.2f})"
                                 else:
-                                    label_text = f"Racer ID {person_id} | Bib: {displayed_bib}"
+                                    label_text = (
+                                        f"Racer ID {person_id} | Bib: {displayed_bib}"
+                                    )
 
                                 # Draw rectangle
                                 cv2.rectangle(
@@ -918,7 +945,9 @@ class VideoInferenceProcessor:
 
                                 # Draw text with background for better visibility
                                 try:
-                                    text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+                                    text_size = cv2.getTextSize(
+                                        label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
+                                    )[0]
                                     text_x = max(0, x1)
                                     text_y = max(text_size[1] + 10, y1 - 10)
 
@@ -942,10 +971,14 @@ class VideoInferenceProcessor:
                                         2,
                                     )
                                 except Exception as e:
-                                    logger.warning(f"Error drawing text for person {person_id}: {e}")
+                                    logger.warning(
+                                        f"Error drawing text for person {person_id}: {e}"
+                                    )
 
                         except Exception as e:
-                            logger.warning(f"Skipping a box in draw_predictions due to error: {e}")
+                            logger.warning(
+                                f"Skipping a box in draw_predictions due to error: {e}"
+                            )
             except Exception as e:
                 logger.error(f"Error processing detection boxes: {e}")
 
@@ -957,7 +990,7 @@ class VideoInferenceProcessor:
             return (
                 frame if frame is not None else np.zeros((480, 640, 3), dtype=np.uint8)
             )
-    
+
     def _process_frame(
         self,
         frame: np.ndarray,
@@ -966,7 +999,7 @@ class VideoInferenceProcessor:
         cap: cv2.VideoCapture,
         timings: defaultdict,
     ) -> np.ndarray:
-    
+
         # --- 0. Frame Skipping Cooldown Logic (No changes needed) ---
         if self.frames_to_skip > 0:
             logger.debug(f"Skipping frame, {self.frames_to_skip} frames left to skip.")
@@ -980,7 +1013,9 @@ class VideoInferenceProcessor:
         try:
             # --- 1. CROP original frame and CREATE LOW-RES version ---
             # Crop the high-resolution ROI from the original frame
-            high_res_crop = frame[self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
+            high_res_crop = frame[
+                self.crop_y1 : self.crop_y2, self.crop_x1 : self.crop_x2
+            ]
 
             # Get the target dimensions for the low-resolution version
             low_res_width = int(high_res_crop.shape[1] * SCALE_FACTOR)
@@ -988,20 +1023,22 @@ class VideoInferenceProcessor:
 
             # Create the small, low-resolution image for the model
             low_res_crop = cv2.resize(
-                high_res_crop, (low_res_width, low_res_height), interpolation=cv2.INTER_AREA
+                high_res_crop,
+                (low_res_width, low_res_height),
+                interpolation=cv2.INTER_AREA,
             )
 
             # --- 2. Run model on the SMALL, LOW-RESOLUTION image ---
             t0 = time.time()
             results = self.model.track(
-                low_res_crop, # <-- Feed the small image to the model
+                low_res_crop,  # <-- Feed the small image to the model
                 tracker="config/custom_tracker.yaml",
-                classes=[0,1], # Recommend tracking only persons for speed
+                classes=[0, 1],  # Recommend tracking only persons for speed
                 verbose=False,
                 persist=True,
             )
             self.timings["YOLO_Unified_Track"] += time.time() - t0
-            
+
             tracked_persons = {}
             detected_bibs = []
             # --- 3. EXTRACT and perform TWO-STEP TRANSLATION of coordinates ---
@@ -1010,27 +1047,29 @@ class VideoInferenceProcessor:
                 for box in results[0].boxes:
                     # Extract coordinates from the low-res results
                     x1, y1, x2, y2 = box.xyxy[0].clone()
-                    
+
                     # STEP A: Scale coordinates UP to match the high-res crop's dimensions
                     x1 /= SCALE_FACTOR
                     y1 /= SCALE_FACTOR
                     x2 /= SCALE_FACTOR
                     y2 /= SCALE_FACTOR
-                    
+
                     # STEP B: Add the crop's top-left offset to match the full frame's dimensions
                     x1 += self.crop_x1
                     y1 += self.crop_y1
                     x2 += self.crop_x1
                     y2 += self.crop_y1
-                    
+
                     # Create our own dictionary with fully translated coordinates
-                    translated_boxes.append({
-                        'xyxy': (x1, y1, x2, y2),
-                        'id': int(box.id.item()),
-                        'conf': float(box.conf.item()),
-                        'cls': int(box.cls.item())
-                    })
-            
+                    translated_boxes.append(
+                        {
+                            "xyxy": (x1, y1, x2, y2),
+                            "id": int(box.id.item()),
+                            "conf": float(box.conf.item()),
+                            "cls": int(box.cls.item()),
+                        }
+                    )
+
                 # Helper: compute interpolated x on a guide line at a given y
                 def _interpolate_x_at_y(line, y_val: float) -> float:
                     x1, y1 = line["p1"]
@@ -1054,14 +1093,14 @@ class VideoInferenceProcessor:
 
                 # Now, loop over our clean, translated data
                 for box_data in translated_boxes:
-                    if box_data['cls'] == 0: # Person
+                    if box_data["cls"] == 0:  # Person
                         # Check if the person is within the visual guide lines
-                        px1, py1, px2, py2 = box_data['xyxy']
+                        px1, py1, px2, py2 = box_data["xyxy"]
                         corners = [(px1, py1), (px2, py1), (px1, py2), (px2, py2)]
                         if any(_point_between_guides(cx, cy) for cx, cy in corners):
-                            tracked_persons[box_data['id']] = box_data
-                    
-                    elif box_data['cls'] == 1: # Bib
+                            tracked_persons[box_data["id"]] = box_data
+
+                    elif box_data["cls"] == 1:  # Bib
                         detected_bibs.append(box_data)
 
             # --- NEW: Activate cooldown if no racers were found ---
@@ -1102,8 +1141,8 @@ class VideoInferenceProcessor:
                             "finish_time_ms": None,
                             "finish_wall_time": None,
                             "final_bib": None,
-                                "final_bib_confidence": 0.0,
-                                "ocr_locked": False,
+                            "final_bib_confidence": 0.0,
+                            "ocr_locked": False,
                             "has_finished": False,
                             "result_sent": False,
                             "post_finish_counter": 0,
@@ -1155,9 +1194,14 @@ class VideoInferenceProcessor:
                                         )
 
                                         # If the OCR is extremely confident, lock this bib to the racer
-                                        if ocr_conf is not None and float(ocr_conf) > 0.99:
+                                        if (
+                                            ocr_conf is not None
+                                            and float(ocr_conf) > 0.99
+                                        ):
                                             history["final_bib"] = bib_number
-                                            history["final_bib_confidence"] = float(ocr_conf)
+                                            history["final_bib_confidence"] = float(
+                                                ocr_conf
+                                            )
                                             history["ocr_locked"] = True
                                             logger.info(
                                                 f"Locked OCR bib for Racer ID {person_id}: '{bib_number}' (Conf: {ocr_conf:.3f})"
