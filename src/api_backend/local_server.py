@@ -806,6 +806,7 @@ async def upload_roster(file: UploadFile = File(...)) -> Dict[str, Any]:
                     "racerName": racer["racerName"],
                     "gender": racer.get("gender"),
                     "team": racer.get("team"),
+                    "age": racer.get("age"),
                 }
 
         logger.info(
@@ -1020,6 +1021,11 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
         team_source = roster_data.get("team") or finish_data.get("team")
         new_finisher["team"] = str(team_source).strip()
         logger.info(f"🔍 DEBUG: Added team: {new_finisher['team']}")
+
+    # Add optional age from roster or finish_data
+    if roster_data.get("age") or finish_data.get("age"):
+        new_finisher["age"] = roster_data.get("age") or finish_data.get("age")
+        logger.info(f"🔍 DEBUG: Added age: {new_finisher['age']}")
 
     logger.info(f"🔍 DEBUG: Created new finisher object: {new_finisher}")
 

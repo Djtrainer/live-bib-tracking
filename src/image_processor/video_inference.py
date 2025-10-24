@@ -1328,10 +1328,11 @@ class VideoInferenceProcessor:
                     {
                         "id": entry.get("id"),
                         "bibNumber": entry.get("bib"),
-                        "racerName": "",
+                        "racerName": entry.get("racerName") or entry.get("name") or "",
                         "finishTime": entry.get("time_ms"),
-                        "gender": "",
-                        "team": "",
+                        "gender": entry.get("gender") or "",
+                        "team": entry.get("team") or "",
+                        "age": entry.get("age") or None,
                     }
                 )
             self.save_leaderboard_csv_frontend_format(
