@@ -54,6 +54,12 @@ const ModernLeaderboard = ({
   const scrollIntervalRef = useRef<number | null>(null);
   const translateYRef = useRef<number>(0);
   const originalBodyHeightRef = useRef<number>(0);
+  // Team results auto-scroll refs
+  const teamScrollViewportRef = useRef<HTMLDivElement | null>(null);
+  const teamBodyRef = useRef<HTMLDivElement | null>(null);
+  const teamScrollIntervalRef = useRef<number | null>(null);
+  const teamTranslateYRef = useRef<number>(0);
+  const teamOriginalBodyHeightRef = useRef<number>(0);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -85,6 +91,20 @@ const ModernLeaderboard = ({
     originalBodyHeightRef.current = 0;
   };
 
+  const clearTeamAutoScroll = () => {
+    if (teamScrollIntervalRef.current) {
+      window.clearInterval(teamScrollIntervalRef.current);
+      teamScrollIntervalRef.current = null;
+    }
+    const tbody = teamBodyRef.current;
+    if (tbody) {
+      Array.from(tbody.querySelectorAll('[data-clone="true"]') as NodeListOf<HTMLElement>).forEach(n => n.remove());
+      (tbody as HTMLElement).style.transform = '';
+    }
+    teamTranslateYRef.current = 0;
+    teamOriginalBodyHeightRef.current = 0;
+  };
+
   const startScrollInterval = (tbody: HTMLTableSectionElement, origHeight: number) => {
     // ensure any previous interval is cleared
     if (scrollIntervalRef.current) {
@@ -104,6 +124,25 @@ const ModernLeaderboard = ({
         translateYRef.current += originalBodyHeightRef.current;
       }
       tbody.style.transform = `translateY(${translateYRef.current}px)`;
+    }, intervalMs);
+  };
+
+  const startTeamScrollInterval = (body: HTMLDivElement, origHeight: number) => {
+    if (teamScrollIntervalRef.current) {
+      window.clearInterval(teamScrollIntervalRef.current);
+      teamScrollIntervalRef.current = null;
+    }
+
+    const speedPxPerSec = 30; // same speed as main
+    const intervalMs = 16;
+    const pxPerInterval = (speedPxPerSec * intervalMs) / 1000;
+
+    teamScrollIntervalRef.current = window.setInterval(() => {
+      teamTranslateYRef.current -= pxPerInterval;
+      if (Math.abs(teamTranslateYRef.current) >= teamOriginalBodyHeightRef.current) {
+        teamTranslateYRef.current += teamOriginalBodyHeightRef.current;
+      }
+      body.style.transform = `translateY(${teamTranslateYRef.current}px)`;
     }, intervalMs);
   };
 
@@ -170,6 +209,57 @@ const ModernLeaderboard = ({
     // keep translateYRef.current as-is so it doesn't jump
   };
 
+  const setupTeamAutoScroll = () => {
+    clearTeamAutoScroll();
+    const viewport = teamScrollViewportRef.current;
+    const body = teamBodyRef.current;
+    if (!viewport || !body) return;
+
+    const rows = Array.from(body.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
+    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
+    const viewportHeight = viewport.clientHeight;
+    if (originalHeight <= viewportHeight) return;
+
+    teamOriginalBodyHeightRef.current = originalHeight;
+
+    rows.forEach(r => {
+      const clone = r.cloneNode(true) as HTMLElement;
+      clone.setAttribute('data-clone', 'true');
+      body.appendChild(clone);
+    });
+
+    teamTranslateYRef.current = 0;
+    startTeamScrollInterval(body, originalHeight);
+  };
+
+  const refreshTeamAutoScrollPreservePosition = () => {
+    const viewport = teamScrollViewportRef.current;
+    const body = teamBodyRef.current;
+    if (!viewport || !body) return;
+
+    Array.from(body.querySelectorAll('[data-clone="true"]') as NodeListOf<HTMLElement>).forEach(n => n.remove());
+
+    const rows = Array.from(body.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
+    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
+    const viewportHeight = viewport.clientHeight;
+    if (originalHeight <= viewportHeight) {
+      clearTeamAutoScroll();
+      return;
+    }
+
+    teamOriginalBodyHeightRef.current = originalHeight;
+
+    rows.forEach(r => {
+      const clone = r.cloneNode(true) as HTMLElement;
+      clone.setAttribute('data-clone', 'true');
+      body.appendChild(clone);
+    });
+
+    if (!teamScrollIntervalRef.current) {
+      startTeamScrollInterval(body, originalHeight);
+    }
+  };
+
   // Recreate/reset autoscroll whenever finishers change (pause and include new row)
   useEffect(() => {
     // brief delay to allow DOM update
@@ -186,6 +276,23 @@ const ModernLeaderboard = ({
       clearTimeout(t);
     };
   }, [finishers.length]);
+
+  // Team auto-scroll: start when totalFinishers >= 3 (user requested) or when teamData changes
+  useEffect(() => {
+    const t = setTimeout(() => {
+      // If autoscroll already running for teams, refresh, otherwise setup if condition met
+      if (teamScrollIntervalRef.current) {
+        refreshTeamAutoScrollPreservePosition();
+      } else {
+        // Start team autoscroll only when at least 3 finishers have been recorded
+        if ((totalFinishers || 0) >= 3) {
+          setupTeamAutoScroll();
+        }
+      }
+    }, 120);
+
+    return () => clearTimeout(t);
+  }, [totalFinishers, teamData.size]);
 
   const getPodiumClass = (position: number) => {
     switch (position) {
@@ -227,7 +334,11 @@ const ModernLeaderboard = ({
               <div className={`podium-position-tv ${getPodiumClass(index)}`}>
                 {index + 1}
               </div>
-              
+              {index < 3 && (
+                <Medal className={`w-5 h-5 ml-2 ${
+                  index === 0 ? 'medal-gold' : index === 1 ? 'medal-silver' : 'medal-bronze'
+                }`} />
+              )}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center justify-between">
                   <div>
@@ -341,7 +452,7 @@ const ModernLeaderboard = ({
           <div className="flex items-center justify-between">
             <div className="flex-1">
               <h1 className="text-4xl md:text-5xl font-black mb-2 text-left">
-                <span className="bg-gradient-to-r from-foreground via-primary to-secondary bg-clip-text text-transparent">
+                <span style={{ color: '#4F3F52' }}>
                   2025 Slay Sarcoma Race Results
                 </span>
               </h1>
@@ -420,61 +531,68 @@ const ModernLeaderboard = ({
                   <div className="section-icon-tv">
                     <Users className="w-5 h-5 text-white" />
                   </div>
-                  <h2 className="section-title-tv">Team Results</h2>
+                  <h2 className="section-title-tv">Age Brackets</h2>
                 </div>
                 
-                <div className="p-4 space-y-4 max-h-96 overflow-y-auto">
-                  {Array.from(teamData.entries()).slice(0, 6).map(([teamName, runners]) => (
-                    <div key={teamName} className="category-card-tv">
-                      <div className="category-header-tv">
-                        <Users className="w-4 h-4 text-primary" />
-                        <h3 className="category-title-tv">{teamName}</h3>
-                      </div>
-                      
-                      <div className="space-y-2">
-                        {runners.length === 0 ? (
-                          <div className="text-center py-4">
-                            <Timer className="w-5 h-5 text-muted-foreground mx-auto mb-2" />
-                            <p className="text-muted-foreground text-xs">No finishers yet...</p>
-                          </div>
-                        ) : (
-                          runners.slice(0, 5).map((runner, index) => (
-                            <div key={runner.id} className="podium-item-tv group">
-                              <div className={`podium-position-tv ${getPodiumClass(index)}`}>
-                                {index + 1}
-                              </div>
-                              
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center justify-between">
-                                  <div>
-                                    <p className="podium-name-tv group-hover:text-primary transition-colors">
-                                      {runner.racerName || 'Unknown Runner'}
-                                    </p>
-                                    <p className="podium-bib-tv">Bib #{runner.bibNumber}</p>
+                <div ref={teamScrollViewportRef} className="p-4 space-y-4 max-h-96 overflow-y-auto">
+                  <div ref={teamBodyRef}>
+                    {Array.from(teamData.entries()).slice(0, 6).map(([teamName, runners]) => (
+                      <div key={teamName} className="category-card-tv">
+                        <div className="category-header-tv">
+                          <Users className="w-4 h-4 text-primary" />
+                          <h3 className="category-title-tv">{teamName}</h3>
+                        </div>
+                        
+                        <div className="space-y-2">
+                          {runners.length === 0 ? (
+                            <div className="text-center py-4">
+                              <Timer className="w-5 h-5 text-muted-foreground mx-auto mb-2" />
+                              <p className="text-muted-foreground text-xs">No finishers yet...</p>
+                            </div>
+                          ) : (
+                            runners.slice(0, 3).map((runner, index) => (
+                                <div key={runner.id} className="podium-item-tv group">
+                                  <div className={`podium-position-tv ${getPodiumClass(index)}`}>
+                                    {index + 1}
                                   </div>
-                                  
-                                  <div className="text-right">
-                                    <p className="podium-time-tv">
-                                      {formatTime(normalizeFinishTime(runner.finishTime))}
-                                    </p>
-                                    <p className="text-xs text-muted-foreground">
-                                      Overall #{runner.rank}
-                                    </p>
+                                  {index < 3 && (
+                                    <Medal className={`w-5 h-5 ml-2 ${
+                                      index === 0 ? 'medal-gold' : index === 1 ? 'medal-silver' : 'medal-bronze'
+                                    }`} />
+                                  )}
+
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between">
+                                      <div>
+                                        <p className="podium-name-tv group-hover:text-primary transition-colors">
+                                          {runner.racerName || 'Unknown Runner'}
+                                        </p>
+                                        <p className="podium-bib-tv">Bib #{runner.bibNumber}</p>
+                                      </div>
+                                    
+                                      <div className="text-right">
+                                        <p className="podium-time-tv">
+                                          {formatTime(normalizeFinishTime(runner.finishTime))}
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                          Overall #{runner.rank}
+                                        </p>
+                                      </div>
+                                    </div>
                                   </div>
                                 </div>
-                              </div>
+                              ))
+                          )}
+                          
+                          {runners.length > 3 && (
+                            <div className="text-center text-xs text-muted-foreground pt-2 border-t border-border/30">
+                              +{runners.length - 3} more team members
                             </div>
-                          ))
-                        )}
-                        
-                        {runners.length > 5 && (
-                          <div className="text-center text-xs text-muted-foreground pt-2 border-t border-border/30">
-                            +{runners.length - 5} more team members
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               </div>
             )}

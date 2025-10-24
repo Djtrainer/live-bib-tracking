@@ -16,6 +16,7 @@ import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
+import statistics
 
 import cv2
 import dotenv
@@ -80,14 +81,14 @@ class FrameReader:
 class VideoInferenceProcessor:
     """Processes race video footage to track racers, extract bib numbers using OCR, and determine finish times.
     This class uses YOLO models for object detection and tracking, and EasyOCR for reading bib numbers.
-    It maintains a history of tracked racers, detects when they cross a virtual finish line, and produces live and final leaderboards."""
+    It maintains a history of tracked racers, detects when they cross a virtual finish line, and produces live and final leaderboards.
+    """
 
     def __init__(
         self,
         model_path: str | Path,
         video_path: str | Path | int,
         result_callback=None,
-        testing_mode: bool = False,
         camera_width: int | None = None,
         camera_height: int | None = None,
         leaderboard_csv_path: str | Path | None = None,
@@ -271,16 +272,14 @@ class VideoInferenceProcessor:
         self.last_annotated_frame = None
         self.cool_down_frames = 0
         self.no_racers_frames_counter = 0
-        # Testing mode: when True, allows the same tracked person to be recorded as finished
-        # multiple times. Finish events are appended to `history['finish_events']` for each
-        # crossing; the processor will send each event separately.
-        self.testing_mode = bool(testing_mode)
+
+    # no testing_mode field (restored original behavior)
 
     def _get_finish_line(self):
 
         base_thickness = max(1, int(self.frame_width / 640))
         finish_line_thickness = max(2, int(self.frame_width / 240))
-        
+
         self.guide_line_left = {
             "p1": (
                 self.frame_width * 0.31,
@@ -337,10 +336,16 @@ class VideoInferenceProcessor:
 
         self.roi_points = np.array(
             [
-                (self.guide_line_left['p2'][0], self.guide_line_left['p2'][1]*CROP_SCALE_FACTOR),      # Top-left
-                (self.frame_width, self.guide_line_right['p2'][1]*CROP_SCALE_FACTOR), # Top-right
-                (self.frame_width, self.frame_height), # Bottom-right
-                (self.guide_line_left['p2'][0],self.frame_height),  
+                (
+                    self.guide_line_left["p2"][0],
+                    self.guide_line_left["p2"][1] * CROP_SCALE_FACTOR,
+                ),  # Top-left
+                (
+                    self.frame_width,
+                    self.guide_line_right["p2"][1] * CROP_SCALE_FACTOR,
+                ),  # Top-right
+                (self.frame_width, self.frame_height),  # Bottom-right
+                (self.guide_line_left["p2"][0], self.frame_height),
             ],
             dtype=np.int32,
         )
@@ -443,11 +448,7 @@ class VideoInferenceProcessor:
         Records their time and sets a flag the first moment they enter the zone.
         """
         history = self.track_history.get(person_id)
-        if not history:
-            return
-
-        # In normal mode, if the racer has already been marked finished, ignore further crossings.
-        if not self.testing_mode and history.get("has_finished", False):
+        if not history or history.get("has_finished", False):
             return
 
         # Get the four corner points of the bounding box from the translated dict
@@ -465,36 +466,15 @@ class VideoInferenceProcessor:
                 break
 
         if crossed_line:
-            finish_time_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-            finish_wall_time = time.time()
+            # This is the first instance the box has crossed. Record the finish.
+            history["has_finished"] = True
+            history["finish_time_ms"] = cap.get(cv2.CAP_PROP_POS_MSEC)
+            history["finish_wall_time"] = time.time()
+            history["post_finish_counter"] = 30
 
             logger.info(
-                f"Racer ID {person_id} CROSSED hardcoded line at {finish_time_ms / 1000:.2f}s"
+                f"Racer ID {person_id} CROSSED hardcoded line at {history['finish_time_ms'] / 1000:.2f}s"
             )
-
-            if self.testing_mode:
-                # Append a finish event for testing so we can record multiple passes.
-                events = history.setdefault("finish_events", [])
-                events.append(
-                    {
-                        "finish_time_ms": finish_time_ms,
-                        "finish_wall_time": finish_wall_time,
-                        "sent": False,
-                    }
-                )
-                # Also mark has_finished True to keep backwards compatibility for other logic
-                history["has_finished"] = True
-                # Optionally send the result immediately for testing to simulate finalization
-                try:
-                    self._handle_finisher(person_id, history)
-                except Exception:
-                    logger.exception("Error handling finisher in testing mode")
-            else:
-                # This is the first instance the box has crossed. Record the finish.
-                history["has_finished"] = True
-                history["finish_time_ms"] = finish_time_ms
-                history["finish_wall_time"] = finish_wall_time
-                history["post_finish_counter"] = 30
 
     def _handle_finisher(self, person_id: int, history: dict) -> None:
         """
@@ -503,40 +483,7 @@ class VideoInferenceProcessor:
         if not self.result_callback:
             return
 
-        # If testing_mode is enabled, the history may contain multiple finish_events.
-        # Send each unsent event as a separate payload. Use determine_final_bibs() to
-        # get the current best bib for the tracker at send time.
-        if self.testing_mode:
-            events = history.get("finish_events", [])
-            for ev in events:
-                if ev.get("sent"):
-                    continue
-                final_bib_results = self.determine_final_bibs()
-                bib_result = final_bib_results.get(person_id)
-                bib_number = bib_result["final_bib"] if bib_result else f"Unknown-{person_id}"
-
-                payload = {
-                    "bibNumber": bib_number,
-                    "wallClockTime": ev.get("finish_wall_time"),
-                    "racerName": f"Racer {person_id}",
-                }
-
-                try:
-                    logger.info(f"[TEST MODE] Sending finisher data to backend: {payload}")
-                    self.result_callback(payload)
-                    ev["sent"] = True
-                    logger.info(f"[TEST MODE] Successfully sent finisher data for Bib #{bib_number}")
-                except Exception as e:
-                    logger.error(
-                        f"Error calling result callback for Bib #{bib_number}: {e}",
-                        exc_info=True,
-                    )
-            # Keep result_sent flag if any events were sent
-            if any(ev.get("sent") for ev in events):
-                history["result_sent"] = True
-            return
-
-        # Normal mode: send the single recorded finish_time
+        # Determine the final bib number using the voting system
         final_bib_results = self.determine_final_bibs()
         bib_result = final_bib_results.get(person_id)
 
@@ -545,7 +492,7 @@ class VideoInferenceProcessor:
         # Construct the payload
         payload = {
             "bibNumber": bib_number,
-            "wallClockTime": history.get("finish_wall_time"),
+            "wallClockTime": history["finish_wall_time"],
             "racerName": f"Racer {person_id}",  # Placeholder name
         }
 
@@ -576,16 +523,11 @@ class VideoInferenceProcessor:
             logger.debug(
                 f"Racer ID {person_id}: has_finished={history.get('has_finished')}, result_sent={history.get('result_sent')}, in_tracked={person_id in tracked_person_ids}"
             )
-            # In testing mode, we may have multiple finish_events; consider racer finished
-            # and needing finalization if any finish event exists that hasn't been sent.
-            has_unsent_events = False
-            if self.testing_mode and history.get("finish_events"):
-                has_unsent_events = any(not ev.get("sent") for ev in history.get("finish_events", []))
-
             if (
-                (history.get("has_finished") and not history.get("result_sent"))
-                or has_unsent_events
-            ) and person_id not in tracked_person_ids:
+                history.get("has_finished")
+                and not history.get("result_sent")
+                and person_id not in tracked_person_ids
+            ):
                 finished_but_lost_ids.append(person_id)
                 logger.debug(
                     f"Racer ID {person_id}: Found finished racer who left frame - will finalize"
@@ -661,8 +603,8 @@ class VideoInferenceProcessor:
 
         leaderboard = []
         for tracker_id, history_data in self.track_history.items():
-            # Normal mode: use single finish_time_ms
-            if not self.testing_mode and history_data and history_data.get("finish_time_ms") is not None:
+            # Check if this racer has a recorded finish time
+            if history_data and history_data.get("finish_time_ms") is not None:
                 bib_result = current_bib_results.get(tracker_id)
                 # If the bib number is determined, use it. Otherwise, show "No Bib".
                 bib_number = bib_result["final_bib"] if bib_result else "No Bib"
@@ -693,31 +635,7 @@ class VideoInferenceProcessor:
                     }
                 )
 
-            # Testing mode: include each finish event as a separate entry
-            if self.testing_mode and history_data and history_data.get("finish_events"):
-                for ev in history_data.get("finish_events", []):
-                    bib_result = current_bib_results.get(tracker_id)
-                    bib_number = bib_result["final_bib"] if bib_result else "No Bib"
-
-                    if (
-                        self.processing_start_time is not None
-                        and ev.get("finish_wall_time") is not None
-                    ):
-                        elapsed_seconds = ev["finish_wall_time"] - self.processing_start_time
-                        minutes = int(elapsed_seconds // 60)
-                        seconds = int(elapsed_seconds % 60)
-                        wall_time_str = f"{minutes:02d}:{seconds:02d}"
-                    else:
-                        wall_time_str = "N/A"
-
-                    leaderboard.append(
-                        {
-                            "id": tracker_id,
-                            "bib": bib_number,
-                            "time_ms": ev.get("finish_time_ms"),
-                            "wall_time": wall_time_str,
-                        }
-                    )
+            # (no testing-mode multiple entries; original single finish entry above)
 
         leaderboard.sort(key=lambda x: x["time_ms"])
 
@@ -951,7 +869,9 @@ class VideoInferenceProcessor:
                     for box_data in results:
                         try:
                             cls = int(box_data.get("cls", -1))
-                            x1, y1, x2, y2 = [int(c) for c in box_data.get("xyxy", (0, 0, 0, 0))]
+                            x1, y1, x2, y2 = [
+                                int(c) for c in box_data.get("xyxy", (0, 0, 0, 0))
+                            ]
 
                             # Validate coordinates
                             if not (
@@ -980,9 +900,16 @@ class VideoInferenceProcessor:
                                         person_id in self.track_history
                                         and self.track_history[person_id]["ocr_reads"]
                                     ):
-                                        reads = [r[0] for r in self.track_history[person_id]["ocr_reads"]]
+                                        reads = [
+                                            r[0]
+                                            for r in self.track_history[person_id][
+                                                "ocr_reads"
+                                            ]
+                                        ]
                                         if reads:
-                                            current_best_read = Counter(reads).most_common(1)[0][0]
+                                            current_best_read = Counter(
+                                                reads
+                                            ).most_common(1)[0][0]
                                 except Exception as e:
                                     logger.warning(
                                         f"Error getting best OCR read for person {person_id}: {e}"
@@ -993,16 +920,24 @@ class VideoInferenceProcessor:
                                 final_conf = None
                                 try:
                                     if person_id in self.track_history:
-                                        final_bib = self.track_history[person_id].get("final_bib")
-                                        final_conf = self.track_history[person_id].get("final_bib_confidence")
+                                        final_bib = self.track_history[person_id].get(
+                                            "final_bib"
+                                        )
+                                        final_conf = self.track_history[person_id].get(
+                                            "final_bib_confidence"
+                                        )
                                 except Exception:
                                     pass
 
-                                displayed_bib = final_bib if final_bib else current_best_read
+                                displayed_bib = (
+                                    final_bib if final_bib else current_best_read
+                                )
                                 if final_bib and final_conf is not None:
                                     label_text = f"Racer ID {person_id} | Bib: {displayed_bib} ({final_conf:.2f})"
                                 else:
-                                    label_text = f"Racer ID {person_id} | Bib: {displayed_bib}"
+                                    label_text = (
+                                        f"Racer ID {person_id} | Bib: {displayed_bib}"
+                                    )
 
                                 # Draw rectangle
                                 cv2.rectangle(
@@ -1011,7 +946,9 @@ class VideoInferenceProcessor:
 
                                 # Draw text with background for better visibility
                                 try:
-                                    text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+                                    text_size = cv2.getTextSize(
+                                        label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
+                                    )[0]
                                     text_x = max(0, x1)
                                     text_y = max(text_size[1] + 10, y1 - 10)
 
@@ -1035,10 +972,14 @@ class VideoInferenceProcessor:
                                         2,
                                     )
                                 except Exception as e:
-                                    logger.warning(f"Error drawing text for person {person_id}: {e}")
+                                    logger.warning(
+                                        f"Error drawing text for person {person_id}: {e}"
+                                    )
 
                         except Exception as e:
-                            logger.warning(f"Skipping a box in draw_predictions due to error: {e}")
+                            logger.warning(
+                                f"Skipping a box in draw_predictions due to error: {e}"
+                            )
             except Exception as e:
                 logger.error(f"Error processing detection boxes: {e}")
 
@@ -1050,7 +991,7 @@ class VideoInferenceProcessor:
             return (
                 frame if frame is not None else np.zeros((480, 640, 3), dtype=np.uint8)
             )
-    
+
     def _process_frame(
         self,
         frame: np.ndarray,
@@ -1059,7 +1000,7 @@ class VideoInferenceProcessor:
         cap: cv2.VideoCapture,
         timings: defaultdict,
     ) -> np.ndarray:
-    
+
         # --- 0. Frame Skipping Cooldown Logic (No changes needed) ---
         if self.frames_to_skip > 0:
             logger.debug(f"Skipping frame, {self.frames_to_skip} frames left to skip.")
@@ -1073,7 +1014,9 @@ class VideoInferenceProcessor:
         try:
             # --- 1. CROP original frame and CREATE LOW-RES version ---
             # Crop the high-resolution ROI from the original frame
-            high_res_crop = frame[self.crop_y1:self.crop_y2, self.crop_x1:self.crop_x2]
+            high_res_crop = frame[
+                self.crop_y1 : self.crop_y2, self.crop_x1 : self.crop_x2
+            ]
 
             # Get the target dimensions for the low-resolution version
             low_res_width = int(high_res_crop.shape[1] * SCALE_FACTOR)
@@ -1081,19 +1024,22 @@ class VideoInferenceProcessor:
 
             # Create the small, low-resolution image for the model
             low_res_crop = cv2.resize(
-                high_res_crop, (low_res_width, low_res_height), interpolation=cv2.INTER_AREA
+                high_res_crop,
+                (low_res_width, low_res_height),
+                interpolation=cv2.INTER_AREA,
             )
 
             # --- 2. Run model on the SMALL, LOW-RESOLUTION image ---
             t0 = time.time()
             results = self.model.track(
-                low_res_crop, # <-- Feed the small image to the model
+                low_res_crop,  # <-- Feed the small image to the model
                 tracker="config/custom_tracker.yaml",
-                classes=[0,1], # Recommend tracking only persons for speed
+                classes=[0, 1],  # Recommend tracking only persons for speed
                 verbose=False,
+                persist=True,
             )
             self.timings["YOLO_Unified_Track"] += time.time() - t0
-            
+
             tracked_persons = {}
             detected_bibs = []
             # --- 3. EXTRACT and perform TWO-STEP TRANSLATION of coordinates ---
@@ -1102,27 +1048,29 @@ class VideoInferenceProcessor:
                 for box in results[0].boxes:
                     # Extract coordinates from the low-res results
                     x1, y1, x2, y2 = box.xyxy[0].clone()
-                    
+
                     # STEP A: Scale coordinates UP to match the high-res crop's dimensions
                     x1 /= SCALE_FACTOR
                     y1 /= SCALE_FACTOR
                     x2 /= SCALE_FACTOR
                     y2 /= SCALE_FACTOR
-                    
+
                     # STEP B: Add the crop's top-left offset to match the full frame's dimensions
                     x1 += self.crop_x1
                     y1 += self.crop_y1
                     x2 += self.crop_x1
                     y2 += self.crop_y1
-                    
+
                     # Create our own dictionary with fully translated coordinates
-                    translated_boxes.append({
-                        'xyxy': (x1, y1, x2, y2),
-                        'id': int(box.id.item()),
-                        'conf': float(box.conf.item()),
-                        'cls': int(box.cls.item())
-                    })
-            
+                    translated_boxes.append(
+                        {
+                            "xyxy": (x1, y1, x2, y2),
+                            "id": int(box.id.item()),
+                            "conf": float(box.conf.item()),
+                            "cls": int(box.cls.item()),
+                        }
+                    )
+
                 # Helper: compute interpolated x on a guide line at a given y
                 def _interpolate_x_at_y(line, y_val: float) -> float:
                     x1, y1 = line["p1"]
@@ -1146,14 +1094,14 @@ class VideoInferenceProcessor:
 
                 # Now, loop over our clean, translated data
                 for box_data in translated_boxes:
-                    if box_data['cls'] == 0: # Person
+                    if box_data["cls"] == 0:  # Person
                         # Check if the person is within the visual guide lines
-                        px1, py1, px2, py2 = box_data['xyxy']
+                        px1, py1, px2, py2 = box_data["xyxy"]
                         corners = [(px1, py1), (px2, py1), (px1, py2), (px2, py2)]
                         if any(_point_between_guides(cx, cy) for cx, cy in corners):
-                            tracked_persons[box_data['id']] = box_data
-                    
-                    elif box_data['cls'] == 1: # Bib
+                            tracked_persons[box_data["id"]] = box_data
+
+                    elif box_data["cls"] == 1:  # Bib
                         detected_bibs.append(box_data)
 
             # --- NEW: Activate cooldown if no racers were found ---
@@ -1193,12 +1141,9 @@ class VideoInferenceProcessor:
                             "last_x_center": None,
                             "finish_time_ms": None,
                             "finish_wall_time": None,
-                            # When testing_mode is enabled we may record multiple finish events
-                            # as a list of dicts: {"finish_time_ms": ..., "finish_wall_time": ..., "sent": False}
-                            "finish_events": [],
                             "final_bib": None,
-                                "final_bib_confidence": 0.0,
-                                "ocr_locked": False,
+                            "final_bib_confidence": 0.0,
+                            "ocr_locked": False,
                             "has_finished": False,
                             "result_sent": False,
                             "post_finish_counter": 0,
@@ -1250,9 +1195,14 @@ class VideoInferenceProcessor:
                                         )
 
                                         # If the OCR is extremely confident, lock this bib to the racer
-                                        if ocr_conf is not None and float(ocr_conf) > 0.99:
+                                        if (
+                                            ocr_conf is not None
+                                            and float(ocr_conf) > 0.99
+                                        ):
                                             history["final_bib"] = bib_number
-                                            history["final_bib_confidence"] = float(ocr_conf)
+                                            history["final_bib_confidence"] = float(
+                                                ocr_conf
+                                            )
                                             history["ocr_locked"] = True
                                             logger.info(
                                                 f"Locked OCR bib for Racer ID {person_id}: '{bib_number}' (Conf: {ocr_conf:.3f})"
@@ -1318,7 +1268,7 @@ class VideoInferenceProcessor:
         leaderboard = []
         for tracker_id, history_data in self.track_history.items():
             # Normal mode: single finish_time
-            if not self.testing_mode and history_data and history_data.get("finish_time_ms") is not None:
+            if history_data and history_data.get("finish_time_ms") is not None:
                 bib_result = current_bib_results.get(tracker_id)
                 bib_number = bib_result["final_bib"] if bib_result else "No Bib"
 
@@ -1345,31 +1295,7 @@ class VideoInferenceProcessor:
                     }
                 )
 
-            # Testing mode: include all finish_events as separate entries
-            if self.testing_mode and history_data and history_data.get("finish_events"):
-                for ev in history_data.get("finish_events", []):
-                    bib_result = current_bib_results.get(tracker_id)
-                    bib_number = bib_result["final_bib"] if bib_result else "No Bib"
-
-                    if (
-                        self.processing_start_time is not None
-                        and ev.get("finish_wall_time") is not None
-                    ):
-                        elapsed_seconds = ev["finish_wall_time"] - self.processing_start_time
-                        minutes = int(elapsed_seconds // 60)
-                        seconds = int(elapsed_seconds % 60)
-                        wall_time_str = f"{minutes:02d}:{seconds:02d}"
-                    else:
-                        wall_time_str = "N/A"
-
-                    leaderboard.append(
-                        {
-                            "id": tracker_id,
-                            "bib": bib_number,
-                            "time_ms": ev.get("finish_time_ms"),
-                            "wall_time": wall_time_str,
-                        }
-                    )
+            # (original single finish entry handled above)
 
         leaderboard.sort(key=lambda x: x["time_ms"])
 
@@ -1402,10 +1328,11 @@ class VideoInferenceProcessor:
                     {
                         "id": entry.get("id"),
                         "bibNumber": entry.get("bib"),
-                        "racerName": "",
+                        "racerName": entry.get("racerName") or entry.get("name") or "",
                         "finishTime": entry.get("time_ms"),
-                        "gender": "",
-                        "team": "",
+                        "gender": entry.get("gender") or "",
+                        "team": entry.get("team") or "",
+                        "age": entry.get("age") or None,
                     }
                 )
             self.save_leaderboard_csv_frontend_format(
@@ -1451,38 +1378,141 @@ class VideoInferenceProcessor:
 
         with csv_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(
-                ["Rank", "Bib Number", "Racer Name", "Finish Time", "Gender", "Team"]
-            )
+            # New required columns
+            writer.writerow([
+                "Place",
+                "Bib",
+                "Name",
+                "First name",
+                "Last name",
+                "Age",
+                "Gender",
+                "Time",
+                "Difference",
+                "% Back",
+                "% Winning",
+                "% Average",
+                "% Median",
+                "team",
+            ])
 
             # Sort results by finishTime if present
             try:
                 sorted_results = sorted(
-                    results,
+                    [dict(r) for r in results],
                     key=lambda r: (
                         r.get("finishTime") is None,
-                        r.get("finishTime") or float("inf"),
+                        r.get("finishTime") or r.get("time_ms") or float("inf"),
                     ),
                 )
             except Exception:
-                sorted_results = list(results)
+                sorted_results = [dict(r) for r in results]
 
-            for idx, r in enumerate(sorted_results, start=1):
+            # Extract finish times in ms for finished racers (None or missing -> inf)
+            finish_times = []
+            for r in sorted_results:
+                ft = r.get("finishTime") if "finishTime" in r else r.get("time_ms")
+                try:
+                    ft_val = float(ft) if ft is not None and ft != "" else None
+                except Exception:
+                    ft_val = None
+                finish_times.append(ft_val)
+
+            # Identify winner time (smallest non-None finish time)
+            valid_times = [t for t in finish_times if t is not None]
+            winner_time = min(valid_times) if valid_times else None
+
+            # Compute % winning for each racer to be used for average/median calculations
+            percent_winning_list = []
+            for t in finish_times:
+                if t is None or winner_time is None or t == 0:
+                    percent_winning_list.append(None)
+                else:
+                    percent_winning_list.append(winner_time / t)
+
+            # compute mean and median of percent_winning ignoring None
+            pw_vals = [v for v in percent_winning_list if v is not None]
+            mean_pw = float(sum(pw_vals) / len(pw_vals)) if pw_vals else None
+            try:
+                median_pw = float(statistics.median(pw_vals)) if pw_vals else None
+            except Exception:
+                median_pw = None
+
+            for idx, (r, ft, pw) in enumerate(
+                zip(sorted_results, finish_times, percent_winning_list), start=1
+            ):
                 bib = r.get("bibNumber") or r.get("bib") or ""
                 name = r.get("racerName") or r.get("racer_name") or ""
-                finish_time_ms = (
-                    r.get("finishTime") if "finishTime" in r else r.get("time_ms")
-                )
-                gender = r.get("gender") or ""
                 team = r.get("team") or ""
+                gender = r.get("gender") or ""
+                age = r.get("age") or ""
+
+                # Split first/last name by first space; leave last empty if not present
+                first_name = ""
+                last_name = ""
+                if isinstance(name, str) and name.strip():
+                    parts = name.strip().split()
+                    first_name = parts[0]
+                    last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+                # Time formatting
+                time_display = format_time_ms(ft)
+
+                # Difference to winner
+                if ft is None or winner_time is None:
+                    diff_ms = None
+                else:
+                    diff_ms = float(ft) - float(winner_time)
+
+                diff_display = format_time_ms(diff_ms) if diff_ms is not None else ""
+
+                # % Back = difference / time
+                pct_back = ""
+                if diff_ms is not None and ft and float(ft) != 0:
+                    try:
+                        pct_back = diff_ms / float(ft)
+                    except Exception:
+                        pct_back = ""
+
+                # % Winning = winner_time / racer_time
+                pct_winning = ""
+                if pw is not None:
+                    pct_winning = pw
+
+                # % Average = % Winning - mean(%Winning)
+                pct_average = ""
+                if isinstance(pct_winning, float) and mean_pw is not None:
+                    pct_average = pct_winning - mean_pw
+
+                # % Median = % Winning - median(%Winning)
+                pct_median = ""
+                if isinstance(pct_winning, float) and median_pw is not None:
+                    pct_median = pct_winning - median_pw
+
+                # Helper to format percentage values as decimal (e.g., 0.98) or blank
+                def fmt_pct(v):
+                    if v is None or v == "":
+                        return ""
+                    try:
+                        return f"{float(v):.6f}"
+                    except Exception:
+                        return ""
 
                 writer.writerow(
                     [
                         idx,
                         bib,
                         name,
-                        format_time_ms(finish_time_ms),
+                        first_name,
+                        last_name,
+                        age,
                         gender,
+                        time_display,
+                        diff_display,
+                        fmt_pct(pct_back),
+                        fmt_pct(pct_winning),
+                        fmt_pct(pct_average),
+                        fmt_pct(pct_median),
                         team,
                     ]
                 )

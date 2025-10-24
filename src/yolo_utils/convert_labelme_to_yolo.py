@@ -5,7 +5,10 @@ import argparse
 import logging
 
 # Set up basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 
 def convert_labelme_to_yolo(json_dir: str, output_dir: str):
     """
@@ -33,22 +36,24 @@ def convert_labelme_to_yolo(json_dir: str, output_dir: str):
                 data = json.load(f)
 
             # Get image dimensions
-            image_width = float(data['imageWidth'])
-            image_height = float(data['imageHeight'])
-            
+            image_width = float(data["imageWidth"])
+            image_height = float(data["imageHeight"])
+
             if image_width <= 0 or image_height <= 0:
-                logging.warning(f"Skipping {json_file.name} due to invalid image dimensions.")
+                logging.warning(
+                    f"Skipping {json_file.name} due to invalid image dimensions."
+                )
                 continue
 
             yolo_labels = []
-            for shape in data['shapes']:
-                if shape['shape_type'] != 'rectangle':
+            for shape in data["shapes"]:
+                if shape["shape_type"] != "rectangle":
                     continue
 
-                class_id = int(shape['label'])
-                
+                class_id = int(shape["label"])
+
                 # Extract points and ensure correct order (top-left, bottom-right)
-                points = shape['points']
+                points = shape["points"]
                 x1 = min(points[0][0], points[1][0])
                 y1 = min(points[0][1], points[1][1])
                 x2 = max(points[0][0], points[1][0])
@@ -65,7 +70,7 @@ def convert_labelme_to_yolo(json_dir: str, output_dir: str):
                 norm_center_y = center_y / image_height
                 norm_width = box_width / image_width
                 norm_height = box_height / image_height
-                
+
                 # Format for YOLO .txt file
                 yolo_labels.append(
                     f"{class_id} {norm_center_x:.6f} {norm_center_y:.6f} "
@@ -76,13 +81,15 @@ def convert_labelme_to_yolo(json_dir: str, output_dir: str):
             output_txt_file = output_path / f"{json_file.stem}.txt"
             with open(output_txt_file, "w") as f:
                 f.write("\n".join(yolo_labels))
-            
+
             converted_count += 1
 
         except Exception as e:
             logging.error(f"Failed to process {json_file.name}: {e}")
 
-    logging.info(f"Conversion complete. Successfully converted {converted_count} files.")
+    logging.info(
+        f"Conversion complete. Successfully converted {converted_count} files."
+    )
 
 
 if __name__ == "__main__":
