@@ -55,3 +55,13 @@ sink:
   retry_seconds: 2.0
   max_retry_seconds: 30.0
   timeout_seconds: 5.0
+
+stream:
+  # Publishes annotated frames to <sink.api_url>/api/frame so the browser
+  # (localhost:8001/ or the React frontend) can show a live preview. Uses
+  # drop-oldest semantics -- a slow network never adds latency to detection
+  # or finish-line timing. Disable if bandwidth/CPU is tight on race day.
+  enabled: true
+  target_fps: 8.0
+  jpeg_quality: 80
+  timeout_seconds: 2.0

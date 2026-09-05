@@ -26,6 +26,7 @@ from .detect import Detector
 from .ocr import BibReader
 from .pipeline import Pipeline
 from .sink import FinishEvent, ResultSink
+from .stream import FrameStreamer
 
 logger = logging.getLogger("race_cv")
 
@@ -116,6 +117,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--preview", action="store_true", help="Show an annotated preview window"
     )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not publish annotated frames to the API server for browser viewing",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
 
@@ -167,8 +173,20 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    # Streaming publishes to the same API server results go to, so it's
+    # automatically disabled whenever there's nowhere to send it (--no-api).
+    streamer = None
+    if config.stream.enabled and not args.no_stream and config.sink.api_url:
+        streamer = FrameStreamer(config.sink.api_url, config.stream)
+        streamer.start()
+        logger.info(
+            "Publishing preview frames to %s/api/frame at up to %.1f fps",
+            config.sink.api_url,
+            config.stream.target_fps,
+        )
+
     on_result = None
-    if args.preview:
+    if args.preview or streamer is not None:
         import cv2
 
         from .overlay import annotate
@@ -178,12 +196,15 @@ def main(argv: list[str] | None = None) -> int:
                 p.track_id: (pipeline.voter.resolve(p.track_id).text or "?")
                 for p in result.people
             }
-            frame = annotate(
+            annotated = annotate(
                 result, pipeline.line, pipeline.detector.roi, pipeline.stats, labels
             )
-            cv2.imshow("race_cv preview", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                stopping["flag"] = True
+            if streamer is not None:
+                streamer.submit(annotated)
+            if args.preview:
+                cv2.imshow("race_cv preview", annotated)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    stopping["flag"] = True
 
     last_report = time.time()
     try:
@@ -198,39 +219,45 @@ def main(argv: list[str] | None = None) -> int:
             if on_result is not None:
                 on_result(result)
             if time.time() - last_report >= 10:
-                _report(pipeline, sink, source)
+                _report(pipeline, sink, source, streamer)
                 last_report = time.time()
     finally:
         pipeline.flush()
         source.release()
+        if streamer is not None:
+            streamer.stop()
         if args.preview:
             import cv2
 
             cv2.destroyAllWindows()
         stats = sink.stop()
-        _report(pipeline, sink, source)
+        _report(pipeline, sink, source, streamer)
         _report_undelivered(sink, stats)
 
     return 0
 
 
-def _report(pipeline: Pipeline, sink: ResultSink, source) -> None:
+def _report(
+    pipeline: Pipeline, sink: ResultSink, source, streamer: FrameStreamer | None = None
+) -> None:
     stats = pipeline.stats
     sink_stats = sink.stats
     dropped = getattr(source, "dropped", 0)
-    logger.info(
-        "health | processed %d (%.1f fps) | paced out %d | camera dropped %d | "
-        "finishers %d (unknown bib %d) | delivered %d | pending %d%s",
-        stats.frames_processed,
-        stats.processed_fps,
-        stats.frames_paced_out,
-        dropped,
-        stats.events_emitted,
-        stats.unknown_bib_events,
-        sink_stats.delivered,
-        sink_stats.pending,
-        f" | last error: {sink_stats.last_error}" if sink_stats.last_error else "",
+
+    message = (
+        f"health | processed {stats.frames_processed} ({stats.processed_fps:.1f} fps) | "
+        f"paced out {stats.frames_paced_out} | camera dropped {dropped} | "
+        f"finishers {stats.events_emitted} (unknown bib {stats.unknown_bib_events}) | "
+        f"delivered {sink_stats.delivered} | pending {sink_stats.pending}"
     )
+    if sink_stats.last_error:
+        message += f" | last error: {sink_stats.last_error}"
+    if streamer is not None:
+        stream_stats = streamer.stats
+        message += f" | preview sent {stream_stats.sent} dropped {stream_stats.dropped}"
+        if stream_stats.last_error:
+            message += f" | preview error: {stream_stats.last_error}"
+    logger.info(message)
 
 
 def _report_undelivered(sink: ResultSink, stats) -> None:

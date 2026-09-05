@@ -93,6 +93,16 @@ health | processed 1834 (9.8 fps) | paced out 3502 | camera dropped 12 |
 `pending` climbing, or a `last error`, means results are not reaching the API —
 the failure is visible within seconds instead of after the race.
 
+## Browser preview
+
+`localhost:8001/` (and `/video_feed`) work again under `--no-processor`:
+`race_cv` publishes annotated frames to `POST /api/frame`, and the server
+relays the latest one to any browser watching. This is presentation only --
+see `stream.py` and `config.StreamConfig`. It uses the same drop-oldest,
+never-block discipline as camera capture: a slow network POST only ever costs
+a stale preview frame, never latency on detection or finish-line timing.
+Disable with `--no-stream` or `stream.enabled: false` if bandwidth is tight.
+
 ## Known gaps
 
 - The current server computes `finishTime = wallClockTime - raceStartTime`. A

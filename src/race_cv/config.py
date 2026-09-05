@@ -110,6 +110,21 @@ class SinkConfig:
 
 
 @dataclass
+class StreamConfig:
+    """Publishing annotated frames to the API server for browser viewing.
+
+    Deliberately separate from result delivery: a dropped preview frame is
+    nothing, a dropped finish event is a lost racer, so this uses drop-oldest
+    semantics and short timeouts rather than sink.py's persist-and-retry.
+    """
+
+    enabled: bool = True
+    target_fps: float = 8.0
+    jpeg_quality: int = 80
+    timeout_seconds: float = 2.0
+
+
+@dataclass
 class Config:
     """Top-level pipeline configuration."""
 
@@ -119,6 +134,7 @@ class Config:
     ocr: OcrConfig = field(default_factory=OcrConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     sink: SinkConfig = field(default_factory=SinkConfig)
+    stream: StreamConfig = field(default_factory=StreamConfig)
 
     @classmethod
     def load(cls, path: str | Path | None) -> "Config":
@@ -141,6 +157,7 @@ class Config:
             "ocr": OcrConfig,
             "pipeline": PipelineConfig,
             "sink": SinkConfig,
+            "stream": StreamConfig,
         }
         unknown = set(raw) - set(sections)
         if unknown:

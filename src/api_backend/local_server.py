@@ -432,6 +432,72 @@ async def root() -> HTMLResponse:
     return HTMLResponse(content=html_content)
 
 
+def _placeholder_frame(text: str) -> bytes:
+    """A single JPEG shown while no external frame has arrived yet.
+
+    Without this, an <img> pointed at /video_feed shows a broken-image icon
+    until the first POST /api/frame lands, which looks identical to "this is
+    broken" even when it's simply "race_cv hasn't started yet".
+    """
+    image = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(
+        image, text, (30, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2
+    )
+    ok, buffer = cv2.imencode(".jpg", image)
+    return buffer.tobytes() if ok else b""
+
+
+async def _generate_relay_frames() -> AsyncGenerator[bytes, None]:
+    """Stream whatever race_cv (or any other external CV service) posts to
+    /api/frame, republishing it as MJPEG for the browser.
+
+    Polls app_state rather than pushing, so any number of browser tabs can
+    watch independently without race_cv needing to know how many viewers
+    exist -- exactly the coupling that made closing a tab affect the pipeline
+    in the legacy design.
+    """
+    last_sent_ts = None
+    waiting_message = _placeholder_frame("Waiting for race_cv to publish a frame...")
+    stale_after_seconds = 5.0
+
+    while True:
+        frame_bytes = app_state.get("latest_frame")
+        frame_ts = app_state.get("latest_frame_ts")
+
+        if frame_bytes is not None and frame_ts != last_sent_ts:
+            last_sent_ts = frame_ts
+            yield (
+                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+            )
+        elif frame_bytes is None or (time.time() - (frame_ts or 0)) > stale_after_seconds:
+            yield (
+                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                + waiting_message
+                + b"\r\n"
+            )
+
+        await asyncio.sleep(0.05)
+
+
+@app.post("/api/frame")
+async def post_frame(request: Request) -> Dict[str, Any]:
+    """Accept one annotated JPEG frame from an external CV service.
+
+    Body is the raw JPEG bytes (Content-Type: image/jpeg), not multipart --
+    this runs at several frames per second and the pipeline posting it must
+    never block on anything heavier than a plain POST. Only the latest frame
+    is kept; there is no history and no queue here on purpose, matching the
+    "always show the newest thing, drop what's stale" policy used everywhere
+    else frames are handled in this project.
+    """
+    body = await request.body()
+    if not body or body[:2] != b"\xff\xd8":
+        return {"success": False, "message": "expected raw JPEG bytes"}
+    app_state["latest_frame"] = body
+    app_state["latest_frame_ts"] = time.time()
+    return {"success": True}
+
+
 @app.get("/video_feed")
 async def video_feed(request: Request) -> Response:
     """Stream processed video frames as an MJPEG multipart response.
@@ -450,9 +516,13 @@ async def video_feed(request: Request) -> Response:
         processor = app_state.get("processor")
 
         if processor is None:
-            error_msg = "Video processor not initialized. Please ensure the server was started with proper command line arguments."
-            logger.error(error_msg)
-            return Response(error_msg, status_code=500)
+            # No in-process pipeline (--no-processor / race_cv mode). Relay
+            # whatever the external CV service last posted to /api/frame
+            # instead of failing outright -- race_cv owns the camera now, this
+            # process just republishes its frames for the browser.
+            return StreamingResponse(
+                _generate_relay_frames(), media_type="multipart/x-mixed-replace; boundary=frame"
+            )
 
         async def generate_frames() -> AsyncGenerator[bytes, None]:
             """Asynchronous generator yielding MJPEG frame byte chunks.
