@@ -26,6 +26,7 @@ dependencies = [
     "torch>=2.5",
     "torchvision>=0.20",
     "numpy>=2.0",
+    "coremltools>=8.0",            # required to load the .mlpackage race model on macOS
     # API backend
     "fastapi>=0.115",
     "uvicorn>=0.30",

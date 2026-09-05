@@ -201,6 +201,41 @@ check_python_env() {
     "$RACE_CV_PYTHON" -c "import ultralytics; print('   ultralytics', ultralytics.__version__)"
 }
 
+check_model_backend() {
+    echo -e "${YELLOW}🤖 Checking model backend...${NC}"
+    local effective_model
+    effective_model=$(MODEL_PATH_OVERRIDE="$MODEL_PATH" "$RACE_CV_PYTHON" -c "
+import os, sys
+sys.path.insert(0, 'src')
+from race_cv.config import Config
+config = Config.load('$CONFIG')
+print(os.environ.get('MODEL_PATH_OVERRIDE') or config.model.path)
+" 2>/dev/null)
+
+    if [[ -z "$effective_model" ]]; then
+        echo -e "${RED}❌ Could not resolve model path from $CONFIG${NC}"
+        exit 1
+    fi
+    if [[ ! -e "$effective_model" ]]; then
+        echo -e "${RED}❌ Model not found: $effective_model${NC}"
+        exit 1
+    fi
+
+    if [[ "$effective_model" == *.mlpackage ]]; then
+        # ultralytics imports coremltools lazily, only when loading a .mlpackage,
+        # so a missing install doesn't surface until race_cv is already running --
+        # exactly the silent-until-it-isn't failure mode this project keeps
+        # tripping over. Check for it now, before anything starts.
+        if ! "$RACE_CV_PYTHON" -c "import coremltools" 2>/dev/null; then
+            echo -e "${RED}❌ $effective_model needs coremltools, not installed for $RACE_CV_PYTHON${NC}"
+            echo -e "${BLUE}💡 Install it:${NC}"
+            echo -e "${BLUE}     $RACE_CV_PYTHON -m pip install coremltools${NC}"
+            exit 1
+        fi
+    fi
+    echo -e "${GREEN}✅ Model $effective_model${NC}"
+}
+
 check_config() {
     echo -e "${YELLOW}⚙️  Checking config...${NC}"
     if [[ ! -f "$CONFIG" ]]; then
@@ -287,6 +322,8 @@ echo ""
 check_python_env
 echo ""
 check_config
+echo ""
+check_model_backend
 echo ""
 
 start_frontend
