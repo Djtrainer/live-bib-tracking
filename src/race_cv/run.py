@@ -111,6 +111,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--roster", default=None, help="Start-list CSV for bib snapping")
     parser.add_argument(
+        "--model", default=None, help="Override model.path from the config file"
+    )
+    parser.add_argument(
         "--preview", action="store_true", help="Show an annotated preview window"
     )
     parser.add_argument("--verbose", action="store_true")
@@ -129,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         config.sink.api_url = args.api_url
     if args.no_api:
         config.sink.api_url = ""
+    if args.model:
+        config.model.path = args.model
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
     source = open_source(args.source, start_epoch=time.time())

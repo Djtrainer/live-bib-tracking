@@ -56,15 +56,22 @@ class FinishEvent:
         ``wallClockTime`` is kept for compatibility with the current server,
         which converts it against the race clock. ``captureTime`` and ``eventId``
         are the fields the hardened server should prefer.
+
+        ``racerName`` is omitted rather than sent as ``None``: the server
+        resolves a display name with
+        ``roster_data.get("racerName", finish_data.get("racerName", default))``,
+        and a *present* key with value ``None`` short-circuits that chain and
+        overrides the roster lookup and the "Racer #{bib}" fallback with a
+        literal null. Omitting the key lets the server's own fallback apply.
         """
-        return {
+        payload: dict[str, Any] = {
             "eventId": self.event_id,
             "bibNumber": self.bib_number or f"Unknown-{self.track_id}",
             "captureTime": self.capture_ts,
             "wallClockTime": self.capture_ts,
-            "racerName": None,
             "source": "race_cv",
         }
+        return payload
 
 
 @dataclass

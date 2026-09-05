@@ -56,10 +56,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize processor using environment variables (for Docker) or command-line args (for direct execution)
     try:
-        # Check if processor is already initialized (from main() function)
-        if app_state.get("processor") is not None:
+        # Check if main() already decided what to do about a processor -- including
+        # the --no-processor case, where it deliberately sets app_state["processor"]
+        # to None. Checking "is not None" here would miss that: main() imports
+        # uvicorn at module scope, so "uvicorn" in sys.modules is true even for a
+        # direct `python local_server.py` run, and this lifespan would otherwise
+        # fall through to the env-var branch below and start a second pipeline.
+        if app_state.get("processor_configured"):
             logger.info(
-                "Processor already initialized in main() - skipping lifespan initialization"
+                "Processor already configured in main() - skipping lifespan initialization"
             )
             yield
             return
@@ -1537,6 +1542,15 @@ def main() -> None:
         default=0,
         help="The index of the camera to use for live mode (e.g., 0 for built-in, 1 for iPhone).",
     )
+    parser.add_argument(
+        "--no-processor",
+        action="store_true",
+        help=(
+            "Run only the results API, WebSocket, and static frontend; do not "
+            "start a video pipeline. Use this when a separate CV service "
+            "(e.g. race_cv) will POST finish events to /api/results instead."
+        ),
+    )
 
     try:
         args = parser.parse_args()
@@ -1545,6 +1559,43 @@ def main() -> None:
         return
     except Exception as e:
         logger.error(f"Unexpected error parsing arguments: {e}")
+        return
+
+    if args.no_processor:
+        if not (1 <= args.port <= 65535):
+            logger.error(
+                f"Invalid port number: {args.port}. Must be between 1 and 65535."
+            )
+            return
+        logger.info(
+            "Running in API-only mode (--no-processor): no video pipeline will "
+            "start here. Expecting an external CV service (e.g. race_cv) to "
+            "POST finish events to /api/results."
+        )
+        app_state["processor"] = None
+        app_state["processor_configured"] = True
+        try:
+            logger.info(f"Starting unified server on http://{args.host}:{args.port}")
+            uvicorn.run(
+                "__main__:app",
+                host=args.host,
+                port=args.port,
+                log_level="info",
+                access_log=True,
+            )
+        except OSError as e:
+            if "Address already in use" in str(e):
+                logger.error(
+                    f"Port {args.port} is already in use. Please try a different port."
+                )
+            else:
+                logger.error(f"Network error starting server: {e}")
+        except KeyboardInterrupt:
+            logger.info("Server stopped by user (Ctrl+C)")
+        except Exception as e:
+            logger.error(f"Unexpected error starting server: {e}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
         return
 
     # Set video source based on inference mode
@@ -1741,6 +1792,7 @@ def main() -> None:
 
         # Store processor in app state for the web endpoints
         app_state["processor"] = processor
+        app_state["processor_configured"] = True
         if args.inference_mode == "live":
             logger.info("✅ Video processor initialized successfully in Live Mode!")
         else:
