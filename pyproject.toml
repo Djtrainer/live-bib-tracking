@@ -19,24 +19,38 @@ classifiers = [
     "Intended Audience :: Science/Research",
 ]
 dependencies = [
-    "matplotlib==3.10.3",
-    "numpy==2.2.0",
-    "pandas==2.3.0",
-    "PyYAML==6.0.2",
-    "scikit-learn==1.6.1",
-    "scipy==1.15.3",
-    "seaborn==0.13.2",
-    "shap==0.48.0",
-    "statsmodels==0.14.4",
-    "torch==2.7.1",
-    "torch-geometric==2.6.1",
-    "tqdm==4.67.1",
-    "wandb==0.21.0",
-    "xgboost==3.0.2",
+    # Computer vision pipeline
+    "ultralytics>=8.3.0",          # YOLO11 weights need >=8.3; 8.1.x cannot load them
+    "opencv-python>=4.10",
+    "easyocr>=1.7.1",
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "numpy>=2.0",
+    # API backend
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",     # required by FastAPI for UploadFile
+    # Shared
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    "pandas>=2.2",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+race-cv = "race_cv.run:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

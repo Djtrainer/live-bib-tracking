@@ -26,3 +26,10 @@ src/image_processor/direct_connect_phone.md
 *.log
 src/frontend/node_modules/*
 models/*
+
+# macOS finder metadata
+.DS_Store
+
+# race_cv outputs
+data/results/events.jsonl
+runs/

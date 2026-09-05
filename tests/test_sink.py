@@ -1,0 +1,191 @@
+"""Tests for durable finish-event delivery.
+
+The central case is a regression test for the race-day data loss found in
+backend.log: a finisher refused because the race clock had not been started
+must be retried until it lands, never marked sent and dropped.
+"""
+
+import json
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from race_cv.config import SinkConfig
+from race_cv.sink import FinishEvent, ResultSink, make_event_id
+
+
+class FakeResponse:
+    def __init__(self, body, status_code=200):
+        self._body = body
+        self.status_code = status_code
+        self.text = json.dumps(body)
+
+    def json(self):
+        return self._body
+
+
+class FakeSession:
+    """Records posts and replays a scripted sequence of responses."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.posts = []
+
+    def post(self, url, json=None, timeout=None):
+        self.posts.append(json)
+        response = self._responses.pop(0) if self._responses else FakeResponse(
+            {"success": True}
+        )
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def event(track_id=1, bib="10", ts=1000.0) -> FinishEvent:
+    return FinishEvent(
+        event_id=make_event_id(track_id, ts, "test"),
+        track_id=track_id,
+        bib_number=bib,
+        capture_ts=ts,
+        frame_index=42,
+    )
+
+
+def sink_for(tmp_path, session, **overrides) -> ResultSink:
+    config = SinkConfig(
+        api_url="http://localhost:8001",
+        event_log=str(tmp_path / "events.jsonl"),
+        retry_seconds=0.01,
+        max_retry_seconds=0.02,
+        **overrides,
+    )
+    return ResultSink(config, session=session)
+
+
+class TestDelivery:
+    def test_successful_delivery_marks_delivered(self, tmp_path):
+        session = FakeSession([FakeResponse({"success": True})])
+        sink = sink_for(tmp_path, session)
+        sink.submit(event())
+        sink.start()
+        deadline = time.time() + 2
+        while sink.stats.delivered < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        sink.stop()
+        assert sink.stats.delivered == 1
+        assert sink.stats.undelivered == 0
+
+    def test_race_clock_refusal_is_retried_not_dropped(self, tmp_path):
+        """The Bib #10 regression.
+
+        A 200 OK carrying success=False must not count as delivery. The event
+        is retried until the operator starts the clock, and then lands.
+        """
+        refusal = FakeResponse(
+            {"success": False, "message": "Race clock is not running. Please start the race clock first."}
+        )
+        session = FakeSession([refusal, refusal, FakeResponse({"success": True})])
+        sink = sink_for(tmp_path, session)
+        sink.submit(event(bib="10"))
+        sink.start()
+        deadline = time.time() + 3
+        while sink.stats.delivered < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        sink.stop()
+
+        assert sink.stats.delivered == 1, "refused finisher must eventually land"
+        assert sink.stats.failures >= 2, "refusals must be counted as failures"
+        assert len(session.posts) == 3
+        assert all(p["bibNumber"] == "10" for p in session.posts)
+
+    def test_retries_reuse_one_event_id(self, tmp_path):
+        """Idempotency: the server must be able to dedupe retries."""
+        refusal = FakeResponse({"success": False, "message": "nope"})
+        session = FakeSession([refusal, refusal, FakeResponse({"success": True})])
+        sink = sink_for(tmp_path, session)
+        sink.submit(event())
+        sink.start()
+        deadline = time.time() + 3
+        while sink.stats.delivered < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        sink.stop()
+        assert len({p["eventId"] for p in session.posts}) == 1
+
+    def test_network_error_is_retried(self, tmp_path):
+        session = FakeSession(
+            [ConnectionError("connection refused"), FakeResponse({"success": True})]
+        )
+        sink = sink_for(tmp_path, session)
+        sink.submit(event())
+        sink.start()
+        deadline = time.time() + 3
+        while sink.stats.delivered < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        sink.stop()
+        assert sink.stats.delivered == 1
+
+    def test_http_error_is_retried(self, tmp_path):
+        session = FakeSession(
+            [FakeResponse({"detail": "boom"}, status_code=500), FakeResponse({"success": True})]
+        )
+        sink = sink_for(tmp_path, session)
+        sink.submit(event())
+        sink.start()
+        deadline = time.time() + 3
+        while sink.stats.delivered < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        sink.stop()
+        assert sink.stats.delivered == 1
+
+
+class TestDurability:
+    def test_event_is_persisted_before_any_delivery_attempt(self, tmp_path):
+        """A crash before delivery must still leave the result on disk."""
+        session = FakeSession([])
+        sink = sink_for(tmp_path, session)
+        sink.submit(event(bib="322"))
+        # Worker never started: nothing has been sent anywhere.
+        assert session.posts == []
+        lines = Path(sink.event_log).read_text().strip().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["status"] == "pending"
+        assert record["bib_number"] == "322"
+
+    def test_delivery_appends_a_second_record(self, tmp_path):
+        session = FakeSession([FakeResponse({"success": True})])
+        sink = sink_for(tmp_path, session)
+        sink.submit(event())
+        sink.start()
+        deadline = time.time() + 2
+        while sink.stats.delivered < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        sink.stop()
+        statuses = [
+            json.loads(line)["status"]
+            for line in Path(sink.event_log).read_text().strip().splitlines()
+        ]
+        assert statuses == ["pending", "delivered"]
+
+    def test_offline_mode_needs_no_api(self, tmp_path):
+        config = SinkConfig(api_url="", event_log=str(tmp_path / "e.jsonl"))
+        sink = ResultSink(config)
+        assert sink.deliver_once(event()) == (True, None)
+
+    def test_undelivered_events_are_recoverable(self, tmp_path):
+        session = FakeSession([])
+        sink = sink_for(tmp_path, session)
+        sink.submit(event(track_id=1))
+        sink.submit(event(track_id=2))
+        remaining = sink.undelivered_events()
+        assert [e.track_id for e in remaining] == [1, 2]
+
+
+def test_event_ids_are_stable_and_unique():
+    assert make_event_id(1, 100.0, "r") == make_event_id(1, 100.0, "r")
+    assert make_event_id(1, 100.0, "r") != make_event_id(2, 100.0, "r")
+    assert make_event_id(1, 100.0, "r") != make_event_id(1, 100.5, "r")

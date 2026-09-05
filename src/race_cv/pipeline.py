@@ -1,0 +1,276 @@
+"""The frame loop.
+
+Differences from the legacy loop that matter on race day:
+
+* **No burst frame skipping.** The old cooldown dropped 30 frames -- a full
+  second at 30 fps -- whenever 10 consecutive frames contained no *gated*
+  person, then immediately re-armed. In backend.log it fired continuously,
+  every ~310 ms, for hundreds of lines: racers could and did cross the line
+  inside the blind window. Pacing here is uniform, driven by a target rate, and
+  the achieved rate is reported.
+
+* **No geometric gate on tracking.** Everyone detected is tracked. Geometry
+  decides only who *finished*.
+
+* **Emission is decoupled from timing.** A crossing is timestamped the moment it
+  happens (interpolated between capture timestamps) but the finish event is held
+  for a few frames so OCR can keep voting. Delaying the event costs nothing
+  because the timestamp was already fixed.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Callable, Iterable
+
+import numpy as np
+
+from .capture import Frame
+from .config import Config
+from .detect import Detection, Detector
+from .finish import Crossing, CrossingDetector, FinishLine
+from .ocr import BibRead, BibReader, BibVoter, crop_with_padding
+from .sink import FinishEvent, make_event_id
+
+
+@dataclass
+class PipelineStats:
+    """Health of a run. Every field is something an operator can act on."""
+
+    frames_seen: int = 0
+    frames_processed: int = 0
+    frames_paced_out: int = 0
+    people_detections: int = 0
+    bib_detections: int = 0
+    ocr_reads: int = 0
+    crossings: int = 0
+    events_emitted: int = 0
+    suppressed_first_seen_past: int = 0
+    unknown_bib_events: int = 0
+    first_capture_ts: float | None = None
+    last_capture_ts: float | None = None
+
+    @property
+    def wall_span(self) -> float:
+        if self.first_capture_ts is None or self.last_capture_ts is None:
+            return 0.0
+        return self.last_capture_ts - self.first_capture_ts
+
+    @property
+    def processed_fps(self) -> float:
+        return self.frames_processed / self.wall_span if self.wall_span > 0 else 0.0
+
+
+@dataclass
+class FrameResult:
+    """Everything the pipeline learned from one frame."""
+
+    frame: Frame
+    people: list[Detection] = field(default_factory=list)
+    bibs: list[Detection] = field(default_factory=list)
+    crossings: list[Crossing] = field(default_factory=list)
+    events: list[FinishEvent] = field(default_factory=list)
+
+
+@dataclass
+class _PendingFinish:
+    crossing: Crossing
+    frames_remaining: int
+
+
+def associate_bib(person: Detection, bibs: Iterable[Detection]) -> Detection | None:
+    """Pick the bib whose centre lies inside a person's box.
+
+    When several qualify -- packs of runners overlap constantly -- the highest
+    confidence one wins rather than whichever happened to be first in the list.
+    """
+    x1, y1, x2, y2 = person.xyxy
+    candidates = [
+        b for b in bibs if x1 <= b.center[0] <= x2 and y1 <= b.center[1] <= y2
+    ]
+    return max(candidates, key=lambda b: b.conf) if candidates else None
+
+
+class Pipeline:
+    """Owns per-run state and turns frames into finish events."""
+
+    def __init__(
+        self,
+        config: Config,
+        detector: Detector,
+        frame_width: int,
+        frame_height: int,
+        run_id: str,
+        bib_reader: BibReader | None = None,
+        roster: set[str] | None = None,
+        emit: Callable[[FinishEvent], None] | None = None,
+    ):
+        self.config = config
+        self.detector = detector
+        self.run_id = run_id
+        self.line = FinishLine(config.finish_line, frame_width, frame_height)
+        self.crossings = CrossingDetector(self.line, config.finish_line)
+        self.voter = BibVoter(config.ocr, roster=roster)
+        self.reader = bib_reader
+        self.emit = emit or (lambda event: None)
+        self.stats = PipelineStats()
+
+        self._pending: dict[int, _PendingFinish] = {}
+        self._seen_last_frame: set[int] = set()
+        self._last_processed_ts: float | None = None
+        self._next_due_ts: float | None = None
+
+    def should_process(self, frame: Frame) -> bool:
+        """Uniform pacing: never a burst, never a blind second.
+
+        Scheduling runs off an accumulating deadline rather than "time since the
+        last processed frame". The naive form loses a frame every few intervals
+        to floating point (0.3 - 0.2 is fractionally less than 0.1), which
+        silently runs the pipeline below its configured rate.
+
+        Advances the schedule as a side effect when it returns True, so pacing
+        state lives in exactly one place.
+        """
+        target = self.config.pipeline.target_fps
+        if target <= 0:
+            return True
+        interval = 1.0 / target
+        if self._next_due_ts is None:
+            self._next_due_ts = frame.capture_ts + interval
+            return True
+        # Tolerance absorbs double-rounding without ever admitting a real burst.
+        if frame.capture_ts < self._next_due_ts - interval * 1e-6:
+            return False
+        self._next_due_ts += interval
+        if self._next_due_ts <= frame.capture_ts:
+            # We fell behind (slow inference). Resync to now instead of firing a
+            # catch-up burst -- bursts are what blinded the old pipeline.
+            self._next_due_ts = frame.capture_ts + interval
+        return True
+
+    def process(self, frame: Frame) -> FrameResult:
+        """Run one frame end to end."""
+        self.stats.frames_processed += 1
+        self._last_processed_ts = frame.capture_ts
+        if self.stats.first_capture_ts is None:
+            self.stats.first_capture_ts = frame.capture_ts
+        self.stats.last_capture_ts = frame.capture_ts
+
+        detections = self.detector.track(frame.image)
+        people, bibs = self.detector.split(detections)
+        self.stats.people_detections += len(people)
+        self.stats.bib_detections += len(bibs)
+
+        result = FrameResult(frame=frame, people=people, bibs=bibs)
+
+        for person in people:
+            track_id = person.track_id
+            self._read_bib(frame.image, person, bibs, track_id)
+            crossing = self.crossings.update(
+                track_id, person.xyxy, frame.capture_ts, frame.index
+            )
+            if crossing is not None:
+                self.stats.crossings += 1
+                result.crossings.append(crossing)
+                self._pending[track_id] = _PendingFinish(
+                    crossing=crossing,
+                    frames_remaining=self.config.finish_line.confirm_frames,
+                )
+
+        seen_now = {p.track_id for p in people}
+        result.events.extend(self._advance_pending(seen_now))
+        self._seen_last_frame = seen_now
+        self.stats.suppressed_first_seen_past = len(
+            self.crossings.suppressed_first_seen_past
+        )
+        return result
+
+    def _read_bib(
+        self,
+        image: np.ndarray,
+        person: Detection,
+        bibs: list[Detection],
+        track_id: int,
+    ) -> None:
+        if self.reader is None or not self.config.ocr.enabled:
+            return
+        if self.voter.is_locked(track_id):
+            return
+        bib = associate_bib(person, bibs)
+        if bib is None or bib.conf < self.config.ocr.min_bib_yolo_conf:
+            return
+        # OCR runs against the full-resolution frame, never the downscaled crop.
+        crop = crop_with_padding(image, bib.xyxy, self.config.ocr.crop_padding)
+        if crop.size == 0:
+            return
+        text, confidence = self.reader.read(self.reader.preprocess(crop))
+        if text:
+            self.stats.ocr_reads += 1
+            self.voter.add(track_id, BibRead(text, confidence, bib.conf))
+
+    def _advance_pending(self, seen_now: set[int]) -> list[FinishEvent]:
+        """Emit finishes whose confirmation window elapsed or whose track ended."""
+        ready: list[int] = []
+        for track_id, pending in self._pending.items():
+            pending.frames_remaining -= 1
+            left_frame = track_id not in seen_now
+            if pending.frames_remaining <= 0 or left_frame:
+                ready.append(track_id)
+
+        events = []
+        for track_id in ready:
+            pending = self._pending.pop(track_id)
+            events.append(self._build_event(pending.crossing))
+        for event in events:
+            self.stats.events_emitted += 1
+            if event.bib_number is None:
+                self.stats.unknown_bib_events += 1
+            self.emit(event)
+        return events
+
+    def _build_event(self, crossing: Crossing) -> FinishEvent:
+        verdict = self.voter.resolve(crossing.track_id)
+        return FinishEvent(
+            event_id=make_event_id(crossing.track_id, crossing.capture_ts, self.run_id),
+            track_id=crossing.track_id,
+            bib_number=verdict.text,
+            capture_ts=crossing.capture_ts,
+            frame_index=crossing.frame_index,
+            ocr_votes=verdict.votes,
+            ocr_score=verdict.score,
+            bib_locked=verdict.locked,
+            in_roster=verdict.in_roster,
+            interpolated=crossing.interpolated,
+        )
+
+    def flush(self) -> list[FinishEvent]:
+        """Emit every finish still waiting for confirmation.
+
+        Called at the end of a run so a racer who crossed in the final frames is
+        never lost to an unfinished confirmation window.
+        """
+        events = [self._build_event(p.crossing) for p in self._pending.values()]
+        self._pending.clear()
+        for event in events:
+            self.stats.events_emitted += 1
+            if event.bib_number is None:
+                self.stats.unknown_bib_events += 1
+            self.emit(event)
+        return events
+
+    def run(
+        self,
+        frames: Iterable[Frame],
+        on_result: Callable[[FrameResult], None] | None = None,
+    ) -> PipelineStats:
+        """Consume a frame source until it is exhausted."""
+        for frame in frames:
+            self.stats.frames_seen += 1
+            if not self.should_process(frame):
+                self.stats.frames_paced_out += 1
+                continue
+            result = self.process(frame)
+            if on_result is not None:
+                on_result(result)
+        self.flush()
+        return self.stats

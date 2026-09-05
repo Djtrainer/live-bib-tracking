@@ -1,0 +1,57 @@
+# Race CV pipeline configuration.
+#
+# Geometry is NORMALIZED (fractions of frame width/height) so a config survives
+# a resolution change. Values outside [0, 1] are legal -- the finish line is
+# usually anchored off-frame.
+#
+# IMPORTANT: the finish_line below is carried over from the 2025 setup and is
+# only correct for that exact camera position. Re-run scripts/calibrate.py
+# against this year's camera before the race and confirm the overlay.
+
+model:
+  path: models/yolo11_white_bibs/weights/last.mlpackage
+  tracker: config/custom_tracker.yaml
+  imgsz: 640
+  conf: 0.25          # now actually reaches the model (it never used to)
+  iou: 0.7
+  device: cpu         # "mps" for Apple GPU, "cpu" for CoreML/ANE
+  half: false
+  person_class: 0
+  bib_class: 1
+
+roi:
+  # Disabled on purpose. The 2025 pipeline cropped away the left ~28% of every
+  # frame, so any racer on that side was invisible to the detector. Only enable
+  # this if you have calibrated it and confirmed racers cannot enter elsewhere.
+  enabled: false
+  polygon: []
+  scale: 1.0
+
+finish_line:
+  p1: [0.0, 1.09]
+  p2: [1.0, 0.78]
+  side: below              # which half-plane counts as finished
+  confirm_frames: 8        # frames to keep reading the bib after the crossing
+  reference_point: bottom_center   # feet: stable when the box widens
+  require_approach: true   # a track first seen past the line is not a finisher
+
+ocr:
+  enabled: true
+  min_bib_yolo_conf: 0.70
+  min_ocr_conf: 0.40
+  lock_conf: 0.99
+  min_len: 1               # was effectively 2: bibs 1-9 could never resolve
+  max_len: 5
+  crop_padding: 15
+  target_height: 120
+
+pipeline:
+  target_fps: 10.0         # 0 = process every frame (replay uses this)
+  log_every_n_frames: 300
+
+sink:
+  api_url: http://localhost:8001
+  event_log: data/results/events.jsonl
+  retry_seconds: 2.0
+  max_retry_seconds: 30.0
+  timeout_seconds: 5.0
