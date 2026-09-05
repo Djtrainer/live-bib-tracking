@@ -197,7 +197,12 @@ def main(argv: list[str] | None = None) -> int:
                 for p in result.people
             }
             annotated = annotate(
-                result, pipeline.line, pipeline.detector.roi, pipeline.stats, labels
+                result,
+                pipeline.line,
+                pipeline.detector.roi,
+                pipeline.stats,
+                labels,
+                boundary=pipeline.boundary,
             )
             if streamer is not None:
                 streamer.submit(annotated)

@@ -15,7 +15,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from race_cv.capture import Frame
-from race_cv.config import Config, FinishLineConfig, OcrConfig, PipelineConfig
+from race_cv.config import (
+    Config,
+    CourseBoundaryConfig,
+    FinishLineConfig,
+    OcrConfig,
+    PipelineConfig,
+)
 from race_cv.detect import Detection
 from race_cv.pipeline import Pipeline, associate_bib
 
@@ -179,3 +185,52 @@ class TestBibAssociation:
 
     def test_no_bib_returns_none(self):
         assert associate_bib(person(1, 600.0), []) is None
+
+
+class TestCourseBoundary:
+    """Confirms the boundary gate is actually wired into the frame loop:
+    someone outside it must never reach OCR, crossing detection, or a
+    finish event -- exactly the 2025 behavior this reproduces.
+    """
+
+    def _corridor_config(self) -> Config:
+        config = base_config()
+        config.course_boundary = CourseBoundaryConfig(
+            enabled=True,
+            left_p1=(0.3, 0.0),
+            left_p2=(0.3, 1.0),
+            right_p1=(0.7, 0.0),
+            right_p2=(0.7, 1.0),
+        )
+        return config
+
+    def test_person_outside_boundary_never_finishes(self):
+        config = self._corridor_config()
+        # Well to the left of the [0.3, 0.7] corridor (x in [10, 50] of 1000).
+        script = {
+            i: [person(1, 300.0 + i * 50, x1=10.0, x2=50.0)] for i in range(10)
+        }
+        pipeline, events = build(script, config=config)
+        pipeline.run(frames(10))
+        assert events == []
+        assert pipeline.stats.people_outside_boundary == 10
+        assert pipeline.stats.people_detections == 10  # still detected, just gated
+
+    def test_person_inside_boundary_finishes_normally(self):
+        config = self._corridor_config()
+        # Default person() box (x1=450, x2=550) sits inside [300, 700].
+        script = {i: [person(1, 300.0 + i * 50)] for i in range(10)}
+        pipeline, events = build(script, config=config)
+        pipeline.run(frames(10))
+        assert len(events) == 1
+        assert pipeline.stats.people_outside_boundary == 0
+
+    def test_boundary_disabled_by_default_keeps_everyone(self):
+        """The regression guard: nothing changes unless a venue opts in."""
+        script = {
+            i: [person(1, 300.0 + i * 50, x1=10.0, x2=50.0)] for i in range(10)
+        }
+        pipeline, events = build(script)  # base_config(): boundary not set -> disabled
+        pipeline.run(frames(10))
+        assert len(events) == 1
+        assert pipeline.stats.people_outside_boundary == 0

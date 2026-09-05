@@ -145,6 +145,7 @@ def main(argv=None) -> int:
                         pipeline.detector.roi,
                         pipeline.stats,
                         labels,
+                        boundary=pipeline.boundary,
                     )
                 )
             if processed % 200 == 0:

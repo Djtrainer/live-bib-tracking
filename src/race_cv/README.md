@@ -43,6 +43,24 @@ python scripts/calibrate.py --source 1 --config config/race_cv.yaml
 Click the two ends of the finish line, press `f` if the shaded "finished" side
 is wrong, then `s` to save.
 
+### Keeping non-runners off the course
+
+`course_boundary` (disabled by default) restricts tracking to people between
+two lines -- e.g. the edges of a driveway -- so someone walking past on the
+sidewalk is never counted as a racer at all. A person is kept if at least one
+corner of their box falls between the lines, interpolated at that corner's
+own y, so the region narrows or widens with distance the way a real course
+edge does in perspective.
+
+This reproduces the 2025 setup's `guide_line_left` / `guide_line_right` gate
+(`config/race_cv.yaml` ships the exact 2025 numbers). The difference:
+`PipelineStats.people_outside_boundary` counts everyone it excludes every run,
+and the overlay (`--preview`, or `--video-out` in replay) draws the lines
+themselves plus anyone gated out in gray, labeled "outside course" -- so a
+boundary that no longer matches this year's camera position is something you
+notice, not a silent drop. `scripts/calibrate.py` doesn't set this yet; edit
+`course_boundary` in the config directly, using the overlay to check it.
+
 ## Measure before you change anything
 
 ```bash

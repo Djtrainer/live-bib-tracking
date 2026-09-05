@@ -27,6 +27,24 @@ roi:
   polygon: []
   scale: 1.0
 
+course_boundary:
+  # Reproduces the 2025 setup's guide_line_left / guide_line_right: a person
+  # is only tracked as a runner if at least one corner of their box falls
+  # between these two lines. This is what keeps someone walking outside the
+  # driveway from ever being recorded as a racer.
+  #
+  # Unlike 2025, this isn't a silent filter: PipelineStats.people_outside_boundary
+  # counts everyone it excludes, and the overlay (scripts/replay.py --video-out,
+  # or --preview) draws both the lines and anyone gated out by them in gray, so
+  # a boundary that no longer matches the camera is visible, not a mystery.
+  #
+  # These are the exact 2025 numbers. Recalibrate if the camera moves.
+  enabled: true
+  left_p1: [0.31, 1.0]
+  left_p2: [0.285, 0.49]
+  right_p1: [1.0, 0.78]
+  right_p2: [0.32, 0.49]
+
 finish_line:
   p1: [0.0, 1.09]
   p2: [1.0, 0.78]

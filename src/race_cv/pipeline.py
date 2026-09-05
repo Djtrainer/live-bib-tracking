@@ -28,6 +28,7 @@ import numpy as np
 from .capture import Frame
 from .config import Config
 from .detect import Detection, Detector
+from .boundary import CourseBoundary
 from .finish import Crossing, CrossingDetector, FinishLine
 from .ocr import BibRead, BibReader, BibVoter, crop_with_padding
 from .sink import FinishEvent, make_event_id
@@ -41,6 +42,7 @@ class PipelineStats:
     frames_processed: int = 0
     frames_paced_out: int = 0
     people_detections: int = 0
+    people_outside_boundary: int = 0
     bib_detections: int = 0
     ocr_reads: int = 0
     crossings: int = 0
@@ -68,6 +70,7 @@ class FrameResult:
     frame: Frame
     people: list[Detection] = field(default_factory=list)
     bibs: list[Detection] = field(default_factory=list)
+    excluded_people: list[Detection] = field(default_factory=list)
     crossings: list[Crossing] = field(default_factory=list)
     events: list[FinishEvent] = field(default_factory=list)
 
@@ -110,6 +113,7 @@ class Pipeline:
         self.run_id = run_id
         self.line = FinishLine(config.finish_line, frame_width, frame_height)
         self.crossings = CrossingDetector(self.line, config.finish_line)
+        self.boundary = CourseBoundary(config.course_boundary, frame_width, frame_height)
         self.voter = BibVoter(config.ocr, roster=roster)
         self.reader = bib_reader
         self.emit = emit or (lambda event: None)
@@ -161,7 +165,23 @@ class Pipeline:
         self.stats.people_detections += len(people)
         self.stats.bib_detections += len(bibs)
 
-        result = FrameResult(frame=frame, people=people, bibs=bibs)
+        excluded_people: list[Detection] = []
+        if self.boundary.enabled:
+            # Bibs are never gated -- only whether a *person* counts as a
+            # runner at all, matching the 2025 behavior exactly. A gated-out
+            # person is invisible to OCR, crossing detection, and everything
+            # downstream, same as they never existed for this frame -- but
+            # unlike 2025, they're kept here for the overlay to draw, so a
+            # miscalibrated boundary is visible instead of a silent drop.
+            on_course = []
+            for p in people:
+                (on_course if self.boundary.contains_box(p.xyxy) else excluded_people).append(p)
+            self.stats.people_outside_boundary += len(excluded_people)
+            people = on_course
+
+        result = FrameResult(
+            frame=frame, people=people, bibs=bibs, excluded_people=excluded_people
+        )
 
         for person in people:
             track_id = person.track_id

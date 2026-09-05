@@ -55,6 +55,34 @@ class RoiConfig:
 
 
 @dataclass
+class CourseBoundaryConfig:
+    """Restricts which detected people are tracked as runners at all.
+
+    Disabled by default -- this is a per-venue decision, not a general
+    default. A person's bounding box is kept only if at least one of its
+    four corners falls between the left and right lines, interpolated at
+    that corner's own y. That makes the region narrow or widen with distance
+    the way a driveway does in perspective, rather than a fixed rectangle.
+
+    This reproduces the 2025 setup's ``guide_line_left`` / ``guide_line_right``
+    gate, which existed specifically to keep spectators and passersby outside
+    the course from ever being counted as runners. The 2025 failure mode was
+    never the gate's existence -- it was that the numbers were unlabeled
+    constants in code with no way to confirm they still matched the camera,
+    and no count of what they excluded. Both are fixed here: this is named,
+    documented config with an overlay to confirm it visually, and
+    PipelineStats.people_outside_boundary reports how many detections it
+    dropped, every run.
+    """
+
+    enabled: bool = False
+    left_p1: Point = (0.31, 1.0)
+    left_p2: Point = (0.285, 0.49)
+    right_p1: Point = (1.0, 0.78)
+    right_p2: Point = (0.32, 0.49)
+
+
+@dataclass
 class FinishLineConfig:
     """The finish line, as a segment in normalized frame coordinates.
 
@@ -130,6 +158,7 @@ class Config:
 
     model: ModelConfig = field(default_factory=ModelConfig)
     roi: RoiConfig = field(default_factory=RoiConfig)
+    course_boundary: CourseBoundaryConfig = field(default_factory=CourseBoundaryConfig)
     finish_line: FinishLineConfig = field(default_factory=FinishLineConfig)
     ocr: OcrConfig = field(default_factory=OcrConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
@@ -153,6 +182,7 @@ class Config:
         sections = {
             "model": ModelConfig,
             "roi": RoiConfig,
+            "course_boundary": CourseBoundaryConfig,
             "finish_line": FinishLineConfig,
             "ocr": OcrConfig,
             "pipeline": PipelineConfig,
