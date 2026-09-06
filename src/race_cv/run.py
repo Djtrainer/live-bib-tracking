@@ -26,6 +26,7 @@ from .detect import Detector
 from .geometry_check import check_roi_covers_course, describe_roi
 from .ocr import BibReader
 from .pipeline import Pipeline
+from .preview import RateGate, downscale
 from .sink import FinishEvent, ResultSink
 from .stream import FrameStreamer
 
@@ -117,6 +118,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--preview", action="store_true", help="Show an annotated preview window"
+    )
+    parser.add_argument(
+        "--preview-fps", type=float, default=10.0,
+        help="Redraw the preview window at most this often. imshow on a 1080p "
+             "frame costs ~19ms and runs on the frame loop; at 30fps that was a "
+             "third of the detector's throughput. 0 = every processed frame.",
+    )
+    parser.add_argument(
+        "--preview-scale", type=float, default=0.5,
+        help="Downscale the preview frame before showing it (cost is per "
+             "pixel). Detection is unaffected. 1.0 = full resolution.",
     )
     parser.add_argument(
         "--no-stream",
@@ -230,7 +242,20 @@ def main(argv: list[str] | None = None) -> int:
 
         from .overlay import annotate
 
+        # Neither consumer of the annotated frame wants every frame: the
+        # streamer publishes at stream.target_fps and the preview window is
+        # for a human. Gate here so annotate() -- a 6MB copy plus drawing --
+        # and imshow are skipped on frames nobody will see. Measured: imshow
+        # on every 1080p frame cost 19ms/frame and a third of the throughput.
+        preview_gate = RateGate(args.preview_fps)
+        stream_gate = RateGate(config.stream.target_fps)
+
         def on_result(result):
+            now = time.time()
+            show = args.preview and preview_gate.due(now)
+            publish = streamer is not None and stream_gate.due(now)
+            if not (show or publish):
+                return
             labels = {
                 p.track_id: (pipeline.voter.resolve(p.track_id).text or "?")
                 for p in result.people
@@ -243,10 +268,10 @@ def main(argv: list[str] | None = None) -> int:
                 labels,
                 boundary=pipeline.boundary,
             )
-            if streamer is not None:
+            if publish:
                 streamer.submit(annotated)
-            if args.preview:
-                cv2.imshow("race_cv preview", annotated)
+            if show:
+                cv2.imshow("race_cv preview", downscale(annotated, args.preview_scale))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     stopping["flag"] = True
 
