@@ -52,6 +52,10 @@ finish_line:
   confirm_frames: 8        # frames to keep reading the bib after the crossing
   reference_point: bottom_center   # feet: stable when the box widens
   require_approach: true   # a track first seen past the line is not a finisher
+  # A track must be seen this many times before it may finish. Measured to cut
+  # ghosts from 10 to 4 at 1280 with no recall loss; real racers were observed
+  # 10+ times, fragments 6 or fewer.
+  min_observations: 5
 
 ocr:
   enabled: true
@@ -73,7 +77,7 @@ pipeline:
   # 30 fps is not sustainable at this resolution, so this leaves headroom for
   # OCR spikes and the preview stream. CameraSource drops frames rather than
   # falling behind if it still cannot keep up, and reports it as "source dropped".
-  target_fps: 15.0         # 0 = process every frame (replay uses this)
+  target_fps: 10.0         # 0 = process every frame (replay uses this)
   log_every_n_frames: 300
 
 sink:

@@ -161,7 +161,8 @@ def match_finishers(
 
 
 def run_clip(
-    video: Path, config: Config, reader: BibReader | None, roster: set[str]
+    video: Path, config: Config, reader: BibReader | None, roster: set[str],
+    realtime: bool = False,
 ) -> tuple[list[Detected], dict, float]:
     """Run one clip and return its finishers, stats and wall time.
 
@@ -170,7 +171,7 @@ def run_clip(
     IDs and stale tracks from the previous video into the next.
     """
     started = time.time()
-    source = VideoFileSource(video, start_epoch=0.0)
+    source = VideoFileSource(video, start_epoch=0.0, realtime=realtime)
     detector = Detector(config.model, config.roi, source.frame_width, source.frame_height)
     detector.warmup(source.frame_width, source.frame_height)
 
@@ -200,6 +201,9 @@ def run_clip(
         "bib_detections": pipeline.stats.bib_detections,
         "ocr_reads": pipeline.stats.ocr_reads,
         "suppressed_first_seen_past": pipeline.stats.suppressed_first_seen_past,
+        # Frames the pipeline was too slow to collect. Always 0 offline; the
+        # number that matters when judging whether a config survives live.
+        "source_dropped": getattr(source, "dropped", 0),
     }
     return detected, stats, time.time() - started
 
@@ -250,6 +254,12 @@ def main(argv=None) -> int:
         default=3.0,
         help="Seconds a detection may differ from the expected time and still match",
     )
+    parser.add_argument(
+        "--realtime", action="store_true",
+        help="Pace clips in real time and drop frames the pipeline cannot "
+             "collect, as a camera does. Without this the run is offline and "
+             "loses nothing, which systematically overstates live performance.",
+    )
     parser.add_argument("--only", default=None, help="Substring filter on clip name")
     parser.add_argument("--json", default=None, help="Write full results as JSON")
     args = parser.parse_args(argv)
@@ -285,7 +295,8 @@ def main(argv=None) -> int:
             result.matches = [Match(expected=e, detected=None) for e in expected]
         else:
             try:
-                detected, stats, wall = run_clip(video, config, reader, roster)
+                detected, stats, wall = run_clip(
+                    video, config, reader, roster, realtime=args.realtime)
                 result.matches = match_finishers(expected, detected, args.tolerance)
                 result.stats = stats
                 result.wall_seconds = wall
