@@ -41,11 +41,37 @@ model:
   two_stage_max_crops: 6   # largest boxes win: nearest the camera, nearest the line
 
 roi:
-  # Disabled on purpose. The 2025 pipeline cropped away the left ~28% of every
-  # frame, so any racer on that side was invisible to the detector. Only enable
-  # this if you have calibrated it and confirmed racers cannot enter elsewhere.
-  enabled: false
-  polygon: []
+  # Crop away the left strip, where the spectators stand and the course is not.
+  #
+  # Read this before changing the numbers, because cropping is the one setting
+  # here that fails INVISIBLY. A racer outside the crop is not a weak detection
+  # or a dropped frame -- they are not in the input at all, and no counter can
+  # report someone the detector never saw. That is exactly how 2025 lost racers.
+  # race_cv now cross-checks this against course_boundary at startup and prints
+  # CONFIG MISMATCH if the crop cuts into declared course.
+  #
+  # What this actually buys -- and it is NOT speed. The CoreML export has a
+  # fixed 1280x1280 input, so the cropped region is letterboxed back up to
+  # 1280 either way and the forward pass costs the same (measured 65.8ms
+  # full-frame vs 72.1ms cropped -- marginally *worse*, from padding).
+  # What it buys is RESOLUTION: full-frame, 1920px is squeezed into 1280, so
+  # everything lands at x0.667. Cropping to 1421px wide raises that to x0.901.
+  # A 46px bib arrives as 41px instead of 31px. That is the same lever that
+  # took tiny-bib recall from 16% to 80% when the model went 640 -> 1280.
+  #
+  # x0=0.26 is set to the course boundary's leftmost declared point (0.285)
+  # plus margin, so the crop cannot clip live course. Tighter is tempting --
+  # x0=0.333 gives a perfect x1.000 scale because 2/3 of 1920 is exactly 1280
+  # -- but it cuts 0.048 of normalized width off the inside of the boundary
+  # for a 12% pixel gain (46px vs 41px). Not worth a silently invisible racer.
+  #
+  # There is deliberately NO top crop. Once the left strip is gone the region
+  # is 1421x1080 and WIDTH is what binds against the square 1280 input, so
+  # cropping the top changes the object scale not at all (verified: x0.999
+  # with and without a 20% top crop) and costs the same. It would be pure
+  # added risk of clipping an approaching racer for zero benefit.
+  enabled: true
+  polygon: [[0.26, 0.0], [1.0, 0.0], [1.0, 1.0], [0.26, 1.0]]
   scale: 1.0
 
 course_boundary:

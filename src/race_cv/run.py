@@ -23,6 +23,7 @@ from pathlib import Path
 from .capture import CameraSource, VideoFileSource, open_source
 from .config import Config
 from .detect import Detector
+from .geometry_check import check_roi_covers_course, describe_roi
 from .ocr import BibReader
 from .pipeline import Pipeline
 from .sink import FinishEvent, ResultSink
@@ -186,6 +187,16 @@ def main(argv: list[str] | None = None) -> int:
     # A config value the model will silently ignore is worse than a wrong one:
     # it reads as tuned. Say so loudly, at the one moment someone is watching.
     for warning in pipeline.detector.warnings:
+        logger.warning("CONFIG MISMATCH: %s", warning)
+    roi_summary = describe_roi(config, source.frame_width, source.frame_height)
+    if roi_summary:
+        logger.info("%s", roi_summary)
+    # The crop is the one setting that can lose a racer with nothing to show
+    # for it downstream, so it is checked against the geometry that decides
+    # who finished rather than trusted on its own.
+    for warning in check_roi_covers_course(
+        config, source.frame_width, source.frame_height
+    ):
         logger.warning("CONFIG MISMATCH: %s", warning)
     if pipeline.async_ocr is not None:
         logger.info("OCR runs off the frame loop (ocr.async_reads: true)")
