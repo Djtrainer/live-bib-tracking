@@ -76,6 +76,7 @@ health | processed 739 (14.7 fps) | paced out 576 | source dropped 202 | finishe
 | `source dropped` | **frames lost because the pipeline was busy** | climbing fast during a crossing |
 | `pending` | finish events not yet accepted by the API | anything above 0 for long |
 | `delivered` | events the API confirmed | should track `finishers` |
+| `finishers N (…, handed off M)` | M finishes recovered across a track break | never a worry on its own — each one was a miss before. A large M means the tracker is fragmenting at the line; consider whether the camera is too close. |
 | `ocr read N` | bibs read off the frame loop | far below the number of finishers |
 | `ocr … skipped N` | crops dropped because the reader was backed up | climbing steadily |
 | `ocr … late N` | finishes resolved before their reads landed | anything above 0 |
@@ -117,7 +118,8 @@ All in `config/race_cv.yaml`.
 | `ocr.async_reads` | true | Reads bibs on a background thread. Inline, a ~27ms read fired exactly at the line and pushed crossing frames over budget. Turn off only to reproduce old behaviour. |
 | `finish_line.p1/p2` | 2025 geometry | **Recalibrate per camera.** `python scripts/calibrate.py --source 0 --config config/race_cv.yaml` |
 | `course_boundary.enabled` | true | Keeps people outside the driveway off the leaderboard. Excluded people are drawn in grey on the overlay and counted in `people_outside_boundary`. |
-| `finish_line.min_observations` | 0 | Requires a track to be seen N times before it may finish. Cuts duplicate-track ghosts. 5–10 was free on the smoke set; raise if you see two finishes a fraction of a second apart. |
+| `finish_line.min_observations` | 5 | Requires a track to be seen N times before it may finish. Cuts duplicate-track ghosts. Raise if you see two finishes a fraction of a second apart. A hand-off (below) inherits the dead track's count, so it does not fight this. |
+| `finish_line.handoff_window_s` | 1.0 | Recovers a crossing when the tracker issues a new id right at the line — a racer reaching a close camera gets large and clipped, and ByteTrack breaks the track a few frames short. Both genuine misses on the 13-clip set were this; both are found now. A track born past the line within this window of an approaching track vanishing nearby is treated as its continuation. Widen only if `handed off` stays 0 while racers are still being missed at the line; 0 disables it. |
 | `ocr.crop_padding` | 15 | Tested 15/30/50; all read correctly with a roster loaded. Not a lever worth pulling. |
 | `stream.enabled` | true | Browser preview. Disable if bandwidth or CPU is tight; it cannot slow detection either way. |
 
