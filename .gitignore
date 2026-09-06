@@ -40,3 +40,4 @@ data/dataset/
 training_results.json
 data/autolabel_preview/
 data/autolabel_report.json
+data/error_analysis*.json
