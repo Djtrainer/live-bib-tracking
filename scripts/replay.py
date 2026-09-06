@@ -169,6 +169,7 @@ def main(argv=None) -> int:
             on_result(pipeline.process(frame))
 
         pipeline.flush()
+        pipeline.close()
 
     source.release()
     if writer is not None:

@@ -47,9 +47,23 @@ class ModelConfig:
     # instead, without paying for high resolution across the whole frame.
     #
     # Cost is one inference per person rather than per frame, so this is a win
-    # when few runners are in shot and a loss in a dense pack; crops are
-    # batched into a single call to blunt that.
+    # when few runners are in shot and a loss in a dense pack; two_stage_max_crops
+    # bounds the worst case.
+    #
+    # IMPORTANT: two_stage_imgsz only does anything if the model can actually
+    # run at that size. A CoreML .mlpackage is exported at a *fixed* input --
+    # verified on this repo's exports, none of which declare size flexibility --
+    # so pointing the second stage at the 1280 export and asking for 640 gets
+    # you 1280 anyway, at ~49ms per person instead of the ~12ms the setting
+    # implies. That silent mismatch is the same class of bug as the old dead
+    # --conf flag, so Detector now checks it at startup and says so.
+    #
+    # To get a genuinely cheap second stage, give it its own smaller export:
+    # full-frame people at 1280, per-runner bib crops at 640. A crop is upscaled
+    # to the model input regardless, so a 640 model loses nothing on a
+    # 200x400px person and costs a quarter as much.
     two_stage: bool = False
+    two_stage_model: str | None = None  # defaults to model.path
     two_stage_imgsz: int = 640
     two_stage_padding: float = 0.15  # fraction of the person box, added around it
     two_stage_max_crops: int = 6     # bound the per-frame cost in a pack
@@ -137,6 +151,20 @@ class OcrConfig:
     max_len: int = 5
     crop_padding: int = 15
     target_height: int = 120
+
+    # Read bibs on a background thread instead of inline in the frame loop.
+    # An EasyOCR read costs ~27ms and fires only when a bib is legible, i.e.
+    # exactly at the finish line -- inline, that pushed the crossing frames
+    # over the frame budget and the camera dropped them. See ocr.AsyncBibReader.
+    async_reads: bool = True
+    async_queue_size: int = 48
+    async_max_inflight_per_track: int = 3
+    # How long building a finish event may wait for that racer's outstanding
+    # reads. Bounded so a wedged worker degrades to "resolve from the votes we
+    # already have" rather than becoming a new stall. Normally ~0: the
+    # confirm_frames window has already given the worker several frames of
+    # slack before the event is built.
+    resolve_timeout: float = 0.25
 
 
 @dataclass

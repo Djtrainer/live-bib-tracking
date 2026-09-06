@@ -19,6 +19,27 @@ model:
   person_class: 0
   bib_class: 1
 
+  # Two-stage: find people on the full frame, then re-run the detector on each
+  # person's crop to find their bib.
+  #
+  # Leave this off unless you have a small export to point two_stage_model at.
+  # A CoreML .mlpackage accepts exactly ONE input size and raises on any other,
+  # so with two_stage_model unset the crops run through the 1280 model at 1280
+  # -- measured at 54.9ms per person, which roughly doubles the frame cost
+  # (56.8ms -> 111.7ms with one runner in shot) instead of saving anything.
+  # Against a real 640 export it is 12.2ms per crop, which is the point.
+  #
+  # Until 2026-09-05 this failed silently: 640 crops against the 1280 model
+  # raised on every call, the error was swallowed, and the feature reported
+  # zero extra bibs as though it were merely unhelpful. It now auto-corrects
+  # the size, logs a CONFIG MISMATCH at startup, and counts any failure into
+  # the health line.
+  two_stage: false
+  two_stage_model: null    # null = reuse model.path (see the cost warning above)
+  two_stage_imgsz: 640
+  two_stage_padding: 0.15
+  two_stage_max_crops: 6   # largest boxes win: nearest the camera, nearest the line
+
 roi:
   # Disabled on purpose. The 2025 pipeline cropped away the left ~28% of every
   # frame, so any racer on that side was invisible to the detector. Only enable
@@ -71,6 +92,17 @@ ocr:
   max_len: 5
   crop_padding: 15
   target_height: 120
+
+  # Read bibs on a background thread. A read costs ~27ms and only fires when a
+  # bib is legible -- which is to say at the finish line. Inline, that pushed a
+  # crossing frame to ~76ms against a 66ms budget at 15fps, so the pipeline fell
+  # behind precisely while a racer was crossing and the camera dropped the
+  # frames that mattered most. A late bib costs nothing: the crossing timestamp
+  # is fixed when it happens, and the event is held for confirm_frames anyway.
+  async_reads: true
+  async_queue_size: 48
+  async_max_inflight_per_track: 3
+  resolve_timeout: 0.25    # max wait when building a finish event; normally ~0
 
 pipeline:
   # 1280 inference costs ~49ms/frame (20.5 fps ceiling) against ~12ms at 640.

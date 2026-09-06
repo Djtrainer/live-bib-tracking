@@ -183,6 +183,12 @@ def main(argv: list[str] | None = None) -> int:
     # throughout. Measured on this machine: ~3.4s and ~3.0s warm, worse cold.
     detector_warmup = pipeline.detector.warmup(source.frame_width, source.frame_height)
     logger.info("Detector warm-up: %.1fs", detector_warmup)
+    # A config value the model will silently ignore is worse than a wrong one:
+    # it reads as tuned. Say so loudly, at the one moment someone is watching.
+    for warning in pipeline.detector.warnings:
+        logger.warning("CONFIG MISMATCH: %s", warning)
+    if pipeline.async_ocr is not None:
+        logger.info("OCR runs off the frame loop (ocr.async_reads: true)")
     if pipeline.reader is not None:
         logger.info("OCR warm-up: %.1fs", pipeline.reader.warmup())
 
@@ -250,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
                 last_report = time.time()
     finally:
         pipeline.flush()
+        pipeline.close()
         source.release()
         if streamer is not None:
             streamer.stop()
@@ -277,6 +284,19 @@ def _report(
         f"finishers {stats.events_emitted} (unknown bib {stats.unknown_bib_events}) | "
         f"delivered {sink_stats.delivered} | pending {sink_stats.pending}"
     )
+    if pipeline.async_ocr is not None:
+        ocr = pipeline.async_ocr.stats
+        message += f" | ocr read {ocr.completed}"
+        backlog = ocr.dropped_backlog + ocr.skipped_inflight
+        if backlog:
+            message += f" skipped {backlog}"
+        if ocr.wait_timeouts:
+            message += f" late {ocr.wait_timeouts}"
+    if stats.two_stage_errors:
+        message += (
+            f" | TWO-STAGE FAILING {stats.two_stage_errors}: "
+            f"{getattr(pipeline.detector, 'two_stage_last_error', '')}"
+        )
     if sink_stats.last_error:
         message += f" | last error: {sink_stats.last_error}"
     if streamer is not None:

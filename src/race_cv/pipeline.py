@@ -30,7 +30,7 @@ from .config import Config
 from .detect import Detection, Detector
 from .boundary import CourseBoundary
 from .finish import Crossing, CrossingDetector, FinishLine
-from .ocr import BibRead, BibReader, BibVoter, crop_with_padding
+from .ocr import AsyncBibReader, BibRead, BibReader, BibVoter, crop_with_padding
 from .sink import FinishEvent, make_event_id
 
 
@@ -50,7 +50,12 @@ class PipelineStats:
     suppressed_first_seen_past: int = 0
     finishes_below_min_observations: int = 0
     second_stage_bibs: int = 0
+    two_stage_crops_skipped: int = 0
+    two_stage_errors: int = 0
     unknown_bib_events: int = 0
+    ocr_dropped: int = 0
+    ocr_wait_timeouts: int = 0
+    ocr_mean_wait_ms: float = 0.0
     first_capture_ts: float | None = None
     last_capture_ts: float | None = None
 
@@ -120,6 +125,18 @@ class Pipeline:
         self.reader = bib_reader
         self.emit = emit or (lambda event: None)
         self.stats = PipelineStats()
+
+        # OCR moves off the frame loop unless explicitly disabled. The thread
+        # starts on first submit, so a Pipeline that never sees a bib -- most
+        # unit tests -- never spawns one.
+        self.async_ocr: AsyncBibReader | None = None
+        if bib_reader is not None and config.ocr.enabled and config.ocr.async_reads:
+            self.async_ocr = AsyncBibReader(
+                bib_reader,
+                self.voter,
+                max_queue=config.ocr.async_queue_size,
+                max_inflight_per_track=config.ocr.async_max_inflight_per_track,
+            )
 
         self._pending: dict[int, _PendingFinish] = {}
         self._seen_last_frame: set[int] = set()
@@ -228,7 +245,28 @@ class Pipeline:
         self.stats.suppressed_first_seen_past = len(
             self.crossings.suppressed_first_seen_past
         )
+        self._sync_ocr_stats()
         return result
+
+    def _sync_ocr_stats(self) -> None:
+        """Pull worker counters into PipelineStats.
+
+        The worker cannot increment them itself: ``+=`` on an int is not atomic
+        across threads, and these are read from the health line while the
+        worker is running.
+        """
+        if self.async_ocr is None:
+            return
+        worker = self.async_ocr.stats
+        self.stats.ocr_reads = worker.completed
+        self.stats.ocr_dropped = worker.dropped_backlog + worker.skipped_inflight
+        self.stats.ocr_wait_timeouts = worker.wait_timeouts
+        self.stats.ocr_mean_wait_ms = worker.mean_wait_ms
+        if self.detector is not None:
+            self.stats.two_stage_crops_skipped = getattr(
+                self.detector, "crops_skipped", 0
+            )
+            self.stats.two_stage_errors = getattr(self.detector, "two_stage_errors", 0)
 
     def _read_bib(
         self,
@@ -247,6 +285,12 @@ class Pipeline:
         # OCR runs against the full-resolution frame, never the downscaled crop.
         crop = crop_with_padding(image, bib.xyxy, self.config.ocr.crop_padding)
         if crop.size == 0:
+            return
+        if self.async_ocr is not None:
+            # .copy() matters: crop_with_padding returns a numpy *view*, which
+            # keeps the entire 1080p frame alive for as long as it is queued.
+            # A copy is a few KB; the view would pin ~6MB per pending read.
+            self.async_ocr.submit(track_id, crop.copy(), bib.conf)
             return
         text, confidence = self.reader.read(self.reader.preprocess(crop))
         if text:
@@ -274,6 +318,17 @@ class Pipeline:
         return events
 
     def _build_event(self, crossing: Crossing) -> FinishEvent:
+        if self.async_ocr is not None:
+            # This racer may still have crops queued. Waiting here is the one
+            # place the frame loop blocks on OCR, and it happens once per
+            # finisher rather than once per person per frame -- and normally
+            # returns immediately, because confirm_frames has already given the
+            # worker several frames of slack. The crossing timestamp was fixed
+            # when it happened, so a late answer costs nothing but event
+            # latency; resolving without waiting would throw away votes.
+            self.async_ocr.wait_for(
+                crossing.track_id, self.config.ocr.resolve_timeout
+            )
         verdict = self.voter.resolve(crossing.track_id)
         return FinishEvent(
             track_observations=self._observations.get(crossing.track_id, 0),
@@ -294,7 +349,14 @@ class Pipeline:
 
         Called at the end of a run so a racer who crossed in the final frames is
         never lost to an unfinished confirmation window.
+
+        Drains OCR first. These are precisely the finishers whose confirmation
+        window never elapsed, so they are the ones most likely to still have
+        reads in flight -- and unlike mid-race, there is no frame loop left to
+        starve, so the wait is free.
         """
+        if self.async_ocr is not None:
+            self.async_ocr.drain(timeout=self.config.ocr.resolve_timeout * 8)
         events = [self._build_event(p.crossing) for p in self._pending.values()]
         self._pending.clear()
         for event in events:
@@ -302,7 +364,13 @@ class Pipeline:
             if event.bib_number is None:
                 self.stats.unknown_bib_events += 1
             self.emit(event)
+        self._sync_ocr_stats()
         return events
+
+    def close(self) -> None:
+        """Release background workers. Safe to call more than once."""
+        if self.async_ocr is not None:
+            self.async_ocr.stop()
 
     def run(
         self,
@@ -310,13 +378,16 @@ class Pipeline:
         on_result: Callable[[FrameResult], None] | None = None,
     ) -> PipelineStats:
         """Consume a frame source until it is exhausted."""
-        for frame in frames:
-            self.stats.frames_seen += 1
-            if not self.should_process(frame):
-                self.stats.frames_paced_out += 1
-                continue
-            result = self.process(frame)
-            if on_result is not None:
-                on_result(result)
-        self.flush()
+        try:
+            for frame in frames:
+                self.stats.frames_seen += 1
+                if not self.should_process(frame):
+                    self.stats.frames_paced_out += 1
+                    continue
+                result = self.process(frame)
+                if on_result is not None:
+                    on_result(result)
+            self.flush()
+        finally:
+            self.close()
         return self.stats

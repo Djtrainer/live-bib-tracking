@@ -70,6 +70,10 @@ health | processed 739 (14.7 fps) | paced out 576 | source dropped 202 | finishe
 | `source dropped` | **frames lost because the pipeline was busy** | climbing fast during a crossing |
 | `pending` | finish events not yet accepted by the API | anything above 0 for long |
 | `delivered` | events the API confirmed | should track `finishers` |
+| `ocr read N` | bibs read off the frame loop | far below the number of finishers |
+| `ocr … skipped N` | crops dropped because the reader was backed up | climbing steadily |
+| `ocr … late N` | finishes resolved before their reads landed | anything above 0 |
+| `TWO-STAGE FAILING` | second-stage inference is erroring | **ever** — the config is wrong |
 
 `source dropped` is the number that matters. It is coverage you lost at the
 line, and it is the thing a fast replay cannot show you.
@@ -102,7 +106,8 @@ All in `config/race_cv.yaml`.
 |---|---|---|
 | `model.path` / `model.imgsz` | 1280 model, 1280 | **Must match.** The CoreML export has a fixed input size; a mismatch discards what training at that resolution bought. |
 | `pipeline.target_fps` | 15.0 | 1280 costs ~49ms/frame (20.5 fps ceiling). Raise only if `source dropped` stays low; lower if it climbs. |
-| `model.two_stage` | false | Finds bibs by re-running the detector on each person's crop. Same bib count as full-frame 1280 at ~1/4 the cost — but costs one inference *per person*, so it degrades in a pack. Worth trying if 1280 cannot hold the frame rate. |
+| `model.two_stage` | false | Finds bibs by re-running the detector on each person's crop. **Only worth enabling with `two_stage_model` pointing at a smaller export.** A CoreML `.mlpackage` accepts exactly one input size, so without that the crops run through the 1280 model at 1280: 54.9ms *per person*, which roughly doubles frame cost rather than reducing it. Against a real 640 export it is 12.2ms per crop. |
+| `ocr.async_reads` | true | Reads bibs on a background thread. Inline, a ~27ms read fired exactly at the line and pushed crossing frames over budget. Turn off only to reproduce old behaviour. |
 | `finish_line.p1/p2` | 2025 geometry | **Recalibrate per camera.** `python scripts/calibrate.py --source 0 --config config/race_cv.yaml` |
 | `course_boundary.enabled` | true | Keeps people outside the driveway off the leaderboard. Excluded people are drawn in grey on the overlay and counted in `people_outside_boundary`. |
 | `finish_line.min_observations` | 0 | Requires a track to be seen N times before it may finish. Cuts duplicate-track ghosts. 5–10 was free on the smoke set; raise if you see two finishes a fraction of a second apart. |

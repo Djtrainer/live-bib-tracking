@@ -25,6 +25,36 @@ from .config import ModelConfig, RoiConfig
 BBox = tuple[float, float, float, float]
 
 
+def _fixed_input_size(model_path: Path) -> int | None:
+    """The one input size a CoreML export will accept, if it is fixed.
+
+    A ``.mlpackage`` is exported at a single input resolution and, unless it
+    was given size flexibility (none of this repo's exports were), CoreML
+    refuses anything else outright:
+
+        RuntimeError: Image size 640 x 640 not in allowed set of image sizes
+
+    Returns None when the model is flexible, is not CoreML, or cannot be
+    inspected -- in all of which cases ``imgsz`` means what it says.
+    """
+    if model_path.suffix != ".mlpackage":
+        return None
+    try:
+        import coremltools as ct
+
+        spec = ct.models.MLModel(
+            str(model_path), compute_units=ct.ComputeUnit.CPU_ONLY
+        ).get_spec()
+    except Exception:
+        return None  # best effort: never block startup on an inspection failure
+    for descriptor in spec.description.input:
+        image = descriptor.type.imageType
+        width, height = int(image.width), int(image.height)
+        if width and height and not image.WhichOneof("SizeFlexibility"):
+            return width
+    return None
+
+
 @dataclass
 class Detection:
     """One detected object, in full-frame pixel coordinates."""
@@ -102,6 +132,53 @@ class Detector:
         self.roi = Roi(roi_config, frame_width, frame_height)
         self.model = YOLO(str(model_path))
 
+        # Second stage may run its own, smaller export. Sharing one YOLO object
+        # across the two passes would also be a threading hazard if the second
+        # stage ever moves off the frame loop, so keep them separate objects.
+        self.second_stage = None
+        self.crops_skipped = 0
+        self.two_stage_errors = 0
+        self.two_stage_last_error: str | None = None
+        self.warnings: list[str] = []
+
+        # Effective sizes, which are not necessarily the configured ones. A
+        # CoreML export accepts exactly one input size and *raises* on any
+        # other, so an imgsz the model cannot honour is not a slow path or a
+        # quality trade -- it is a hard failure on every inference. Resolve it
+        # here, once, and say so, rather than discovering it per frame.
+        self.imgsz = model_config.imgsz
+        self.two_stage_imgsz = model_config.two_stage_imgsz
+
+        fixed = _fixed_input_size(model_path)
+        if fixed is not None and fixed != self.imgsz:
+            self.warnings.append(
+                f"imgsz={self.imgsz} but {model_path.name} is exported at a fixed "
+                f"{fixed}x{fixed} and rejects any other size. Running at {fixed}. "
+                f"Set model.imgsz={fixed} so the config describes what happens."
+            )
+            self.imgsz = fixed
+
+        if model_config.two_stage:
+            second_path = Path(model_config.two_stage_model or model_config.path)
+            if not second_path.exists():
+                raise FileNotFoundError(f"Two-stage model not found: {second_path}")
+            self.second_stage = (
+                self.model if second_path == model_path else YOLO(str(second_path))
+            )
+            second_fixed = (
+                fixed if second_path == model_path else _fixed_input_size(second_path)
+            )
+            if second_fixed is not None and second_fixed != self.two_stage_imgsz:
+                self.warnings.append(
+                    f"two_stage_imgsz={self.two_stage_imgsz} but {second_path.name} "
+                    f"is exported at a fixed {second_fixed}x{second_fixed} and "
+                    f"rejects any other size. Running crops at {second_fixed}, which "
+                    f"is not the speedup two-stage is for -- export a "
+                    f"{self.two_stage_imgsz}px model and set model.two_stage_model "
+                    f"to it."
+                )
+                self.two_stage_imgsz = second_fixed
+
     def warmup(self, frame_width: int, frame_height: int) -> float:
         """Run one throwaway inference so the first real frame isn't slow.
 
@@ -116,13 +193,28 @@ class Detector:
             self.model.predict(
                 blank,
                 conf=self.config.conf,
-                imgsz=self.config.imgsz,
+                imgsz=self.imgsz,
                 device=self.config.device,
                 half=self.config.half,
                 verbose=False,
             )
         except Exception:
             pass
+        if self.second_stage is not None and self.second_stage is not self.model:
+            # Person-shaped, not frame-shaped: the second stage never sees a
+            # full frame, and the first inference cost is paid per input shape.
+            crop = np.zeros((frame_height // 3, frame_height // 6, 3), dtype=np.uint8)
+            try:
+                self.second_stage.predict(
+                    crop,
+                    conf=self.config.conf,
+                    imgsz=self.two_stage_imgsz,
+                    device=self.config.device,
+                    half=self.config.half,
+                    verbose=False,
+                )
+            except Exception:
+                pass
         return time.time() - started
 
     def track(self, image: np.ndarray) -> list[Detection]:
@@ -140,7 +232,7 @@ class Detector:
             classes=[self.config.person_class, self.config.bib_class],
             conf=self.config.conf,
             iou=self.config.iou,
-            imgsz=self.config.imgsz,
+            imgsz=self.imgsz,
             device=self.config.device,
             half=self.config.half,
             verbose=False,
@@ -213,7 +305,7 @@ class Detector:
             region,
             conf=self.config.conf,
             iou=self.config.iou,
-            imgsz=self.config.imgsz,
+            imgsz=self.imgsz,
             device=self.config.device,
             half=self.config.half,
             verbose=False,
@@ -246,16 +338,27 @@ class Detector:
         pixels instead, which is a far larger effective upscale than raising
         the whole frame's resolution, at a fraction of the cost.
 
-        Crops go through in one batched call, and coordinates come back
-        translated to full-frame space. Returns bib detections only; person
-        boxes from the second pass are discarded because the first pass already
-        owns tracking.
+        Coordinates come back translated to full-frame space. Returns bib
+        detections only; person boxes from the second pass are discarded
+        because the first pass already owns tracking.
+
+        Cost is one inference *per person*, so ``two_stage_max_crops`` bounds
+        the worst case. When a pack exceeds it the largest boxes win -- they
+        are the runners nearest the camera, hence nearest the line, hence the
+        ones about to finish. Taking the list in detector order instead would
+        make the choice arbitrary.
         """
         if not people:
             return []
         crops, origins = [], []
         height, width = image.shape[:2]
-        for person in people[: self.config.two_stage_max_crops]:
+        ranked = sorted(
+            people,
+            key=lambda p: (p.xyxy[2] - p.xyxy[0]) * (p.xyxy[3] - p.xyxy[1]),
+            reverse=True,
+        )
+        self.crops_skipped += max(0, len(ranked) - self.config.two_stage_max_crops)
+        for person in ranked[: self.config.two_stage_max_crops]:
             x1, y1, x2, y2 = person.xyxy
             pad_x = (x2 - x1) * self.config.two_stage_padding
             pad_y = (y2 - y1) * self.config.two_stage_padding
@@ -275,19 +378,28 @@ class Detector:
         # makes ultralytics return fewer results than inputs and then index off
         # the end. Batching bought nothing here anyway: a batch-1 backend runs
         # them sequentially regardless.
+        model = self.second_stage or self.model
         found: list[Detection] = []
         for crop, (ox, oy, cw, ch) in zip(crops, origins):
             try:
-                results = self.model.predict(
+                results = model.predict(
                     crop,
                     conf=self.config.conf,
                     iou=self.config.iou,
-                    imgsz=self.config.two_stage_imgsz,
+                    imgsz=self.two_stage_imgsz,
                     device=self.config.device,
                     half=self.config.half,
                     verbose=False,
                 )
-            except Exception:
+            except Exception as exc:
+                # Never silent. This swallowed a RuntimeError on *every* crop
+                # when two_stage_imgsz did not match the CoreML export's fixed
+                # input, so the second stage found nothing at all while the
+                # config, the runbook and second_stage_bibs=0 all read as
+                # "enabled, just not finding extra bibs". A feature that fails
+                # closed and reports success is worse than one that is off.
+                self.two_stage_errors += 1
+                self.two_stage_last_error = f"{type(exc).__name__}: {exc}"
                 continue
             if not results:
                 continue

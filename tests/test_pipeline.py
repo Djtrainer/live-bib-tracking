@@ -280,3 +280,125 @@ class TestCourseBoundary:
         pipeline.run(frames(10))
         assert len(events) == 1
         assert pipeline.stats.people_outside_boundary == 0
+
+
+class SlowReader:
+    """An OCR stand-in as slow as the real one at its worst."""
+
+    def __init__(self, text="121", latency=0.05):
+        self.text, self.latency = text, latency
+
+    def preprocess(self, crop):
+        return crop
+
+    def read(self, crop):
+        import time
+
+        time.sleep(self.latency)
+        return self.text, 0.95
+
+
+def bib_on(track_bottom_y):
+    """A bib box centred inside the person box produced by `person`."""
+    return Detection(
+        xyxy=(470.0, track_bottom_y - 120.0, 530.0, track_bottom_y - 80.0),
+        conf=0.9,
+        cls=1,
+    )
+
+
+def ocr_frames(count, fps=10.0):
+    """Frames big enough for a bib crop to actually exist.
+
+    The other tests use a 4x4 image because nothing reads pixels out of it.
+    Here the pipeline crops the bib box out of the frame, and on a 4x4 image
+    every crop clips to zero area and OCR is skipped entirely -- which looks
+    exactly like a bug in the async path.
+    """
+    out = []
+    for i in range(count):
+        image = np.zeros((H, W, 3), dtype=np.uint8).view(TaggedImage)
+        image.frame_index = i
+        out.append(Frame(image=image, capture_ts=i / fps, index=i))
+    return out
+
+
+class TestAsyncOcr:
+    """OCR off the frame loop must not cost a bib number.
+
+    The risk this guards is specific: reads now land asynchronously, so a
+    finish event could be built from a vote tally that has not arrived yet.
+    A late bib is fine, a missing one is a hand-corrected result.
+    """
+
+    def _script(self):
+        script = {}
+        for i in range(10):
+            bottom = 300.0 + i * 50
+            script[i] = [person(1, bottom), bib_on(bottom)]
+        return script
+
+    def _config(self):
+        return Config(
+            finish_line=FinishLineConfig(p1=(0.0, 0.5), p2=(1.0, 0.5), confirm_frames=2),
+            ocr=OcrConfig(
+                enabled=True, min_bib_yolo_conf=0.5, lock_conf=0.99, resolve_timeout=2.0
+            ),
+            pipeline=PipelineConfig(target_fps=0.0),
+        )
+
+    def _run(self, config):
+        events = []
+        pipeline = Pipeline(
+            config=config,
+            detector=ScriptedDetector(self._script()),
+            frame_width=W,
+            frame_height=H,
+            run_id="test",
+            bib_reader=SlowReader(),
+            roster=None,
+            emit=events.append,
+        )
+        pipeline.run(ocr_frames(10))
+        return pipeline, events
+
+    def test_bib_survives_asynchronous_reading(self):
+        pipeline, events = self._run(self._config())
+        assert pipeline.async_ocr is not None
+        assert len(events) == 1
+        assert events[0].bib_number == "121"
+
+    def test_matches_the_synchronous_result(self):
+        config = self._config()
+        config.ocr.async_reads = False
+        _, sync_events = self._run(config)
+        _, async_events = self._run(self._config())
+        assert [e.bib_number for e in sync_events] == [e.bib_number for e in async_events]
+
+    def test_frame_loop_is_faster_than_the_reads_it_dispatched(self):
+        """The load-bearing claim: process() no longer pays for OCR.
+
+        Ten frames each dispatch a 50ms read. Synchronously that is >=500ms of
+        frame-loop time; asynchronously the loop should finish in a fraction of
+        it, with the reads still in flight.
+        """
+        import time
+
+        config = self._config()
+        events = []
+        pipeline = Pipeline(
+            config=config,
+            detector=ScriptedDetector(self._script()),
+            frame_width=W,
+            frame_height=H,
+            run_id="test",
+            bib_reader=SlowReader(latency=0.05),
+            roster=None,
+            emit=events.append,
+        )
+        started = time.monotonic()
+        for frame in ocr_frames(4):
+            pipeline.process(frame)
+        elapsed = time.monotonic() - started
+        pipeline.close()
+        assert elapsed < 0.12, f"frame loop took {elapsed * 1000:.0f}ms for 4 frames"

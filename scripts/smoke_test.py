@@ -189,8 +189,16 @@ def run_clip(
     pipeline.run(source.frames())
     source.release()
 
+    # Expectations are seconds into the clip, but --realtime re-anchors
+    # start_epoch to the wall clock when frames begin flowing (it has to: that
+    # is what paces playback). Without subtracting it back off, every event
+    # carried a ~1.7e9 timestamp, matched nothing, and the run scored 0%
+    # recall with every finisher listed as both missed and a ghost -- a broken
+    # ruler reported as a broken pipeline. Offline runs anchor at 0.0, so this
+    # is a no-op there.
+    origin = source.start_epoch
     detected = [
-        Detected(bib=e.bib_number, seconds=e.capture_ts,
+        Detected(bib=e.bib_number, seconds=e.capture_ts - origin,
                  observations=getattr(e, "track_observations", 0))
         for e in events
     ]
