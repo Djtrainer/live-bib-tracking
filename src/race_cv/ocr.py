@@ -148,12 +148,29 @@ class BibVoter:
         self._locked: dict[int, BibRead] = {}
 
     def add(self, track_id: int, read: BibRead) -> None:
-        """Record a read, locking the track if OCR is essentially certain."""
+        """Record a read, locking the track if OCR is essentially certain.
+
+        A lock ends the search: ``resolve`` returns it directly and the
+        pipeline stops running OCR on that racer entirely. So when a roster is
+        loaded, only a number that is actually in the race may lock. Measured
+        on real footage, a racer wearing 120 was read as "20" at 0.999
+        confidence -- high confidence in a number nobody is wearing, which
+        locked the wrong answer in and foreclosed every later frame that might
+        have recovered the missing digit. Certainty about an impossible bib is
+        exactly when the search should continue, not stop.
+
+        Non-roster reads are still recorded as votes: they may be the only
+        evidence there is, and ``resolve`` prefers roster candidates when any
+        exist without discarding the rest.
+        """
         if not self._is_plausible(read):
             return
         self._reads.setdefault(track_id, []).append(read)
-        if track_id not in self._locked and read.ocr_conf >= self.config.lock_conf:
-            self._locked[track_id] = read
+        if track_id in self._locked or read.ocr_conf < self.config.lock_conf:
+            return
+        if self.roster and read.text not in self.roster:
+            return
+        self._locked[track_id] = read
 
     def _is_plausible(self, read: BibRead) -> bool:
         if not read.text or not read.text.isdigit():
