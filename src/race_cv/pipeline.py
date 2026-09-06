@@ -48,6 +48,7 @@ class PipelineStats:
     crossings: int = 0
     events_emitted: int = 0
     suppressed_first_seen_past: int = 0
+    finishes_below_min_observations: int = 0
     unknown_bib_events: int = 0
     first_capture_ts: float | None = None
     last_capture_ts: float | None = None
@@ -121,6 +122,7 @@ class Pipeline:
 
         self._pending: dict[int, _PendingFinish] = {}
         self._seen_last_frame: set[int] = set()
+        self._observations: dict[int, int] = {}
         self._last_processed_ts: float | None = None
         self._next_due_ts: float | None = None
 
@@ -185,6 +187,7 @@ class Pipeline:
 
         for person in people:
             track_id = person.track_id
+            self._observations[track_id] = self._observations.get(track_id, 0) + 1
             self._read_bib(frame.image, person, bibs, track_id)
             crossing = self.crossings.update(
                 track_id, person.xyxy, frame.capture_ts, frame.index
@@ -192,6 +195,12 @@ class Pipeline:
             if crossing is not None:
                 self.stats.crossings += 1
                 result.crossings.append(crossing)
+                minimum = self.config.finish_line.min_observations
+                if minimum and self._observations[track_id] < minimum:
+                    # A track the detector only glimpsed. Real racers are seen
+                    # for tens of frames on their way in; fragments are not.
+                    self.stats.finishes_below_min_observations += 1
+                    continue
                 self._pending[track_id] = _PendingFinish(
                     crossing=crossing,
                     frames_remaining=self.config.finish_line.confirm_frames,
@@ -251,6 +260,7 @@ class Pipeline:
     def _build_event(self, crossing: Crossing) -> FinishEvent:
         verdict = self.voter.resolve(crossing.track_id)
         return FinishEvent(
+            track_observations=self._observations.get(crossing.track_id, 0),
             event_id=make_event_id(crossing.track_id, crossing.capture_ts, self.run_id),
             track_id=crossing.track_id,
             bib_number=verdict.text,

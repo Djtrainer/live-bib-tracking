@@ -59,6 +59,7 @@ class Expected:
 class Detected:
     bib: str | None
     seconds: float
+    observations: int = 0
 
 
 @dataclass
@@ -187,7 +188,11 @@ def run_clip(
     pipeline.run(source.frames())
     source.release()
 
-    detected = [Detected(bib=e.bib_number, seconds=e.capture_ts) for e in events]
+    detected = [
+        Detected(bib=e.bib_number, seconds=e.capture_ts,
+                 observations=getattr(e, "track_observations", 0))
+        for e in events
+    ]
     stats = {
         "frames_processed": pipeline.stats.frames_processed,
         "people_detections": pipeline.stats.people_detections,
@@ -382,6 +387,7 @@ def report(results: list[ClipResult], args) -> int:
                             "expected_s": m.expected.seconds if m.expected else None,
                             "detected_bib": (m.detected.bib or NO_BIB) if m.detected else None,
                             "detected_s": round(m.detected.seconds, 2) if m.detected else None,
+                            "detected_obs": m.detected.observations if m.detected else None,
                             "bib_correct": m.bib_correct,
                         }
                         for m in r.matches

@@ -187,6 +187,52 @@ class TestBibAssociation:
         assert associate_bib(person(1, 600.0), []) is None
 
 
+class TestMinObservations:
+    """A track must be seen enough times before it may finish.
+
+    Guards against track fragmentation: a sharper detector invents more
+    short-lived tracks, and on real footage one seen 6 times fired a duplicate
+    finish 0.44s before the real racer's track (seen 44 times).
+    """
+
+    def _config(self, minimum: int) -> Config:
+        config = base_config()
+        config.finish_line.min_observations = minimum
+        return config
+
+    def test_disabled_by_default(self):
+        assert base_config().finish_line.min_observations == 0
+
+    def test_short_lived_track_cannot_finish(self):
+        # Seen twice, then crosses on the second frame.
+        script = {0: [person(1, 400.0)], 1: [person(1, 600.0)]}
+        pipeline, events = build(script, config=self._config(5))
+        pipeline.run(frames(2))
+        assert events == []
+        assert pipeline.stats.finishes_below_min_observations == 1
+
+    def test_well_observed_track_finishes_normally(self):
+        script = {i: [person(1, 300.0 + i * 30)] for i in range(12)}
+        pipeline, events = build(script, config=self._config(5))
+        pipeline.run(frames(12))
+        assert len(events) == 1
+        assert pipeline.stats.finishes_below_min_observations == 0
+
+    def test_threshold_of_zero_admits_everything(self):
+        script = {0: [person(1, 400.0)], 1: [person(1, 600.0)]}
+        pipeline, events = build(script, config=self._config(0))
+        pipeline.run(frames(2))
+        assert len(events) == 1
+
+    def test_event_records_how_often_the_track_was_seen(self):
+        script = {i: [person(1, 300.0 + i * 30)] for i in range(12)}
+        pipeline, events = build(script, config=self._config(0))
+        pipeline.run(frames(12))
+        # Counting stops when the confirmation window elapses and the event is
+        # built, so this is under the 12 frames the track was actually in.
+        assert events[0].track_observations >= 5
+
+
 class TestCourseBoundary:
     """Confirms the boundary gate is actually wired into the frame loop:
     someone outside it must never reach OCR, crossing detection, or a

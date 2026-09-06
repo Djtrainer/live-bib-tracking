@@ -89,6 +89,16 @@ class FinishLineConfig:
     ``side`` selects which half-plane counts as finished. "below" means a larger
     y value than the line at the same x, matching image coordinates where y
     grows downward.
+
+    ``min_observations`` is how many times a track must have been seen before
+    it is allowed to finish. 0 disables it. A real racer approaching the line
+    is tracked for tens of frames; a fragment the tracker briefly invented is
+    seen a handful of times and then vanishes. Measured on real footage with a
+    sharper (1280px) model, one clip produced two finishes 0.44s apart -- one
+    from a track observed 44 times (the racer) and one from a track observed 6
+    times (a fragment of the same person). Raising detector resolution makes
+    this worse, not better, because more sensitive detection fragments tracks
+    more readily.
     """
 
     p1: Point = (0.0, 1.09)
@@ -97,6 +107,7 @@ class FinishLineConfig:
     confirm_frames: int = 8
     reference_point: str = "bottom_center"
     require_approach: bool = True
+    min_observations: int = 0
 
 
 @dataclass

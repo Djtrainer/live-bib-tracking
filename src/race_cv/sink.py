@@ -49,6 +49,7 @@ class FinishEvent:
     bib_locked: bool = False
     in_roster: bool = False
     interpolated: bool = False
+    track_observations: int = 0
 
     def to_payload(self) -> dict[str, Any]:
         """The request body for ``POST /api/results``.
