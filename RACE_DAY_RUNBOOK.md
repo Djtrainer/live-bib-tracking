@@ -24,7 +24,13 @@ a number anyone in the race is wearing.
 
 - `-c 0` built-in camera, `-c 1` external/iPhone
 - `-r` start-list CSV — needs a `Bib` column, see `data/raw/roster_example.csv`
-- `--preview` opens an annotated window and runs in the foreground
+- `--preview` opens an annotated window and runs in the foreground. It is
+  redrawn at 10fps at half resolution (`--preview-fps`, `--preview-scale` on
+  `race_cv.run`). This is not cosmetic: a full-rate, full-res preview cost
+  19ms per frame *on the frame loop* and took the service from 29.9fps to
+  19.4fps — a third of its throughput, and the difference between reading
+  3/3 bibs and 2/3. Measured after gating: 28.3fps. Watch the browser stream
+  instead if you want smoother video; it cannot slow detection.
 
 Starts three things: the frontend in Docker (port 5173), a results API with no
 video pipeline inside it (port 8001), and `race_cv` owning the camera. Closing
