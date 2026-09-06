@@ -25,6 +25,57 @@ from .config import ModelConfig, RoiConfig
 BBox = tuple[float, float, float, float]
 
 
+_COMPUTE_UNITS_APPLIED: str | None = None
+
+
+def _force_coreml_compute_units(name: str) -> str | None:
+    """Make CoreML models load with the compute units we chose, not theirs.
+
+    Ultralytics' CoreML backend picks ``CPU_AND_NE`` for detection models and
+    offers no way to change it -- the choice is inline in the backend. On this
+    hardware that is 3.6x slower than ``ALL`` for identical output, which is
+    most of a frame budget thrown away.
+
+    The only injection point is ``coremltools.models.MLModel`` itself, which
+    the backend calls, so this subclasses it to pin ``compute_units``. The
+    patch is process-wide and installed once: every CoreML model this process
+    loads is one of ours, and the alternative -- patching around each load --
+    breaks because ultralytics builds the backend lazily on first predict, not
+    at construction.
+
+    Import order matters and is not incidental: importing coremltools before
+    torch segfaults the process (exit 139) on this machine, so the import here
+    happens after ultralytics has already pulled torch in.
+
+    Returns the unit name applied, or None if left alone.
+    """
+    global _COMPUTE_UNITS_APPLIED
+    if not name or name.upper() == "DEFAULT":
+        return None
+    if _COMPUTE_UNITS_APPLIED is not None:
+        return _COMPUTE_UNITS_APPLIED
+
+    import coremltools as ct
+
+    unit = getattr(ct.ComputeUnit, name.upper(), None)
+    if unit is None:
+        raise ValueError(
+            f"Unknown coreml_compute_units {name!r}; expected one of "
+            f"ALL, CPU_AND_NE, CPU_AND_GPU, CPU_ONLY, DEFAULT"
+        )
+
+    base = ct.models.MLModel
+
+    class _PinnedComputeUnits(base):
+        def __init__(self, *args, **kwargs):
+            kwargs["compute_units"] = unit
+            super().__init__(*args, **kwargs)
+
+    ct.models.MLModel = _PinnedComputeUnits
+    _COMPUTE_UNITS_APPLIED = name.upper()
+    return _COMPUTE_UNITS_APPLIED
+
+
 def _fixed_input_size(model_path: Path) -> int | None:
     """The one input size a CoreML export will accept, if it is fixed.
 
@@ -130,6 +181,15 @@ class Detector:
 
         self.config = model_config
         self.roi = Roi(roi_config, frame_width, frame_height)
+
+        # Must happen before any model loads: the patch only affects models
+        # constructed after it is installed.
+        self.compute_units = None
+        if model_path.suffix == ".mlpackage":
+            self.compute_units = _force_coreml_compute_units(
+                model_config.coreml_compute_units
+            )
+
         self.model = YOLO(str(model_path))
 
         # Second stage may run its own, smaller export. Sharing one YOLO object

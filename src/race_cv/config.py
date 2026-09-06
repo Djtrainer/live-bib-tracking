@@ -39,6 +39,24 @@ class ModelConfig:
     person_class: int = 0
     bib_class: int = 1
 
+    # Which Apple compute units CoreML may use. "DEFAULT" leaves ultralytics'
+    # own choice alone; anything else overrides it.
+    #
+    # This is not a micro-optimisation. Ultralytics 8.4 hardcodes CPU_AND_NE
+    # for detection models, commented as "~3x faster than CPU". Measured
+    # end-to-end on this Mac with the deployed 1280 model, identical
+    # detections in every case:
+    #
+    #     CPU_AND_NE (their default)  216.3ms
+    #     CPU_ONLY                    152.7ms
+    #     ALL (ANE+GPU+CPU)            59.5ms   <- 3.6x faster than default
+    #
+    # Their comment also warns that ALL can abort the process via an MPSGraph
+    # compiler bug under coremltools 9.x. That does not reproduce here across
+    # full smoke runs, but it is why this is a config value and not a constant:
+    # if the pipeline ever dies at model load, set this to CPU_AND_NE.
+    coreml_compute_units: str = "ALL"
+
     # Two-stage detection: find people on the full frame, then re-run the
     # detector on each person's crop to find their bib. A bib is a small object
     # -- median 46px wide in finish-line footage, which is 15px once a 1920px
