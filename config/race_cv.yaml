@@ -9,9 +9,9 @@
 # against this year's camera before the race and confirm the overlay.
 
 model:
-  path: models/yolo11_white_bibs/weights/last.mlpackage
+  path: models/gpu_runs/yolo11n_1280/weights/best.mlpackage
   tracker: config/custom_tracker.yaml
-  imgsz: 640
+  imgsz: 1280          # model is exported at a FIXED 1280 input; must match
   conf: 0.25          # now actually reaches the model (it never used to)
   iou: 0.7
   device: cpu         # "mps" for Apple GPU, "cpu" for CoreML/ANE
@@ -64,7 +64,11 @@ ocr:
   target_height: 120
 
 pipeline:
-  target_fps: 10.0         # 0 = process every frame (replay uses this)
+  # 1280 inference costs ~49ms/frame (20.5 fps ceiling) against ~12ms at 640.
+  # 30 fps is not sustainable at this resolution, so this leaves headroom for
+  # OCR spikes and the preview stream. CameraSource drops frames rather than
+  # falling behind if it still cannot keep up, and reports it as "source dropped".
+  target_fps: 15.0         # 0 = process every frame (replay uses this)
   log_every_n_frames: 300
 
 sink:
