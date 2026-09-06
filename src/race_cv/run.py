@@ -164,6 +164,16 @@ def main(argv: list[str] | None = None) -> int:
         config.finish_line.reference_point,
     )
 
+    # Pay every model's first-inference cost now, while a stall is free.
+    # Left lazy, the detector's cost lands on the first frame and the OCR
+    # reader's lands on the first readable bib -- i.e. mid-race, right as a
+    # racer reaches the line, with the capture thread dropping frames
+    # throughout. Measured on this machine: ~3.4s and ~3.0s warm, worse cold.
+    detector_warmup = pipeline.detector.warmup(source.frame_width, source.frame_height)
+    logger.info("Detector warm-up: %.1fs", detector_warmup)
+    if pipeline.reader is not None:
+        logger.info("OCR warm-up: %.1fs", pipeline.reader.warmup())
+
     stopping = {"flag": False}
 
     def handle_signal(signum, _frame):

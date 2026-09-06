@@ -13,6 +13,7 @@ exactly one place, :meth:`Detector._to_full_frame`, so it can be tested.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,6 +101,29 @@ class Detector:
         self.config = model_config
         self.roi = Roi(roi_config, frame_width, frame_height)
         self.model = YOLO(str(model_path))
+
+    def warmup(self, frame_width: int, frame_height: int) -> float:
+        """Run one throwaway inference so the first real frame isn't slow.
+
+        Loading the CoreML model and running its first inference costs a few
+        seconds; paying that on the first frame of a race means the pipeline
+        is blind while it happens. Uses ``predict`` rather than ``track`` so
+        the tracker's state isn't seeded with detections from a blank frame.
+        """
+        started = time.time()
+        blank = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+        try:
+            self.model.predict(
+                blank,
+                conf=self.config.conf,
+                imgsz=self.config.imgsz,
+                device=self.config.device,
+                half=self.config.half,
+                verbose=False,
+            )
+        except Exception:
+            pass
+        return time.time() - started
 
     def track(self, image: np.ndarray) -> list[Detection]:
         """Run detection + tracking on one frame.

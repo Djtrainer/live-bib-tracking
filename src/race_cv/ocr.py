@@ -16,6 +16,7 @@ Three fixes over the legacy implementation:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import cv2
@@ -70,6 +71,38 @@ class BibReader:
 
             self._reader = easyocr.Reader(["en"])
         return self._reader
+
+    def warmup(self) -> float:
+        """Load and exercise the OCR model up front. Returns seconds taken.
+
+        Without this, the ~3-8s cost of importing easyocr, building the
+        Reader, and running its first inference is paid lazily -- on the first
+        bib that clears ``min_bib_yolo_conf``, which is to say at the exact
+        moment the first racer becomes readable near the line. On a live
+        camera the capture thread keeps grabbing and dropping frames during
+        that stall, so the pipeline goes blind at the worst possible time.
+
+        Call this before the frame loop, when a stall costs nothing.
+        """
+        started = time.time()
+        reader = self._ensure_reader()
+        # Real inferences, not just construction: torch defers a large part of
+        # the cost to the first call *at each input shape*. Measured here, a
+        # first call at an unseen width costs 160-370ms while a repeat at a
+        # seen width costs ~35ms, so warming a single shape leaves most of the
+        # stall in place. preprocess() scales crops to target_height keeping
+        # aspect, so sweep the widths that produces for roughly 1:1 to 3:1
+        # bibs.
+        height = self.config.target_height
+        for width in (height, int(height * 1.7), int(height * 2.3), int(height * 3.0)):
+            probe = np.full((height, width), 255, dtype=np.uint8)
+            cv2.putText(probe, "123", (10, height - 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 2.0, 0, 5)
+            try:
+                reader.readtext(probe, allowlist="0123456789")
+            except Exception:
+                pass
+        return time.time() - started
 
     def preprocess(self, crop: np.ndarray) -> np.ndarray:
         """Grayscale, upscale to a consistent height, equalise, threshold."""
