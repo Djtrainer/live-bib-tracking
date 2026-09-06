@@ -9,9 +9,24 @@
 # against this year's camera before the race and confirm the overlay.
 
 model:
-  path: models/gpu_runs/yolo11n_1280/weights/best.mlpackage
+  # A rectangular export of the same 1280-trained weights, sized to the
+  # racer-only crop below. Regenerate with scripts/export_coreml.py.
+  #
+  # Why not the square 1280 export: a 1920x1080 frame letterboxed into a
+  # square spends 43.8% of every forward pass on grey padding, and the crop
+  # alone cannot fix that -- with a fixed-size export the cropped region is
+  # scaled back up to the same tensor. Sizing the export to the crop is what
+  # actually removes the pixels. Object scale stays at x0.667, exactly what
+  # the weights were trained at, so nothing about bib legibility changes.
+  #
+  # Measured on the 14-48-12 clip, realtime, solo:
+  #   square 1280 @15fps  75% recall  2/3 bibs  ~5600 frames dropped
+  #   928x512    @15fps   75% recall  2/3 bibs     26 frames dropped
+  #   928x512    @30fps   75% recall  3/3 bibs     36 frames dropped (of 9338)
+  # Tracking loop 20.2ms median / 26ms p90 against a 33ms budget at 30fps.
+  path: models/exports/rect_928x512.mlpackage
   tracker: config/custom_tracker.yaml
-  imgsz: 1280          # model is exported at a FIXED 1280 input; must match
+  imgsz: [512, 928]    # [height, width] -- ultralytics' ordering. Must match the export.
   conf: 0.25          # now actually reaches the model (it never used to)
   iou: 0.7
   device: cpu         # "mps" for Apple GPU, "cpu" for CoreML/ANE
@@ -59,19 +74,24 @@ roi:
   # A 46px bib arrives as 41px instead of 31px. That is the same lever that
   # took tiny-bib recall from 16% to 80% when the model went 640 -> 1280.
   #
-  # x0=0.26 is set to the course boundary's leftmost declared point (0.285)
-  # plus margin, so the crop cannot clip live course. Tighter is tempting --
-  # x0=0.333 gives a perfect x1.000 scale because 2/3 of 1920 is exactly 1280
-  # -- but it cuts 0.048 of normalized width off the inside of the boundary
-  # for a 12% pixel gain (46px vs 41px). Not worth a silently invisible racer.
+  # The racer-only region: racers are never on the left 28% of the frame
+  # (course_boundary's leftmost declared point is 0.285), and never above
+  # y=0.30 -- the course is declared from y=0.49 and the treeline sits
+  # above 0.45. race_cv cross-checks both edges against course_boundary at
+  # startup and prints CONFIG MISMATCH if the crop cuts into it.
   #
-  # There is deliberately NO top crop. Once the left strip is gone the region
-  # is 1421x1080 and WIDTH is what binds against the square 1280 input, so
-  # cropping the top changes the object scale not at all (verified: x0.999
-  # with and without a 20% top crop) and costs the same. It would be pure
-  # added risk of clipping an approaching racer for zero benefit.
+  # The top crop is a real saving ONLY because model.imgsz is rectangular.
+  # With the old square export, width was what bound against the input and
+  # cropping the top changed nothing; with height free, the y0.20 -> y0.30
+  # step alone took the input from 928x576 to 928x512. It also proved
+  # cleaner: the band between y0.20 and y0.30 generated ~3000 spurious
+  # person detections and a duplicate-track ghost in testing.
+  #
+  # If you retrain or re-export at a different size, re-derive the crop
+  # from the boundary, not the other way round: the crop must contain the
+  # course, never the reverse.
   enabled: true
-  polygon: [[0.26, 0.0], [1.0, 0.0], [1.0, 1.0], [0.26, 1.0]]
+  polygon: [[0.28, 0.30], [1.0, 0.30], [1.0, 1.0], [0.28, 1.0]]
   scale: 1.0
 
 course_boundary:
@@ -135,7 +155,12 @@ pipeline:
   # 30 fps is not sustainable at this resolution, so this leaves headroom for
   # OCR spikes and the preview stream. CameraSource drops frames rather than
   # falling behind if it still cannot keep up, and reports it as "source dropped".
-  target_fps: 10.0         # 0 = process every frame (replay uses this)
+  # 30 = every frame of a 30fps camera. The tracking loop runs at ~20ms
+  # against a 33ms budget with the 928x512 export, and at 30fps realtime on
+  # the 14-48-12 clip it processed 9302 of 9338 frames and read 3/3 bibs.
+  # If `source dropped` climbs in the health line, drop this to 15 before
+  # anything else; it was 26 dropped at 15fps.
+  target_fps: 30.0         # 0 = process every frame (replay uses this)
   log_every_n_frames: 300
 
 sink:

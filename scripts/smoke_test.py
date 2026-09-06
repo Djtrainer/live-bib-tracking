@@ -208,6 +208,17 @@ def run_clip(
         "people_outside_boundary": pipeline.stats.people_outside_boundary,
         "bib_detections": pipeline.stats.bib_detections,
         "ocr_reads": pipeline.stats.ocr_reads,
+        # The async OCR worker's health. A run that reads a bib on 6 frames
+        # when it was legible on 60 is throttled somewhere, and these say
+        # where: dropped = the worker was backed up and crops were discarded;
+        # wait_timeouts = a finish event was built before that racer's reads
+        # landed, so it resolved from a partial (or empty) vote. Without them
+        # a CPU-starved worker and a model that cannot read look identical.
+        "ocr_dropped": pipeline.stats.ocr_dropped,
+        "ocr_wait_timeouts": pipeline.stats.ocr_wait_timeouts,
+        "ocr_mean_wait_ms": round(pipeline.stats.ocr_mean_wait_ms, 1),
+        "unknown_bib_events": pipeline.stats.unknown_bib_events,
+        "finishes_below_min_observations": pipeline.stats.finishes_below_min_observations,
         "suppressed_first_seen_past": pipeline.stats.suppressed_first_seen_past,
         # Frames the pipeline was too slow to collect. Always 0 offline; the
         # number that matters when judging whether a config survives live.

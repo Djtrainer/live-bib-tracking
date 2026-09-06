@@ -104,8 +104,9 @@ All in `config/race_cv.yaml`.
 
 | lever | current | effect |
 |---|---|---|
-| `model.path` / `model.imgsz` | 1280 model, 1280 | **Must match.** The CoreML export has a fixed input size; a mismatch discards what training at that resolution bought. |
-| `pipeline.target_fps` | 15.0 | 1280 costs ~49ms/frame (20.5 fps ceiling). Raise only if `source dropped` stays low; lower if it climbs. |
+| `model.path` / `model.imgsz` | 928×512 rect export, `[512, 928]` | **Must match**, and `imgsz` is `[height, width]`. A rectangular export sized to the crop below; the square 1280 spent 44% of each forward pass on padding. Regenerate with `python scripts/export_coreml.py`. |
+| `roi.polygon` | x ≥ 0.28, y ≥ 0.30 | The racer-only region. Checked against `course_boundary` at startup — a crop that cuts into declared course prints `CONFIG MISMATCH`. Cropping only saves compute when `imgsz` is sized to match; on its own it changes nothing. |
+| `pipeline.target_fps` | 30.0 | Loop is ~20ms against a 33ms budget. 36 frames dropped of 9338 at 30fps on the longest clip. If `source dropped` climbs, go to 15 first. |
 | `model.two_stage` | false | Finds bibs by re-running the detector on each person's crop. **Only worth enabling with `two_stage_model` pointing at a smaller export.** A CoreML `.mlpackage` accepts exactly one input size, so without that the crops run through the 1280 model at 1280: 54.9ms *per person*, which roughly doubles frame cost rather than reducing it. Against a real 640 export it is 12.2ms per crop. |
 | `ocr.async_reads` | true | Reads bibs on a background thread. Inline, a ~27ms read fired exactly at the line and pushed crossing frames over budget. Turn off only to reproduce old behaviour. |
 | `finish_line.p1/p2` | 2025 geometry | **Recalibrate per camera.** `python scripts/calibrate.py --source 0 --config config/race_cv.yaml` |
@@ -122,8 +123,13 @@ line and the race clock. Events are never dropped: they are appended to
 the API confirms. On shutdown anything undelivered is printed with bib and
 timestamp.
 
-**Pipeline falling behind** (`source dropped` climbing) — lower `target_fps`,
-or switch to `640 + two_stage`.
+**Pipeline falling behind** (`source dropped` climbing) — lower `target_fps`
+to 15 first; it was 26 dropped there against 36 at 30. Do **not** reach for
+`two_stage` without a matching small export: with the deployed model it runs
+every crop through the full network and roughly doubles frame cost. And check
+the startup log for `CONFIG MISMATCH` — an `imgsz` that doesn't match the
+export, or a crop the model wasn't sized for, costs far more than any fps knob
+recovers.
 
 **Racers missed entirely** — check `people_outside_boundary`. If it is large,
 the course boundary no longer matches the camera; recalibrate or set
