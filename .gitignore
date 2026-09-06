@@ -38,3 +38,5 @@ runs/
 data/dataset/
 *.cache
 training_results.json
+data/autolabel_preview/
+data/autolabel_report.json

@@ -166,6 +166,75 @@ class Detector:
             )
         return detections
 
+    @staticmethod
+    def merge(primary: list[Detection], extra: list[Detection], iou: float = 0.5):
+        """Add `extra` detections, dropping ones that duplicate `primary`.
+
+        The two-stage pass re-examines a region the full-frame pass already
+        looked at, so any bib visible at both scales gets found twice. Left
+        unmerged that produces stacked near-identical boxes: noise for a human
+        reviewer, and duplicated supervision if the output is trained on.
+        """
+        def iou_of(a, b):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+            ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+            iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+            inter = iw * ih
+            if inter <= 0:
+                return 0.0
+            area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+            area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+            union = area_a + area_b - inter
+            return inter / union if union > 0 else 0.0
+
+        merged = list(primary)
+        for candidate in extra:
+            if any(
+                candidate.cls == kept.cls and iou_of(candidate.xyxy, kept.xyxy) >= iou
+                for kept in merged
+            ):
+                continue
+            merged.append(candidate)
+        return merged
+
+    def detect(self, image: np.ndarray) -> list[Detection]:
+        """Detect on a single image with no tracking state.
+
+        ``track()`` runs ByteTrack with ``persist=True``, which is right for
+        consecutive video frames and badly wrong for a folder of unrelated
+        stills: the tracker tries to associate each image's detections with
+        tracks from the previous, unrelated image and drops the ones that don't
+        match. Anything iterating over independent images wants this instead.
+        """
+        region = self.roi.crop(image)
+        results = self.model.predict(
+            region,
+            conf=self.config.conf,
+            iou=self.config.iou,
+            imgsz=self.config.imgsz,
+            device=self.config.device,
+            half=self.config.half,
+            verbose=False,
+        )
+        if not results:
+            return []
+        boxes = getattr(results[0], "boxes", None)
+        if boxes is None or len(boxes) == 0:
+            return []
+        return [
+            Detection(
+                xyxy=self.roi.to_full_frame(
+                    tuple(float(v) for v in box.xyxy[0].tolist())
+                ),
+                conf=float(box.conf.item()),
+                cls=int(box.cls.item()),
+                track_id=None,
+            )
+            for box in boxes
+        ]
+
     def bibs_in_people(
         self, image: np.ndarray, people: list[Detection]
     ) -> list[Detection]:
@@ -201,19 +270,28 @@ class Detector:
         if not crops:
             return []
 
-        results = self.model.predict(
-            crops,
-            conf=self.config.conf,
-            iou=self.config.iou,
-            imgsz=self.config.two_stage_imgsz,
-            device=self.config.device,
-            half=self.config.half,
-            verbose=False,
-        )
-
+        # One crop at a time rather than one batched call. The CoreML export is
+        # fixed at batch=1, and handing it a list of differently-sized crops
+        # makes ultralytics return fewer results than inputs and then index off
+        # the end. Batching bought nothing here anyway: a batch-1 backend runs
+        # them sequentially regardless.
         found: list[Detection] = []
-        for result, (ox, oy, cw, ch) in zip(results, origins):
-            boxes = getattr(result, "boxes", None)
+        for crop, (ox, oy, cw, ch) in zip(crops, origins):
+            try:
+                results = self.model.predict(
+                    crop,
+                    conf=self.config.conf,
+                    iou=self.config.iou,
+                    imgsz=self.config.two_stage_imgsz,
+                    device=self.config.device,
+                    half=self.config.half,
+                    verbose=False,
+                )
+            except Exception:
+                continue
+            if not results:
+                continue
+            boxes = getattr(results[0], "boxes", None)
             if boxes is None or len(boxes) == 0:
                 continue
             for box in boxes:

@@ -188,9 +188,14 @@ class Pipeline:
             # boundary gate so we never pay for people who are off-course.
             extra = self.detector.bibs_in_people(frame.image, people)
             if extra:
-                bibs = bibs + extra
-                self.stats.bib_detections += len(extra)
-                self.stats.second_stage_bibs += len(extra)
+                before = len(bibs)
+                # Merge rather than concatenate: a bib visible at both scales is
+                # found by both passes, and a duplicate box would let one racer
+                # out-vote another during bib association.
+                bibs = self.detector.merge(bibs, extra)
+                added = len(bibs) - before
+                self.stats.bib_detections += added
+                self.stats.second_stage_bibs += added
 
         result = FrameResult(
             frame=frame, people=people, bibs=bibs, excluded_people=excluded_people
