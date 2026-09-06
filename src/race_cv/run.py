@@ -317,7 +317,8 @@ def _report(
     message = (
         f"health | processed {stats.frames_processed} ({stats.processed_fps:.1f} fps) | "
         f"paced out {stats.frames_paced_out} | source dropped {dropped} | "
-        f"finishers {stats.events_emitted} (unknown bib {stats.unknown_bib_events}) | "
+        f"finishers {stats.events_emitted} (unknown bib {stats.unknown_bib_events}"
+        f"{f', handed off {stats.handoffs}' if stats.handoffs else ''}) | "
         f"delivered {sink_stats.delivered} | pending {sink_stats.pending}"
     )
     if pipeline.async_ocr is not None:

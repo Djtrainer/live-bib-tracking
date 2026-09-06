@@ -49,6 +49,7 @@ class PipelineStats:
     events_emitted: int = 0
     suppressed_first_seen_past: int = 0
     finishes_below_min_observations: int = 0
+    handoffs: int = 0
     second_stage_bibs: int = 0
     two_stage_crops_skipped: int = 0
     two_stage_errors: int = 0
@@ -228,6 +229,15 @@ class Pipeline:
             if crossing is not None:
                 self.stats.crossings += 1
                 result.crossings.append(crossing)
+                predecessor = crossing.predecessor_track_id
+                if predecessor is not None:
+                    # A crossing recovered across a track break: the racer's
+                    # history lives on the track that died. Inherit it, or the
+                    # newborn -- a few frames old -- fails min_observations
+                    # and has no bib votes, and the recovery was for nothing.
+                    self.stats.handoffs += 1
+                    self._observations[track_id] += self._observations.get(predecessor, 0)
+                    self.voter.transfer(predecessor, track_id)
                 minimum = self.config.finish_line.min_observations
                 if minimum and self._observations[track_id] < minimum:
                     # A track the detector only glimpsed. Real racers are seen

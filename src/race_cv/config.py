@@ -162,6 +162,26 @@ class FinishLineConfig:
     require_approach: bool = True
     min_observations: int = 0
 
+    # Recover a crossing across a track break. When a track is first seen
+    # past the line, look for an approaching track that vanished within
+    # handoff_window_s, was within handoff_max_distance (fraction of frame
+    # height) of the line, and was closing on it; if found, the newborn is
+    # its continuation and the crossing is interpolated across the gap.
+    # Found on real footage: a racer reaching a close camera becomes large
+    # and clipped, ByteTrack issues a new id a few frames short of the line,
+    # and the "first seen past the line" guard then ate the finisher. Both
+    # genuine misses on the 13-clip set had exactly this signature.
+    # handoff_min_gap_s keeps a still-alive neighbour from being mistaken
+    # for a predecessor. 0 for handoff_window_s disables it.
+    handoff_window_s: float = 1.0
+    handoff_max_distance: float = 0.35
+    handoff_min_gap_s: float = 0.05
+    # "Closing on the line" is judged as net progress over this many seconds,
+    # not frame to frame: a large box near the camera jitters a few pixels a
+    # frame, and the 14-48-12 miss had a last step of -0.0px on a track that
+    # had closed 60px in its final 0.6s.
+    handoff_direction_window_s: float = 0.5
+
 
 @dataclass
 class OcrConfig:

@@ -262,6 +262,21 @@ class BibVoter:
             self._reads.pop(track_id, None)
             self._locked.pop(track_id, None)
 
+    def transfer(self, source: int, target: int) -> None:
+        """Move one track's evidence onto another, for a crossing hand-off.
+
+        The reads were of the same racer; only the tracker's id changed. A
+        lock carries over too -- certainty about the bib does not expire
+        because ByteTrack lost the box for three frames.
+        """
+        with self._lock:
+            reads = self._reads.pop(source, None)
+            if reads:
+                self._reads.setdefault(target, []).extend(reads)
+            locked = self._locked.pop(source, None)
+            if locked is not None and target not in self._locked:
+                self._locked[target] = locked
+
 
 @dataclass
 class AsyncOcrStats:

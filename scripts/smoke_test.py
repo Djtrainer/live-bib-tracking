@@ -219,6 +219,11 @@ def run_clip(
         "ocr_mean_wait_ms": round(pipeline.stats.ocr_mean_wait_ms, 1),
         "unknown_bib_events": pipeline.stats.unknown_bib_events,
         "finishes_below_min_observations": pipeline.stats.finishes_below_min_observations,
+        # Crossings recovered across a track break (finish.py hand-off). A
+        # finisher counted here would have been a miss before; if the number
+        # is large on a clip, the tracker is fragmenting at the line and that
+        # is worth knowing even though the finishes were saved.
+        "handoffs": pipeline.stats.handoffs,
         "suppressed_first_seen_past": pipeline.stats.suppressed_first_seen_past,
         # Frames the pipeline was too slow to collect. Always 0 offline; the
         # number that matters when judging whether a config survives live.
