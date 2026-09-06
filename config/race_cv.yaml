@@ -55,7 +55,12 @@ finish_line:
 
 ocr:
   enabled: true
-  min_bib_yolo_conf: 0.70
+  # 0.70 gated OCR to only the most confident bib boxes, which was fine when
+  # every frame was processed but starves the voter at 15 fps: half the frames
+  # means half the chances of catching a >0.70 box. Measured on the smoke set,
+  # lowering this took bib accuracy from 9/13 to 12/13 with no new misreads and
+  # no extra compute -- OCR is ~27ms and only fires on detected bibs.
+  min_bib_yolo_conf: 0.25
   min_ocr_conf: 0.40
   lock_conf: 0.99
   min_len: 1               # was effectively 2: bibs 1-9 could never resolve
