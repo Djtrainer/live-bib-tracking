@@ -8,13 +8,22 @@ meaningful as it stands:
 
 * ``images/train`` holds 18 images while ``labels/train`` holds 220 labels, and
   only **5** match by stem. YOLO pairs an image to its label by filename, so
-  the deployed model was trained on 5 images.
+  training against this layout *today* would see 5 images. (The deployed model
+  scores 0.917 on held-out data, so it plainly trained on far more than that --
+  the directories were reorganised after it was trained. The layout is
+  unusable going forward either way.)
 * 307 label files have no image; 266 images have no label.
 * Labels contain class ids 2 and 3 (25 boxes) that ``nc: 2`` cannot accept.
-* The bulk of the finish-line footage sat in ``images/val`` -- so the best data
-  was being measured against instead of learned from, and the val frames came
-  from the same recording as train, often a quarter-second apart. That is why
-  ``mAP50 = 0.941`` measured memorisation.
+* The bulk of the finish-line footage sat in ``images/val``, so the best data
+  was being measured against rather than learned from.
+
+Note on what was *not* wrong: the original split was temporally disjoint
+(``images/train`` covers t=753-2285s, ``images/val`` t=8-597s, with no pair of
+frames within 2s of each other), so its ``mAP50 = 0.941`` was not the
+memorisation score it first appeared to be. Re-measuring the deployed model on
+the rebuilt split gives 0.917, which is consistent with that. The value here is
+recovering usable pairs from a broken layout, dropping invalid classes, and
+making val domain-aware -- not fixing leakage that turned out not to exist.
 
 What "ideal" means here
 -----------------------

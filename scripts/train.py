@@ -79,7 +79,11 @@ def run_one(model_name, imgsz, args) -> dict:
         "bib_mAP50": round(float(metrics.box.ap50[1]), 4),
         "bib_precision": round(float(metrics.box.p[1]), 4),
         "bib_recall": round(float(metrics.box.r[1]), 4),
-        "weights": str(Path(args.project) / tag / "weights" / "best.pt"),
+        # Ask the trainer where it actually saved rather than reconstructing
+        # the path: ultralytics prefixes a relative `project` with runs/detect/,
+        # so the reconstructed path is wrong and the export silently 404s after
+        # the training has already been paid for.
+        "weights": str(Path(model.trainer.save_dir) / "weights" / "best.pt"),
     }
 
     if args.export:

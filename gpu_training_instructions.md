@@ -31,7 +31,7 @@ gcloud compute instances create bib-train \
   --zone=us-central1-a \
   --machine-type=g2-standard-8 \
   --accelerator=type=nvidia-l4,count=1 \
-  --image-family=common-cu123-ubuntu-2204-py310 \
+  --image-family=pytorch-2-9-cu129-ubuntu-2204-nvidia-580 \
   --image-project=deeplearning-platform-release \
   --boot-disk-size=100GB \
   --boot-disk-type=pd-balanced \
@@ -43,6 +43,9 @@ Add `--provisioning-model=SPOT` to cut the price roughly in half. Spot can be
 reclaimed mid-run, which for a 10-minute training job is usually an acceptable
 trade — but the driver install alone takes a few minutes, so a reclaim early on
 costs more than it saves.
+
+Image families get retired; if this one 404s, list current ones with
+`gcloud compute images list --project=deeplearning-platform-release --filter="family~cu1"`.
 
 The first boot installs the NVIDIA driver. Wait for it:
 
@@ -68,15 +71,28 @@ gcloud compute ssh bib-train --zone=us-central1-a
 
 Then on the VM:
 
+The deep-learning image is headless and has no `python` on PATH, so two things
+need handling before ultralytics will import:
+
 ```bash
-pip install -q ultralytics
+# 1. No `python`, only `python3`.
+# 2. ultralytics pulls in opencv-python, which needs libGL that a server image
+#    doesn't ship. Install the system libs and use the headless build -- and
+#    pin below 5.x, because opencv-python-headless 5.0.0.x currently installs
+#    a wheel whose `import cv2` fails on this image.
+sudo apt-get update -qq && sudo apt-get install -y libgl1 libglib2.0-0
+python3 -m pip install -q ultralytics
+python3 -m pip uninstall -y -q opencv-python opencv-contrib-python
+python3 -m pip install -q 'opencv-python-headless<5'
+python3 -c "import cv2, ultralytics, torch; print(cv2.__version__, ultralytics.__version__, torch.cuda.is_available())"
+
 tar -xzf bib_dataset.tar.gz
 mkdir -p config && mv yolo_dataset.yaml config/
 # The generated config has an absolute path from the laptop; point it at the VM copy.
 sed -i "s|^path: .*|path: $HOME/dataset|" config/yolo_dataset.yaml
 
 # The matrix worth running: resolution is the open question, capacity is second.
-python train.py \
+python3 train.py \
   --models yolo11n,yolo11s \
   --imgsz 640,960,1280 \
   --epochs 150 \
