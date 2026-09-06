@@ -228,6 +228,21 @@ class BibVoter:
             known = {t: s for t, s in scores.items() if t in self.roster}
             if known:
                 scores = known
+            else:
+                # Nothing read is a real bib. An off-roster number may still
+                # be the right answer (the roster is incomplete more often
+                # than never), but a *single* such read is not evidence of
+                # that -- it is what a bibless racer looks like after a few
+                # hundred frames of OCR on a logo. Demand agreement.
+                counts: dict[str, int] = {}
+                for read in reads:
+                    counts[read.text] = counts.get(read.text, 0) + 1
+                scores = {
+                    t: s for t, s in scores.items()
+                    if counts[t] >= self.config.min_votes_off_roster
+                }
+                if not scores:
+                    return BibVerdict(text=None, score=0.0, votes=len(reads), locked=False)
 
         winner = max(scores, key=scores.get)
         return BibVerdict(

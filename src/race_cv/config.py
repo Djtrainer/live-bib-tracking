@@ -176,6 +176,16 @@ class OcrConfig:
     crop_padding: int = 15
     target_height: int = 120
 
+    # When a roster is loaded, a number that is NOT on it needs this many
+    # agreeing reads before it can be the verdict. On-roster numbers are not
+    # subject to it. Real bibs on real footage resolve with 3+ reads at
+    # 0.99+; the case this guards is a bibless racer, seen for hundreds of
+    # frames, collecting a single spurious "1" from a logo or a fold of
+    # fabric and having their finish credited to whoever wears bib 1.
+    # Two agreeing off-roster reads are kept as evidence the roster is
+    # incomplete; one is noise. Set to 1 to restore the old behaviour.
+    min_votes_off_roster: int = 2
+
     # Read bibs on a background thread instead of inline in the frame loop.
     # An EasyOCR read costs ~27ms and fires only when a bib is legible, i.e.
     # exactly at the finish line -- inline, that pushed the crossing frames
