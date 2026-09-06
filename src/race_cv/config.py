@@ -39,6 +39,21 @@ class ModelConfig:
     person_class: int = 0
     bib_class: int = 1
 
+    # Two-stage detection: find people on the full frame, then re-run the
+    # detector on each person's crop to find their bib. A bib is a small object
+    # -- median 46px wide in finish-line footage, which is 15px once a 1920px
+    # frame is squeezed into a 640px input. Cropping to one runner and feeding
+    # *that* to the same 640px input gives the bib several hundred pixels
+    # instead, without paying for high resolution across the whole frame.
+    #
+    # Cost is one inference per person rather than per frame, so this is a win
+    # when few runners are in shot and a loss in a dense pack; crops are
+    # batched into a single call to blunt that.
+    two_stage: bool = False
+    two_stage_imgsz: int = 640
+    two_stage_padding: float = 0.15  # fraction of the person box, added around it
+    two_stage_max_crops: int = 6     # bound the per-frame cost in a pack
+
 
 @dataclass
 class RoiConfig:

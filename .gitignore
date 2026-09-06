@@ -33,3 +33,8 @@ models/*
 # race_cv outputs
 data/results/events.jsonl
 runs/
+
+# Derived dataset: rebuild with scripts/build_dataset.py, don't track it
+data/dataset/
+*.cache
+training_results.json

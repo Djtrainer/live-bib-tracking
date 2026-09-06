@@ -49,6 +49,7 @@ class PipelineStats:
     events_emitted: int = 0
     suppressed_first_seen_past: int = 0
     finishes_below_min_observations: int = 0
+    second_stage_bibs: int = 0
     unknown_bib_events: int = 0
     first_capture_ts: float | None = None
     last_capture_ts: float | None = None
@@ -180,6 +181,16 @@ class Pipeline:
                 (on_course if self.boundary.contains_box(p.xyxy) else excluded_people).append(p)
             self.stats.people_outside_boundary += len(excluded_people)
             people = on_course
+
+        if self.config.model.two_stage and people:
+            # Second pass looks for bibs inside each runner's crop, where they
+            # are hundreds of pixels wide rather than a dozen. Runs after the
+            # boundary gate so we never pay for people who are off-course.
+            extra = self.detector.bibs_in_people(frame.image, people)
+            if extra:
+                bibs = bibs + extra
+                self.stats.bib_detections += len(extra)
+                self.stats.second_stage_bibs += len(extra)
 
         result = FrameResult(
             frame=frame, people=people, bibs=bibs, excluded_people=excluded_people

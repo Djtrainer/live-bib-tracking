@@ -166,6 +166,70 @@ class Detector:
             )
         return detections
 
+    def bibs_in_people(
+        self, image: np.ndarray, people: list[Detection]
+    ) -> list[Detection]:
+        """Second-stage pass: look for a bib inside each person's crop.
+
+        A bib is tiny once a 1920px frame is squeezed into the model's 640px
+        input -- median 15px wide in finish-line footage. Cropping to a single
+        runner and feeding that to the same input gives the bib hundreds of
+        pixels instead, which is a far larger effective upscale than raising
+        the whole frame's resolution, at a fraction of the cost.
+
+        Crops go through in one batched call, and coordinates come back
+        translated to full-frame space. Returns bib detections only; person
+        boxes from the second pass are discarded because the first pass already
+        owns tracking.
+        """
+        if not people:
+            return []
+        crops, origins = [], []
+        height, width = image.shape[:2]
+        for person in people[: self.config.two_stage_max_crops]:
+            x1, y1, x2, y2 = person.xyxy
+            pad_x = (x2 - x1) * self.config.two_stage_padding
+            pad_y = (y2 - y1) * self.config.two_stage_padding
+            cx1 = max(0, int(x1 - pad_x))
+            cy1 = max(0, int(y1 - pad_y))
+            cx2 = min(width, int(x2 + pad_x))
+            cy2 = min(height, int(y2 + pad_y))
+            if cx2 - cx1 < 8 or cy2 - cy1 < 8:
+                continue
+            crops.append(image[cy1:cy2, cx1:cx2])
+            origins.append((cx1, cy1, cx2 - cx1, cy2 - cy1))
+        if not crops:
+            return []
+
+        results = self.model.predict(
+            crops,
+            conf=self.config.conf,
+            iou=self.config.iou,
+            imgsz=self.config.two_stage_imgsz,
+            device=self.config.device,
+            half=self.config.half,
+            verbose=False,
+        )
+
+        found: list[Detection] = []
+        for result, (ox, oy, cw, ch) in zip(results, origins):
+            boxes = getattr(result, "boxes", None)
+            if boxes is None or len(boxes) == 0:
+                continue
+            for box in boxes:
+                if int(box.cls.item()) != self.config.bib_class:
+                    continue
+                bx1, by1, bx2, by2 = (float(v) for v in box.xyxy[0].tolist())
+                found.append(
+                    Detection(
+                        xyxy=(bx1 + ox, by1 + oy, bx2 + ox, by2 + oy),
+                        conf=float(box.conf.item()),
+                        cls=self.config.bib_class,
+                        track_id=None,
+                    )
+                )
+        return found
+
     def split(
         self, detections: list[Detection]
     ) -> tuple[list[Detection], list[Detection]]:
