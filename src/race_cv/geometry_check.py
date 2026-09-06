@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from .boundary import _interpolate_x_at_y
 from .config import Config
+from .detect import normalize_imgsz
 
 SAMPLES = 64
 
@@ -97,6 +98,22 @@ def check_roi_covers_course(config: Config, width: int, height: int) -> list[str
                 f"the detector will never see. Set roi.polygon's left edge to "
                 f"<= {max(0.0, worst_left / width - 0.02):.3f}, or move the boundary."
             )
+
+        # The top edge. With a rectangular export, cropping the top is a real
+        # compute saving (height is no longer padded up to match width), which
+        # makes it tempting to push -- and a racer's box top sits well above
+        # their feet, so the course's topmost declared point is where their
+        # *feet* can be, not where the detector needs to see them. Demand a
+        # margin above it, not just clearance.
+        course_top = min(p[1] for p in (left_p1, left_p2, right_p1, right_p2))
+        margin = 0.10 * height
+        if ry1 > course_top - margin:
+            warnings.append(
+                f"roi crops at y={ry1 / height:.3f} but course_boundary is declared "
+                f"from y={course_top / height:.3f}. A racer at the top of the course "
+                f"has their head and bib above their feet; keep the crop's top edge "
+                f"<= {max(0.0, (course_top - margin) / height):.3f}."
+            )
         if worst_right is not None:
             warnings.append(
                 f"roi crops at x={rx2 / width:.3f} but course_boundary extends to "
@@ -133,11 +150,17 @@ def describe_roi(config: Config, width: int, height: int) -> str | None:
         return None
     rx1, ry1, rx2, ry2 = rect
     crop_w, crop_h = rx2 - rx1, ry2 - ry1
-    imgsz = config.model.imgsz
-    before = min(imgsz / width, imgsz / height)
-    after = min(imgsz / crop_w, imgsz / crop_h)
+    in_w, in_h = normalize_imgsz(config.model.imgsz)
+    before = min(in_w / width, in_h / height)
+    after = min(in_w / crop_w, in_h / crop_h)
+    # Two numbers, because the relative one alone misleads with a rectangular
+    # export: "x1.38 what they did full-frame" compares against this same
+    # model uncropped, which nobody runs. The absolute scale is what decides
+    # whether a bib is legible, and whether it matches what the weights were
+    # trained on (x0.667 for a 1920-wide frame into a 1280 square).
     return (
         f"ROI crop {int(crop_w)}x{int(crop_h)} of {width}x{height} "
-        f"(x {rx1 / width:.3f}-{rx2 / width:.3f}, y {ry1 / height:.3f}-{ry2 / height:.3f}); "
-        f"objects land at x{after / before:.2f} the pixels they did full-frame"
+        f"(x {rx1 / width:.3f}-{rx2 / width:.3f}, y {ry1 / height:.3f}-{ry2 / height:.3f}) "
+        f"into a {in_w}x{in_h} model input; objects at x{after:.3f} of native "
+        f"(x{after / before:.2f} what this model would see uncropped)"
     )

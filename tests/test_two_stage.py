@@ -22,7 +22,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from race_cv.config import ModelConfig, RoiConfig
-from race_cv.detect import Detection, Detector, _fixed_input_size
+from race_cv.detect import (
+    Detection, Detector, _fixed_input_size, normalize_imgsz, to_imgsz_arg,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 MODEL_1280 = REPO / "models/gpu_runs/yolo11n_1280/weights/best.mlpackage"
@@ -37,8 +39,17 @@ needs_models = pytest.mark.skipif(
 class TestFixedInputDetection:
     @needs_models
     def test_reads_the_exports_actual_size(self):
-        assert _fixed_input_size(MODEL_1280) == 1280
-        assert _fixed_input_size(MODEL_640) == 640
+        assert _fixed_input_size(MODEL_1280) == (1280, 1280)
+        assert _fixed_input_size(MODEL_640) == (640, 640)
+
+    @pytest.mark.skipif(
+        not (REPO / "models/exports/rect_960x736.mlpackage").exists(),
+        reason="rectangular export not present",
+    )
+    def test_reads_a_rectangular_export_as_width_height(self):
+        assert _fixed_input_size(
+            REPO / "models/exports/rect_960x736.mlpackage"
+        ) == (960, 736)
 
     def test_non_coreml_is_treated_as_flexible(self, tmp_path):
         weights = tmp_path / "best.pt"
@@ -146,3 +157,36 @@ class TestCropBudget:
         detector = detector_with(model, two_stage_imgsz=640)
         assert detector.bibs_in_people(frame(), []) == []
         assert model.calls == 0
+
+
+class TestImgszNormalization:
+    """imgsz may be square or rectangular, and the ordering is a trap.
+
+    ultralytics takes [height, width] -- height first -- which is the opposite
+    of how every other size in this project is written. Getting it backwards
+    silently swaps a 1280x736 model for a 736x1280 one, which CoreML then
+    rejects on every frame.
+    """
+
+    def test_an_int_means_square(self):
+        assert normalize_imgsz(1280) == (1280, 1280)
+
+    def test_a_pair_is_height_first(self):
+        # ultralytics imgsz=[736, 1280] produced a 1280-wide, 736-tall export.
+        assert normalize_imgsz([736, 1280]) == (1280, 736)
+
+    def test_tuples_work_too(self):
+        assert normalize_imgsz((736, 960)) == (960, 736)
+
+    def test_round_trips_back_to_ultralytics_form(self):
+        assert to_imgsz_arg(normalize_imgsz([736, 1280])) == [736, 1280]
+        assert to_imgsz_arg(normalize_imgsz(1280)) == 1280
+
+    def test_a_square_pair_collapses_to_an_int(self):
+        """ultralytics is happiest with a bare int for square inputs."""
+        assert to_imgsz_arg(normalize_imgsz([864, 864])) == 864
+
+    def test_nonsense_is_rejected_loudly(self):
+        for bad in ("1280", [1280], [1, 2, 3], None, True):
+            with pytest.raises(ValueError):
+                normalize_imgsz(bad)

@@ -31,7 +31,13 @@ class ModelConfig:
 
     path: str = "models/yolo11_white_bibs/weights/last.mlpackage"
     tracker: str = "config/custom_tracker.yaml"
-    imgsz: int = 640
+    # An int for a square input, or [height, width] for a rectangular one.
+    # Height-first, matching ultralytics' own convention, so the value here is
+    # the value you would pass them directly. Rectangular is worth having: a
+    # 1920x1080 frame letterboxed into a square 1280 model spends 43.8% of
+    # every forward pass on grey padding. Measured raw forward pass on the
+    # same weights -- 1280x1280 35.3ms, 1280x736 16.4ms, 960x736 14.5ms.
+    imgsz: int | list[int] = 640
     conf: float = 0.25
     iou: float = 0.7
     device: str = "cpu"
@@ -82,7 +88,7 @@ class ModelConfig:
     # 200x400px person and costs a quarter as much.
     two_stage: bool = False
     two_stage_model: str | None = None  # defaults to model.path
-    two_stage_imgsz: int = 640
+    two_stage_imgsz: int | list[int] = 640
     two_stage_padding: float = 0.15  # fraction of the person box, added around it
     two_stage_max_crops: int = 6     # bound the per-frame cost in a pack
 

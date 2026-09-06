@@ -81,3 +81,32 @@ class TestDescribeRoi:
 
     def test_a_tighter_crop_reports_a_larger_gain(self):
         assert "x1.50" in describe_roi(config_with(0.333), W, H)
+
+
+class TestTopEdge:
+    """With a rectangular export, cropping the top saves real compute, which
+    makes it the edge most likely to be pushed too far. The course boundary
+    is declared where racers' feet can be; their bib is above that."""
+
+    def _with_top(self, y0: float, x0: float = 0.26) -> Config:
+        c = config_with(x0)
+        c.roi.polygon = [[x0, y0], [1.0, y0], [1.0, 1.0], [x0, 1.0]]
+        return c
+
+    def test_a_top_crop_well_above_the_course_is_fine(self):
+        # course declared from y=0.49; 0.30 leaves the required margin
+        assert check_roi_covers_course(self._with_top(0.30), W, H) == []
+
+    def test_a_top_crop_at_the_course_line_is_rejected(self):
+        """Clearing the boundary is not enough: the bib is above the feet."""
+        warnings = check_roi_covers_course(self._with_top(0.48), W, H)
+        assert any("crops at y=" in w for w in warnings), warnings
+
+    def test_the_warning_says_how_far_to_back_off(self):
+        warnings = check_roi_covers_course(self._with_top(0.48), W, H)
+        top = next(w for w in warnings if "crops at y=" in w)
+        assert "<= 0.39" in top, top
+
+    def test_no_top_crop_never_warns_about_the_top(self):
+        warnings = check_roi_covers_course(config_with(0.26), W, H)
+        assert not any("crops at y=" in w for w in warnings)

@@ -76,8 +76,40 @@ def _force_coreml_compute_units(name: str) -> str | None:
     return _COMPUTE_UNITS_APPLIED
 
 
-def _fixed_input_size(model_path: Path) -> int | None:
-    """The one input size a CoreML export will accept, if it is fixed.
+def normalize_imgsz(value) -> tuple[int, int]:
+    """Return ``(width, height)`` from an int or an ultralytics-style pair.
+
+    ``imgsz`` may be a single int for a square input, or ``[height, width]``
+    for a rectangular one. That ordering is ultralytics' own -- ``imgsz=[736,
+    1280]`` exports a 1280-wide, 736-tall model -- and it is height-first,
+    which is the opposite of how every other size in this project is written.
+    It is kept rather than "fixed" so the value here matches what you would
+    pass to ultralytics directly, but everything downstream converts to
+    (width, height) immediately so the ambiguity lives in exactly one place.
+
+    Rectangular inputs matter because a 16:9 frame squeezed into a square
+    model wastes 43.8% of every forward pass on grey letterbox padding.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"imgsz must be an int or [height, width], got {value!r}")
+    if isinstance(value, int):
+        return value, value
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        height, width = value
+        return int(width), int(height)
+    raise ValueError(
+        f"imgsz must be an int or a [height, width] pair, got {value!r}"
+    )
+
+
+def to_imgsz_arg(size: tuple[int, int]):
+    """(width, height) -> what ultralytics wants: an int, or [height, width]."""
+    width, height = size
+    return width if width == height else [height, width]
+
+
+def _fixed_input_size(model_path: Path) -> tuple[int, int] | None:
+    """The one input size a CoreML export accepts, as (width, height).
 
     A ``.mlpackage`` is exported at a single input resolution and, unless it
     was given size flexibility (none of this repo's exports were), CoreML
@@ -102,7 +134,7 @@ def _fixed_input_size(model_path: Path) -> int | None:
         image = descriptor.type.imageType
         width, height = int(image.width), int(image.height)
         if width and height and not image.WhichOneof("SizeFlexibility"):
-            return width
+            return width, height
     return None
 
 
@@ -206,17 +238,21 @@ class Detector:
         # other, so an imgsz the model cannot honour is not a slow path or a
         # quality trade -- it is a hard failure on every inference. Resolve it
         # here, once, and say so, rather than discovering it per frame.
-        self.imgsz = model_config.imgsz
-        self.two_stage_imgsz = model_config.two_stage_imgsz
+        self.imgsz_wh = normalize_imgsz(model_config.imgsz)
+        self.two_stage_imgsz_wh = normalize_imgsz(model_config.two_stage_imgsz)
 
         fixed = _fixed_input_size(model_path)
-        if fixed is not None and fixed != self.imgsz:
+        if fixed is not None and fixed != self.imgsz_wh:
+            fw, fh = fixed
+            cw, ch = self.imgsz_wh
             self.warnings.append(
-                f"imgsz={self.imgsz} but {model_path.name} is exported at a fixed "
-                f"{fixed}x{fixed} and rejects any other size. Running at {fixed}. "
-                f"Set model.imgsz={fixed} so the config describes what happens."
+                f"imgsz={cw}x{ch} but {model_path.name} is exported at a fixed "
+                f"{fw}x{fh} and rejects any other size. Running at {fw}x{fh}. "
+                f"Set model.imgsz={to_imgsz_arg(fixed)} so the config describes "
+                f"what happens."
             )
-            self.imgsz = fixed
+            self.imgsz_wh = fixed
+        self.imgsz = to_imgsz_arg(self.imgsz_wh)
 
         if model_config.two_stage:
             second_path = Path(model_config.two_stage_model or model_config.path)
@@ -228,16 +264,17 @@ class Detector:
             second_fixed = (
                 fixed if second_path == model_path else _fixed_input_size(second_path)
             )
-            if second_fixed is not None and second_fixed != self.two_stage_imgsz:
+            if second_fixed is not None and second_fixed != self.two_stage_imgsz_wh:
+                fw, fh = second_fixed
+                cw, ch = self.two_stage_imgsz_wh
                 self.warnings.append(
-                    f"two_stage_imgsz={self.two_stage_imgsz} but {second_path.name} "
-                    f"is exported at a fixed {second_fixed}x{second_fixed} and "
-                    f"rejects any other size. Running crops at {second_fixed}, which "
-                    f"is not the speedup two-stage is for -- export a "
-                    f"{self.two_stage_imgsz}px model and set model.two_stage_model "
-                    f"to it."
+                    f"two_stage_imgsz={cw}x{ch} but {second_path.name} is exported "
+                    f"at a fixed {fw}x{fh} and rejects any other size. Running crops "
+                    f"at {fw}x{fh}, which is not the speedup two-stage is for -- "
+                    f"export a {cw}x{ch} model and set model.two_stage_model to it."
                 )
-                self.two_stage_imgsz = second_fixed
+                self.two_stage_imgsz_wh = second_fixed
+        self.two_stage_imgsz = to_imgsz_arg(self.two_stage_imgsz_wh)
 
     def warmup(self, frame_width: int, frame_height: int) -> float:
         """Run one throwaway inference so the first real frame isn't slow.
