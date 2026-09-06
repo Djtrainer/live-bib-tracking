@@ -35,6 +35,9 @@ CONFIG=${RACE_CV_CONFIG:-"config/race_cv.yaml"}
 MODEL_PATH=""
 ROSTER=""
 PREVIEW=0
+# A video file is a rehearsal for a live camera, so pace it like one by
+# default. --fast opts out when you just want the answer quickly.
+REALTIME=1
 # Override with: RACE_CV_PYTHON=/path/to/python ./start-race-cv.sh
 RACE_CV_PYTHON=${RACE_CV_PYTHON:-}
 
@@ -49,6 +52,9 @@ print_usage() {
     echo "  -r, --roster     Start-list CSV, for OCR bib snapping"
     echo "  --config         Path to race_cv config (default: config/race_cv.yaml)"
     echo "  --preview        Show an annotated OpenCV window (runs in foreground)"
+    echo "  --fast           With -v, process the file as fast as possible instead"
+    echo "                   of at its real frame rate (default is real time, so a"
+    echo "                   rehearsal stresses the pipeline the way race day will)"
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Environment variables:"
@@ -91,6 +97,10 @@ while [[ $# -gt 0 ]]; do
             PREVIEW=1
             shift
             ;;
+        --fast)
+            REALTIME=0
+            shift
+            ;;
         -h|--help)
             print_usage
             exit 0
@@ -116,6 +126,11 @@ echo -e "${YELLOW}Pipeline:  race_cv, native macOS${NC}"
 
 if [[ -n "$VIDEO_PATH" ]]; then
     echo -e "${YELLOW}Input:     Video file: $VIDEO_PATH${NC}"
+    if [[ $REALTIME -eq 1 ]]; then
+        echo -e "${YELLOW}Pacing:    Real time, dropping frames when slow (like a camera)${NC}"
+    else
+        echo -e "${YELLOW}Pacing:    As fast as possible (--fast)${NC}"
+    fi
 else
     echo -e "${YELLOW}Input:     Live camera (Index $CAMERA_INDEX)${NC}"
 fi
@@ -292,6 +307,10 @@ build_race_cv_args() {
     fi
     if [[ $PREVIEW -eq 1 ]]; then
         RACE_CV_ARGS+=(--preview)
+    fi
+    # Only meaningful for a file; a camera is already real time.
+    if [[ $REALTIME -eq 1 && -n "$VIDEO_PATH" ]]; then
+        RACE_CV_ARGS+=(--realtime)
     fi
 }
 

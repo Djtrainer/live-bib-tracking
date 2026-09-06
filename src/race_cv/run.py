@@ -122,6 +122,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not publish annotated frames to the API server for browser viewing",
     )
+    parser.add_argument(
+        "--realtime",
+        action="store_true",
+        help=(
+            "For a video file, play it at its real frame rate and drop frames "
+            "the pipeline is too slow to collect, the way a camera does. "
+            "Without this a file is processed as fast as the CPU allows "
+            "(several times real time), which will not surface coverage gaps."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
 
@@ -142,14 +152,16 @@ def main(argv: list[str] | None = None) -> int:
         config.model.path = args.model
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    source = open_source(args.source, start_epoch=time.time())
+    source = open_source(args.source, start_epoch=time.time(), realtime=args.realtime)
     logger.info(
         "Source %s: %dx%d @ %.1f fps (%s)",
         args.source,
         source.frame_width,
         source.frame_height,
         source.fps,
-        "live" if source.is_live else "file",
+        "live"
+        if source.is_live
+        else ("file, real-time pacing" if args.realtime else "file, as fast as possible"),
     )
 
     sink = ResultSink(config.sink)
@@ -261,7 +273,7 @@ def _report(
 
     message = (
         f"health | processed {stats.frames_processed} ({stats.processed_fps:.1f} fps) | "
-        f"paced out {stats.frames_paced_out} | camera dropped {dropped} | "
+        f"paced out {stats.frames_paced_out} | source dropped {dropped} | "
         f"finishers {stats.events_emitted} (unknown bib {stats.unknown_bib_events}) | "
         f"delivered {sink_stats.delivered} | pending {sink_stats.pending}"
     )

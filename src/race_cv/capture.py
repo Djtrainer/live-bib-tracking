@@ -39,14 +39,32 @@ class Frame:
 
 
 class VideoFileSource:
-    """Deterministic replay of a video file.
+    """Replay of a video file, either as fast as possible or in real time.
 
-    Timestamps are synthesised from the frame index so that a replay is
-    reproducible: given the same file and ``start_epoch`` the Nth frame always
-    carries the same timestamp.
+    Two modes, for two different jobs:
+
+    * ``realtime=False`` (default) -- deterministic. Every frame is delivered
+      immediately and timestamps are synthesised from the frame index, so a
+      replay is reproducible: given the same file and ``start_epoch`` the Nth
+      frame always carries the same timestamp. This is what scoring runs want.
+
+    * ``realtime=True`` -- honest rehearsal. Frames are handed over on the
+      wall clock at the video's own frame rate, and **frames the pipeline was
+      too slow to collect are dropped**, exactly as :class:`CameraSource`
+      drops them. Without the dropping half, a slow pipeline would simply fall
+      further and further behind and still see every frame, which is not what
+      a camera does -- it would hide precisely the coverage gaps a rehearsal
+      exists to reveal.
     """
 
-    def __init__(self, path: str | Path, start_epoch: float = 0.0):
+    def __init__(
+        self,
+        path: str | Path,
+        start_epoch: float = 0.0,
+        realtime: bool = False,
+        now=time.time,
+        sleep=time.sleep,
+    ):
         self.path = Path(path)
         if not self.path.exists():
             raise FileNotFoundError(f"Video file not found: {self.path}")
@@ -58,19 +76,40 @@ class VideoFileSource:
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.start_epoch = start_epoch
+        self.realtime = realtime
         self.is_live = False
+        self.dropped = 0
+        self._now = now
+        self._sleep = sleep
 
     def frames(self) -> Iterator[Frame]:
+        interval = 1.0 / self.fps
+        if self.realtime:
+            # Anchor playback to when frames actually start flowing, not to
+            # construction: model warm-up runs in between, and anchoring at
+            # construction would make the pipeline "late" from frame zero and
+            # drop the opening seconds of the video.
+            self.start_epoch = self._now()
+
         index = 0
         while True:
             ok, image = self.cap.read()
             if not ok or image is None:
                 break
-            yield Frame(
-                image=image,
-                capture_ts=self.start_epoch + index / self.fps,
-                index=index,
-            )
+
+            capture_ts = self.start_epoch + index / self.fps
+            if self.realtime:
+                lateness = self._now() - capture_ts
+                if lateness < 0:
+                    self._sleep(-lateness)
+                elif lateness > interval:
+                    # More than a frame late: the consumer is still busy, so
+                    # this frame would never have been captured live.
+                    self.dropped += 1
+                    index += 1
+                    continue
+
+            yield Frame(image=image, capture_ts=capture_ts, index=index)
             index += 1
 
     def release(self) -> None:
@@ -184,11 +223,14 @@ class CameraSource:
         self.cap.release()
 
 
-def open_source(spec: str, start_epoch: float = 0.0) -> VideoFileSource | CameraSource:
+def open_source(
+    spec: str, start_epoch: float = 0.0, realtime: bool = False
+) -> VideoFileSource | CameraSource:
     """Open a frame source from a CLI spec.
 
     A bare integer means a camera index; anything else is treated as a path.
+    ``realtime`` applies only to files -- a camera is already real time.
     """
     if spec.isdigit():
         return CameraSource(int(spec))
-    return VideoFileSource(spec, start_epoch=start_epoch)
+    return VideoFileSource(spec, start_epoch=start_epoch, realtime=realtime)

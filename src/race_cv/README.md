@@ -89,6 +89,25 @@ python -m race_cv.run --source 1 --config config/race_cv.yaml \
 - `--roster` breaks OCR ties toward bib numbers that exist in the race. Cheapest
   accuracy win available; supply it.
 - `--no-api` runs offline, writing only the event log.
+- `--realtime` (files only) plays the file at its real frame rate and drops
+  frames the pipeline was too slow to collect, the way a camera does. Without
+  it a file runs several times faster than real time and nothing is ever
+  dropped, so a rehearsal cannot show you a coverage gap. `start-race-cv.sh -v`
+  turns this on by default; pass `--fast` there to opt out.
+
+### Rehearsing against a recording
+
+`start-race-cv.sh -v <file>` is a rehearsal, so it paces the file in real time
+by default. Watch `source dropped` in the health line -- that is coverage the
+pipeline lost because it was busy, and it is the number a fast replay hides.
+On the reference clip this correctly surfaces ~20 frames dropped right at the
+first bib read, which the as-fast-as-possible path never shows.
+
+`scripts/replay.py` deliberately stays as-fast-as-possible and deterministic:
+it answers "did we get the right answer", not "could we keep up". Its
+`debug.mp4` is written at the source frame rate, so it re-times away every
+stall and can never look choppy no matter how badly the pipeline struggled.
+Use the health line, not the debug video, to judge performance.
 
 Every finish is appended to `sink.event_log` (default
 `data/results/events.jsonl`) **before** any delivery attempt, so results survive
