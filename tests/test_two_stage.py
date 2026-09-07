@@ -30,9 +30,19 @@ REPO = Path(__file__).resolve().parents[1]
 MODEL_1280 = REPO / "models/gpu_runs/yolo11n_1280/weights/best.mlpackage"
 MODEL_640 = REPO / "models/yolo11_white_bibs/weights/last.mlpackage"
 
+def _has_coremltools() -> bool:
+    try:
+        import coremltools  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+# Reading an export's input size needs both the file and coremltools; CI has
+# neither, a machine with the models but a lean env has one.
 needs_models = pytest.mark.skipif(
-    not (MODEL_1280.exists() and MODEL_640.exists()),
-    reason="CoreML exports not present",
+    not (MODEL_1280.exists() and MODEL_640.exists() and _has_coremltools()),
+    reason="CoreML exports or coremltools not present",
 )
 
 
@@ -43,8 +53,8 @@ class TestFixedInputDetection:
         assert _fixed_input_size(MODEL_640) == (640, 640)
 
     @pytest.mark.skipif(
-        not (REPO / "models/exports/rect_960x736.mlpackage").exists(),
-        reason="rectangular export not present",
+        not ((REPO / "models/exports/rect_960x736.mlpackage").exists() and _has_coremltools()),
+        reason="rectangular export or coremltools not present",
     )
     def test_reads_a_rectangular_export_as_width_height(self):
         assert _fixed_input_size(

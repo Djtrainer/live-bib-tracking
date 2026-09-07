@@ -209,7 +209,10 @@ live ones.
 
 Stops `race_cv` first and gives it a graceful drain window, so a finish event
 still retrying gets a chance to land before the API it is retrying against goes
-away. `-f` skips the graceful wait.
+away. `race_cv` drains for up to 10 s, then prints its final health line and
+anything still undelivered (bib and timestamp) before exiting; the stop
+script waits 20 s before escalating, so that report always lands in
+`race_cv.log`. `-f` skips the graceful wait.
 
 `race_cv` runs under a small supervisor: a deliberate stop (this script, `q`
 in the preview, the end of a file) is final, but any other exit — a crash, an

@@ -362,7 +362,13 @@ def main(argv: list[str] | None = None) -> int:
             import cv2
 
             cv2.destroyAllWindows()
-        stats = sink.stop()
+        # Bounded well inside stop-race-cv.sh's 20 s grace. With a finish
+        # stuck retrying (clock not started), the 30 s default meant the
+        # stop script SIGKILLed us before the final health line and the
+        # undelivered report below ever printed -- the one moment an
+        # operator most needs them. Anything still pending stays in the
+        # event log and is re-queued on the next start.
+        stats = sink.stop(drain_timeout=10.0)
         _report(pipeline, sink, source, streamer)
         _report_undelivered(sink, stats)
 
