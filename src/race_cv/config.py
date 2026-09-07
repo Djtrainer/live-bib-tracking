@@ -213,12 +213,37 @@ class OcrConfig:
     async_reads: bool = True
     async_queue_size: int = 48
     async_max_inflight_per_track: int = 3
-    # How long building a finish event may wait for that racer's outstanding
-    # reads. Bounded so a wedged worker degrades to "resolve from the votes we
-    # already have" rather than becoming a new stall. Normally ~0: the
-    # confirm_frames window has already given the worker several frames of
-    # slack before the event is built.
-    resolve_timeout: float = 0.25
+    # Keep the worker current with the frame loop. Measured on real bib crops
+    # a read costs ~48ms on MPS (a synthetic crop had suggested 21ms), so the
+    # worker tops out near 20 reads/s while the loop offered up to 29/s per
+    # runner. The backlog dropped 68 crops in one replay and two finishes
+    # resolved before their reads landed. Votes do not need every frame: at
+    # 0.12s spacing (~8/s) a two-second approach still yields ~16 reads.
+    # 0 submits every frame.
+    async_min_submit_interval_s: float = 0.12
+
+    # Crop widths, in pixels after scaling to target_height, that the OCR
+    # input is padded up to. On MPS the first read at any NEW width compiles
+    # a kernel -- measured 155ms, 410ms and 1084ms outliers against a 48ms
+    # median -- and real crops arrive at arbitrary widths, so without this
+    # the stall lands mid-race on whichever runner happens to be first at
+    # that width. warmup() sweeps exactly these. Empty disables bucketing.
+    width_buckets_px: list[int] = field(
+        default_factory=lambda: [128, 160, 192, 224, 256, 320, 384, 448]
+    )
+
+    # A finish whose racer still has reads in flight is held -- without
+    # blocking the frame loop -- for up to this long before it resolves.
+    # The crossing time was fixed when it happened, so this costs only
+    # event latency, and it is what stops a backed-up worker from turning a
+    # legible bib into "No bib". Bounded so a wedged worker cannot hold a
+    # finish forever.
+    resolve_grace_s: float = 1.0
+
+    # A final, blocking wait when the event is actually built, after the
+    # grace above. Kept short: the grace period is the non-blocking way to
+    # wait, this is the last resort.
+    resolve_timeout: float = 0.1
 
 
 @dataclass

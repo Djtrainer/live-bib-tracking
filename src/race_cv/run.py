@@ -273,6 +273,15 @@ def main(argv: list[str] | None = None) -> int:
             if show:
                 cv2.imshow("race_cv preview", downscale(annotated, args.preview_scale))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
+                    # This stops race timing. It once ended a full-clip run at
+                    # 260s of 311s with a clean "all events delivered" and no
+                    # other trace, which looked exactly like a decoder fault
+                    # until every other cause was ruled out. Say so.
+                    logger.warning(
+                        "'q' pressed in the preview window: stopping the race "
+                        "service after this frame. If that was not deliberate, "
+                        "restart immediately -- no frames are being processed."
+                    )
                     stopping["flag"] = True
 
     last_report = time.time()

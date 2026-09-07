@@ -20,6 +20,7 @@ Differences from the legacy loop that matter on race day:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -50,6 +51,7 @@ class PipelineStats:
     suppressed_first_seen_past: int = 0
     finishes_below_min_observations: int = 0
     handoffs: int = 0
+    finishes_deferred_for_ocr: int = 0   # frames a ready finish waited for in-flight reads
     second_stage_bibs: int = 0
     two_stage_crops_skipped: int = 0
     two_stage_errors: int = 0
@@ -87,6 +89,9 @@ class FrameResult:
 class _PendingFinish:
     crossing: Crossing
     frames_remaining: int
+    # Wall-clock moment this finish first had to wait for OCR still in
+    # flight. Wall clock, not capture time: the worker runs on wall clock.
+    grace_started: float | None = None
 
 
 def associate_bib(person: Detection, bibs: Iterable[Detection]) -> Detection | None:
@@ -137,6 +142,7 @@ class Pipeline:
                 self.voter,
                 max_queue=config.ocr.async_queue_size,
                 max_inflight_per_track=config.ocr.async_max_inflight_per_track,
+                min_submit_interval_s=config.ocr.async_min_submit_interval_s,
             )
 
         self._pending: dict[int, _PendingFinish] = {}
@@ -310,11 +316,25 @@ class Pipeline:
     def _advance_pending(self, seen_now: set[int]) -> list[FinishEvent]:
         """Emit finishes whose confirmation window elapsed or whose track ended."""
         ready: list[int] = []
+        grace = self.config.ocr.resolve_grace_s if self.async_ocr is not None else 0.0
         for track_id, pending in self._pending.items():
             pending.frames_remaining -= 1
             left_frame = track_id not in seen_now
-            if pending.frames_remaining <= 0 or left_frame:
-                ready.append(track_id)
+            if pending.frames_remaining > 0 and not left_frame:
+                continue
+            if grace > 0 and self.async_ocr.inflight(track_id) > 0:
+                # Reads for this racer are still queued. Resolving now would
+                # discard them; blocking would stall the loop. So hold the
+                # finish and decide again next frame -- the crossing time is
+                # already fixed, only the bib is outstanding -- but only for
+                # so long, because a wedged worker must not hold it forever.
+                now = time.monotonic()
+                if pending.grace_started is None:
+                    pending.grace_started = now
+                if now - pending.grace_started < grace:
+                    self.stats.finishes_deferred_for_ocr += 1
+                    continue
+            ready.append(track_id)
 
         events = []
         for track_id in ready:
@@ -366,7 +386,10 @@ class Pipeline:
         starve, so the wait is free.
         """
         if self.async_ocr is not None:
-            self.async_ocr.drain(timeout=self.config.ocr.resolve_timeout * 8)
+            self.async_ocr.drain(
+                timeout=max(self.config.ocr.resolve_timeout * 8,
+                            self.config.ocr.resolve_grace_s)
+            )
         events = [self._build_event(p.crossing) for p in self._pending.values()]
         self._pending.clear()
         for event in events:

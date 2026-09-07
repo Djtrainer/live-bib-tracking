@@ -19,6 +19,7 @@ Two sources:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -81,6 +82,7 @@ class VideoFileSource:
         self.dropped = 0
         self._now = now
         self._sleep = sleep
+        self.ended_early = False
 
     def frames(self) -> Iterator[Frame]:
         interval = 1.0 / self.fps
@@ -111,6 +113,16 @@ class VideoFileSource:
 
             yield Frame(image=image, capture_ts=capture_ts, index=index)
             index += 1
+
+        # A file that ends before its declared length is a rehearsal that
+        # silently covered less of the race than it claimed. Seen once in a
+        # realtime --preview run: 7786 of 9338 frames, no error anywhere.
+        self.ended_early = bool(self.frame_count) and index < self.frame_count - 2
+        if self.ended_early:
+            logging.getLogger(__name__).warning(
+                "Video source ended early: read %d of %d frames (%.1fs of %.1fs)",
+                index, self.frame_count, index / self.fps, self.frame_count / self.fps,
+            )
 
     def release(self) -> None:
         self.cap.release()

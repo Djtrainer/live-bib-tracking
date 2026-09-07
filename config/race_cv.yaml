@@ -148,7 +148,23 @@ ocr:
   async_reads: true
   async_queue_size: 48
   async_max_inflight_per_track: 3
-  resolve_timeout: 0.25    # max wait when building a finish event; normally ~0
+
+  # Keeping the worker current with the frame loop. Measured on real bib
+  # crops a read is ~48ms on MPS (not the 21ms a synthetic crop suggested),
+  # so the worker manages ~20 reads/s while the loop could offer 29/s per
+  # runner. Left unshaped, a bib_env replay dropped 68 crops, resolved two
+  # finishes before their reads landed, and turned a bib legible on 53
+  # frames into "No bib". Votes lose nothing at ~8 reads/s.
+  async_min_submit_interval_s: 0.12
+  # Crop widths (after scaling to target_height) padded up to a fixed set the
+  # warm-up sweeps. On MPS the first read at a NEW width compiles a kernel:
+  # 155ms, 410ms, 1084ms outliers against a 48ms median. Real crops arrive at
+  # arbitrary widths; without buckets the stall lands on a live runner.
+  width_buckets_px: [128, 160, 192, 224, 256, 320, 384, 448]
+  # A finish whose racer still has reads in flight is held -- without
+  # blocking the loop -- up to this long. The crossing time is already fixed.
+  resolve_grace_s: 1.0
+  resolve_timeout: 0.1     # final blocking wait when the event is built; last resort
 
 pipeline:
   # 1280 inference costs ~49ms/frame (20.5 fps ceiling) against ~12ms at 640.

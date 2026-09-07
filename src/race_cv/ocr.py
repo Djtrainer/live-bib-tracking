@@ -90,13 +90,17 @@ class BibReader:
         reader = self._ensure_reader()
         # Real inferences, not just construction: torch defers a large part of
         # the cost to the first call *at each input shape*. Measured here, a
-        # first call at an unseen width costs 160-370ms while a repeat at a
-        # seen width costs ~35ms, so warming a single shape leaves most of the
-        # stall in place. preprocess() scales crops to target_height keeping
-        # aspect, so sweep the widths that produces for roughly 1:1 to 3:1
-        # bibs.
+        # first call at an unseen width costs 160-1000ms while a repeat at a
+        # seen width costs ~48ms, so warming a single shape leaves most of the
+        # stall in place. preprocess() pads every crop up to one of
+        # width_buckets_px, so sweeping exactly those widths means no shape is
+        # ever first seen mid-race. (Without buckets, fall back to a spread of
+        # aspect ratios and accept the occasional stall.)
         height = self.config.target_height
-        for width in (height, int(height * 1.7), int(height * 2.3), int(height * 3.0)):
+        widths = list(self.config.width_buckets_px) or [
+            height, int(height * 1.7), int(height * 2.3), int(height * 3.0)
+        ]
+        for width in widths:
             probe = np.full((height, width), 255, dtype=np.uint8)
             cv2.putText(probe, "123", (10, height - 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 2.0, 0, 5)
@@ -123,7 +127,28 @@ class BibReader:
             )
         gray = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        return binary
+        return self._pad_to_bucket(binary)
+
+    def _pad_to_bucket(self, binary: np.ndarray) -> np.ndarray:
+        """Right-pad the binarised crop to a warmed-up width.
+
+        Padding is white, because after Otsu a bib's background is white and
+        a black border would read as a giant glyph edge. Content is never
+        cropped: a bib wider than the largest bucket pads up to the next
+        multiple of 32 instead.
+        """
+        buckets = self.config.width_buckets_px
+        if not buckets:
+            return binary
+        width = binary.shape[1]
+        target = next((b for b in sorted(buckets) if b >= width), None)
+        if target is None:
+            target = ((width + 31) // 32) * 32
+        if target == width:
+            return binary
+        return cv2.copyMakeBorder(
+            binary, 0, 0, 0, target - width, cv2.BORDER_CONSTANT, value=255
+        )
 
     def read(self, crop: np.ndarray) -> tuple[str | None, float]:
         """Return the highest-confidence digit string in a crop."""
@@ -286,6 +311,7 @@ class AsyncOcrStats:
     completed: int = 0
     dropped_backlog: int = 0     # queue was full; oldest crop discarded
     skipped_inflight: int = 0    # this track already had enough reads queued
+    skipped_rate: int = 0        # too soon after this track's last submit
     errors: int = 0
     waits: int = 0
     wait_timeouts: int = 0
@@ -342,10 +368,13 @@ class AsyncBibReader:
         voter: BibVoter,
         max_queue: int = 48,
         max_inflight_per_track: int = 3,
+        min_submit_interval_s: float = 0.0,
     ):
         self._reader = reader
         self._voter = voter
         self._max_inflight_per_track = max_inflight_per_track
+        self._min_submit_interval = min_submit_interval_s
+        self._last_submit: dict[int, float] = {}
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
         self._cond = threading.Condition()
         self._inflight: dict[int, int] = {}
@@ -368,15 +397,36 @@ class AsyncBibReader:
         )
         self._thread.start()
 
-    def submit(self, track_id: int, crop: np.ndarray, yolo_conf: float) -> bool:
+    def inflight(self, track_id: int) -> int:
+        """Reads queued or in progress for this track."""
+        with self._cond:
+            return self._inflight.get(track_id, 0)
+
+    def submit(
+        self, track_id: int, crop: np.ndarray, yolo_conf: float, now: float | None = None
+    ) -> bool:
         """Offer a bib crop for reading. Never blocks the frame loop.
 
         ``crop`` must be safe to hold: a numpy slice keeps its whole base frame
         alive, so callers pass a copy rather than pinning a 1080p buffer per
         queued read.
+
+        Submits are spaced per track by ``min_submit_interval_s``: a read
+        costs ~48ms and the loop can offer one every 33ms per runner, so
+        without spacing the worker falls behind precisely while a racer is
+        at the line. Votes lose nothing at ~8/s.
         """
         if not self._running:
             self.start()
+
+        if self._min_submit_interval > 0:
+            now = time.monotonic() if now is None else now
+            last = self._last_submit.get(track_id)
+            if last is not None and now - last < self._min_submit_interval:
+                with self._stats_lock:
+                    self._stats.skipped_rate += 1
+                return False
+            self._last_submit[track_id] = now
 
         with self._cond:
             if self._inflight.get(track_id, 0) >= self._max_inflight_per_track:

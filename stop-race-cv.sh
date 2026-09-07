@@ -6,7 +6,9 @@
 #   1. race_cv.run           -- SIGTERM, then wait for it to drain and exit
 #   2. local_server.py       -- API/WS/static server (--no-processor or legacy)
 #   3. run_live_native.sh    -- legacy wrapper, if that's what's running instead
-#   4. the frontend container (docker compose down)
+#   4. the frontend -- the native Vite preview server if start-race-cv.sh
+#      was run with --native-frontend (PID in .frontend.pid), and/or the
+#      Docker container (docker compose down)
 #
 # The ordering matters: race_cv is stopped *before* the API server so any
 # finish event still retrying (e.g. because the race clock wasn't running yet)

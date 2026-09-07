@@ -54,6 +54,9 @@ a number anyone in the race is wearing.
   19.4fps — a third of its throughput, and the difference between reading
   3/3 bibs and 2/3. Measured after gating: 28.3fps. Watch the browser stream
   instead if you want smoother video; it cannot slow detection.
+  **Pressing `q` in that window stops the race service.** It logs a warning
+  when it happens, but a stray keypress with the window focused ends timing —
+  one more reason to run without it on race day.
 
 Starts three things: the frontend in Docker (port 5173), a results API with no
 video pipeline inside it (port 8001), and `race_cv` owning the camera. Closing
@@ -138,7 +141,10 @@ All in `config/race_cv.yaml`.
 | `roi.polygon` | x ≥ 0.28, y ≥ 0.30 | The racer-only region. Checked against `course_boundary` at startup — a crop that cuts into declared course prints `CONFIG MISMATCH`. Cropping only saves compute when `imgsz` is sized to match; on its own it changes nothing. |
 | `pipeline.target_fps` | 30.0 | Loop is ~20ms against a 33ms budget. 36 frames dropped of 9338 at 30fps on the longest clip. If `source dropped` climbs, go to 15 first. |
 | `model.two_stage` | false | Finds bibs by re-running the detector on each person's crop. **Only worth enabling with `two_stage_model` pointing at a smaller export.** A CoreML `.mlpackage` accepts exactly one input size, so without that every crop costs a full forward pass of the deployed model, *per person* — measured at 54.9ms/crop when the 1280 square export was deployed, roughly doubling frame cost. The 928×512 export makes each crop cheaper but the arithmetic is the same: one extra inference per runner. Against a dedicated small export it was 12.2ms per crop. Not needed at 30fps with every frame processed. |
-| `ocr.async_reads` | true | Reads bibs on a background thread. Inline, a ~27ms read fired exactly at the line and pushed crossing frames over budget. Turn off only to reproduce old behaviour. |
+| `ocr.async_reads` | true | Reads bibs on a background thread. Inline, a read fired exactly at the line and pushed crossing frames over budget. Turn off only to reproduce old behaviour. |
+| `ocr.async_min_submit_interval_s` | 0.12 | Per-runner spacing between crops sent to OCR (~8/s). A real read is ~48ms, so unshaped demand (up to 29/s) backs the worker up and finishes resolve before their reads land. Lower only if `ocr read` is far below finishers *and* `skipped` is 0. |
+| `ocr.width_buckets_px` | 128…448 | Crop widths the warm-up compiles. Any width outside the set costs a 150–1000ms kernel compile on first sight, mid-race. Leave alone. |
+| `ocr.resolve_grace_s` | 1.0 | How long a finish may wait, without blocking the loop, for that racer's reads still in flight. Costs event latency only; the crossing time is fixed. Watch `late N` in the health line — it should stay 0. |
 | `finish_line.p1/p2` | 2025 geometry | **Recalibrate per camera.** `python scripts/calibrate.py --source 0 --config config/race_cv.yaml` |
 | `course_boundary.enabled` | true | Keeps people outside the driveway off the leaderboard. Excluded people are drawn in grey on the overlay and counted in `people_outside_boundary`. |
 | `finish_line.min_observations` | 5 | Requires a track to be seen N times before it may finish. Cuts duplicate-track ghosts. Raise if you see two finishes a fraction of a second apart. A hand-off (below) inherits the dead track's count, so it does not fight this. |
