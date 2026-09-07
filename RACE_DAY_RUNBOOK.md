@@ -131,6 +131,14 @@ Note `replay.py` writes `debug.mp4` at the *source* frame rate, so it re-times
 away every stall and can never look choppy no matter how badly the pipeline
 struggled. Judge performance from the health line, never from the debug video.
 
+**Offline runs under-report bib accuracy.** Without `--realtime` the frame loop
+runs flat out with no pacing sleep, and the OCR worker thread gets almost no
+idle CPU; live at 30fps it does. Measured on the same clip and code: realtime
+read 15 bibs with 0 skipped, the offline replay read 7 with 7 dropped and one
+finish resolved before its reads landed. Finishers and times are trustworthy
+offline; a "No bib" that only appears offline usually is not. When bib
+accuracy is the question, score with `--realtime`.
+
 ## Config levers
 
 All in `config/race_cv.yaml`.
