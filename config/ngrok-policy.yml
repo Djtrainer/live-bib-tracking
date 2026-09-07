@@ -1,0 +1,29 @@
+# ngrok traffic policy for exposing the race server to the pavilion.
+#
+#   ngrok http 8001 --url https://<your-dev-domain>.ngrok-free.dev \
+#       --traffic-policy-file config/ngrok-policy.yml
+#
+# Everything the pavilion TV needs stays open: the leaderboard page, its
+# GET calls, and the WebSocket. Everything that can CHANGE a result requires
+# a password: the Live Management page, and every non-GET API call (add,
+# edit, delete, reorder, roster upload, clock start/stop/edit/reset).
+#
+# Gating only the /admin page would not be enough -- the endpoints it calls
+# are reachable without it. Gating the writes is what protects the results.
+# The admin browser is challenged once and re-sends the credentials to every
+# later call on this origin, so the page keeps working normally after one
+# prompt.
+#
+# CHANGE THE PASSWORD. This file is committed; the password must not be.
+# Copy it to config/ngrok-policy.local.yml (gitignored), set the real
+# password there, and pass THAT file to --traffic-policy-file. The policy is
+# read when ngrok starts, so restart ngrok after editing it.
+on_http_request:
+  - expressions:
+      - 'req.url.path.startsWith("/admin") || (req.url.path.startsWith("/api/") && req.method != "GET")'
+    actions:
+      - type: basic-auth
+        config:
+          realm: race-timing
+          credentials:
+            - "race:change-me"

@@ -41,3 +41,6 @@ training_results.json
 data/autolabel_preview/
 data/autolabel_report.json
 data/error_analysis*.json
+
+# Private copy of the ngrok traffic policy with the real race-day password
+config/ngrok-policy.local.yml

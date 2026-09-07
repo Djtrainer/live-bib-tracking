@@ -351,7 +351,19 @@ lan_urls() {
     [[ -n "$ip" ]] && echo -e "   leaderboard (pavilion TV):   ${BLUE}http://$ip:$PORT/${NC}"
     [[ -n "$ip" ]] && echo -e "   Live Management (tablet):    ${BLUE}http://$ip:$PORT/admin${NC}"
     echo -e "   or by name:                  ${BLUE}http://$host:$PORT/${NC}  (mDNS; some hotspots block it -- use the IP)"
-    [[ -z "$ip" ]] && echo -e "${RED}   no LAN address on en0/en1 -- join the same Wi-Fi/hotspot as the pavilion machine${NC}"
+    [[ -z "$ip" ]] && echo -e "${RED}   no LAN address on en0/en1 -- is the Mac on the hotspot?${NC}"
+    # The pavilion reaches us through ngrok. If a tunnel is already running,
+    # its public URL is on the agent's local API; print it so the operator
+    # never has to hunt for it. See RACE_DAY_RUNBOOK.md, "Who opens what".
+    local tunnel
+    tunnel=$(curl -s --max-time 1 http://127.0.0.1:4040/api/tunnels 2>/dev/null \
+        | python3 -c "import json,sys; ts=json.load(sys.stdin).get('tunnels',[]); print(ts[0]['public_url'] if ts else '')" 2>/dev/null)
+    if [[ -n "$tunnel" ]]; then
+        echo -e "   pavilion TV (via ngrok):     ${BLUE}$tunnel/${NC}"
+    else
+        echo -e "   pavilion TV (via ngrok):     not running -- in another terminal:"
+        echo -e "     ngrok http $PORT --url https://<your-dev-domain> --traffic-policy-file config/ngrok-policy.local.yml"
+    fi
 }
 
 start_api_server() {
@@ -454,7 +466,11 @@ start_race_cv_background
 echo ""
 echo -e "${GREEN}🎉 All services are running!${NC}"
 echo ""
-echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:5173 (Docker container)"
+if [[ "${NATIVE_FRONTEND:-0}" == "1" ]]; then
+    echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:$PORT (served by the API)"
+else
+    echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:5173 (Docker container)"
+fi
 echo -e "${BLUE}🔧 API/WS:${NC}    http://localhost:$PORT (native, PID: $API_PID)"
 echo -e "${BLUE}📹 race_cv:${NC}   native, PID: $RACE_CV_PID"
 echo ""

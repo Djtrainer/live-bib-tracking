@@ -8,6 +8,12 @@ Lightweight monorepo for live bib / race-place tracking using a React frontend, 
 
 This README gives an up-to-date quick-start, repo layout, configuration notes, and troubleshooting steps so you can run the system locally or in Docker.
 
+> **Running a race?** Use [RACE_DAY_RUNBOOK.md](RACE_DAY_RUNBOOK.md) — it has the
+> race-day start/stop commands, the two-hotspot network setup for the pavilion
+> TV, the config levers, and what the health line means. The Docker and
+> `start-dev.sh` flows below are for development. For why the system is shaped
+> the way it is, see [RACE_DAY_ANALYSIS.md](RACE_DAY_ANALYSIS.md).
+
 ## Quick links
 
 - Code: `src/`

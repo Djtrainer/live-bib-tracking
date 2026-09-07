@@ -42,11 +42,13 @@ a number anyone in the race is wearing.
 ## Live, against the camera
 
 ```bash
-./start-race-cv.sh -c 0 -r data/raw/roster_example.csv --preview
+./start-race-cv.sh -c 0 -r data/raw/roster_example.csv --native-frontend
 ```
 
 - `-c 0` built-in camera, `-c 1` external/iPhone
 - `-r` start-list CSV — needs a `Bib` column, see `data/raw/roster_example.csv`
+- `--native-frontend` skips Docker; the API serves the leaderboard and Live
+  Management itself on port 8001 (see the next section for who opens what)
 - `--preview` opens an annotated window and runs in the foreground. It is
   redrawn at 10fps at half resolution (`--preview-fps`, `--preview-scale` on
   `race_cv.run`). This is not cosmetic: a full-rate, full-res preview cost
@@ -58,49 +60,146 @@ a number anyone in the race is wearing.
   when it happens, but a stray keypress with the window focused ends timing —
   one more reason to run without it on race day.
 
-Starts three things: the frontend in Docker (port 5173), a results API with no
-video pipeline inside it (port 8001), and `race_cv` owning the camera. Closing
-a browser tab cannot affect race timing.
+Starts two things: a results API with no video pipeline inside it, which
+also serves the site (port 8001), and `race_cv` owning the camera. Closing a
+browser tab cannot affect race timing.
 
-Watch at `http://localhost:5173` (leaderboard) or `http://localhost:8001`
-(raw annotated stream).
-
-## The pavilion TV and the tablet at the line
+## Who opens what: the line, the pavilion, and the network between
 
 The leaderboard and Live Management are two pages of **one site served by
-the API** — `/` and `/admin` on port 8001. Any browser on the same network
-can open either; nothing needs configuring per machine, and nothing needs
-screen sharing. The launcher prints the addresses at startup:
+the API**: `/` and `/admin` on port 8001. The pavilion is ~300 yards from the
+finish line — too far for one Wi-Fi hotspot to bridge — so the setup is two
+hotspots and a tunnel, which is the arrangement that worked last year minus
+the screen share:
 
 ```
-📺 From other machines on the same network:
-   leaderboard (pavilion TV):   http://10.0.0.81:8001/
-   Live Management (tablet):    http://10.0.0.81:8001/admin
-   or by name:                  http://dans-macbook-air.local:8001/
+ FINISH LINE  (your phone's hotspot)            PAVILION  (its own hotspot)
+ ┌───────────────────────────────────┐          ┌──────────────────────────┐
+ │ race Mac: race_cv + API :8001     │  ngrok   │ any computer, wired to   │
+ │ tablet:  http://<mac-ip>:8001/admin│ ───────► │ the TV, full screen:     │
+ │          (local Wi-Fi, no password)│ cellular │ https://<dev-domain>/    │
+ └───────────────────────────────────┘          └──────────────────────────┘
 ```
 
-**Do not screen-share the leaderboard from the race Mac.** A Google Meet
-share is a browser tab encoding the screen at up to 30 fps — a large slice of
-a core and hundreds of MB on a machine that already pages under the
-pipeline — for a blurrier, laggier picture than the pavilion opening the
-page itself.
+**At the line** everything is local. The tablet joins the Mac's hotspot and
+opens `http://<mac-ip>:8001/admin` — ten metres of Wi-Fi, no cellular, no
+password. Manual adds, bib corrections and the clock all live there. The
+Mac's address on the hotspot is *not* its home-Wi-Fi address; read it off the
+launcher's startup output or run `ipconfig getifaddr en0`. The `.local` name
+usually does not resolve on a hotspot — use the IP.
 
-Setup:
+**At the pavilion** the computer opens the tunnel URL over its own hotspot.
+The tunnel is [ngrok](https://ngrok.com): the Mac makes an *outbound*
+connection to ngrok's relay, ngrok forwards the public URL down it to port
+8001. Nothing inbound ever reaches the Mac, and neither hotspot needs to be
+reachable from the other. The free plan's one assigned dev domain is
+permanent, so the pavilion kiosk can be set up in advance.
 
-- **Network.** Both machines on one network. A phone hotspot both join is
-  simplest where there is signal; otherwise a Wi-Fi router at the booth or
-  an outdoor access point. Plain Ethernet is good to ~100 m, so 300 yards
-  needs a switch mid-run. Some hotspots block mDNS, so prefer the IP over
-  the `.local` name.
-- **Pavilion machine.** Anything with a browser, hard-wired to the TV. Open
-  the leaderboard URL, full screen (Chrome: `chrome --kiosk <url>`, or
-  press F11). If the network drops, the page keeps showing the last results
-  and **reconnects on its own** every 2 s, re-fetching everything it missed.
-- **Finish line.** Live Management on a tablet or a second laptop, *not* a
-  browser on the race Mac. Manual add, bib correction, and the clock all
-  live there and work from anywhere on the network.
-- **Docker is unnecessary** for this. `--native-frontend` builds the site and
-  the API serves it; the 5173 container remains only for `start-dev.sh`.
+```bash
+ngrok http 8001 --url https://bonanza-overbite-sprawl.ngrok-free.dev --traffic-policy-file config/ngrok-policy.yml
+```
+
+- First visit per browser session shows ngrok's interstitial — click through
+  before the first finisher.
+- The **leaderboard, its reads, and the WebSocket need no password**; the TV
+  never sees a prompt.
+- **`/admin` and every non-GET API call require a password** (the policy
+  file). Gating only the page would leave the endpoints it calls open;
+  gating the writes is what protects the results. The admin browser is
+  challenged once — starting the clock is the first write, so expect it
+  there — and re-sends credentials to every later call.
+- **Set a real password.** `config/ngrok-policy.yml` is committed with
+  `race:change-me`. Copy it to `config/ngrok-policy.local.yml` (gitignored),
+  put the real password there, and pass that file instead. The policy is
+  read when ngrok starts; restart it after changing the file.
+- ngrok reconnects on its own after a cellular blip, and so does the page
+  (it re-fetches everything it missed). The Mac never depended on the tunnel
+  for timing in the first place.
+
+**Do not screen-share from the race Mac.** A Google Meet share is a browser
+tab encoding the screen at 30 fps — a large slice of a core and hundreds of
+MB on an 8 GB machine that already pages under the pipeline — for a
+blurrier, laggier picture than the pavilion opening the page itself. The
+tunnel carries kilobytes where Meet carried video.
+
+**Test in the driveway before race day:** Mac on your phone's hotspot,
+another laptop on a second phone's hotspot, both URLs. If it works there it
+works in the park; the only variable is signal, and last year proved that.
+
+## Race-day command sheet
+
+Everything in order, from the race Mac's terminal unless stated.
+
+**The night before**
+
+```bash
+(cd src/frontend && npm run build)     # only after frontend changes; the launcher rebuilds if stale
+```
+```bash
+cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then edit the password in the copy
+```
+- Roster CSV ready (`Bib` column). Mac charged, charger packed. Camera
+  position rehearsed; `python scripts/calibrate.py --source 0 --config config/race_cv.yaml`
+  if it moved.
+
+**At the booth**
+
+1. Mac on your phone's hotspot; tablet on the same hotspot. Plug the Mac in.
+2. Start the stack:
+   ```bash
+   ./start-race-cv.sh -c 0 -r roster.csv --native-frontend
+   ```
+   It prints the local addresses. Note the IP.
+3. Start the tunnel in a second terminal and leave it open:
+   ```bash
+   ngrok http 8001 --url https://bonanza-overbite-sprawl.ngrok-free.dev --traffic-policy-file config/ngrok-policy.local.yml
+   ```
+4. Tablet: `http://<mac-ip>:8001/admin`. Pavilion: the tunnel URL, click
+   through the interstitial, full screen.
+5. Start the clock at the gun — the button on Live Management, or:
+   ```bash
+   curl -X POST http://localhost:8001/api/clock/start
+   ```
+
+**During the race**
+
+```bash
+tail -f race_cv.log | grep --line-buffered "health |"
+```
+Watch `source dropped`, `pending`, and `handed off` — see *What to watch in
+the health line* below.
+
+```bash
+curl -s http://127.0.0.1:4040/api/tunnels | python3 -c "import json,sys; [print(t['public_url'], '->', t['config']['addr']) for t in json.load(sys.stdin)['tunnels']]"
+```
+Confirms the tunnel is up and where it points.
+
+```bash
+ipconfig getifaddr en0
+```
+The Mac's current address, if the tablet needs it again.
+
+**Stopping**
+
+```bash
+./stop-race-cv.sh
+```
+Then Ctrl-C the ngrok terminal.
+
+**After the race**
+
+```bash
+python scripts/replay_events.py --dry-run
+```
+Lists any finish event the API never confirmed; drop `--dry-run` to re-send.
+
+```bash
+python scripts/replay.py --video "<recording>.mov" --out runs/race --roster roster.csv --video-out
+```
+Re-runs the recording with every frame, for reconciling anything the live
+run missed. Finishers and times from a replay are trustworthy; see the
+offline-OCR caveat under *Scoring a run* before trusting its bibs over the
+live ones.
 
 ## Stopping
 
@@ -255,3 +354,15 @@ the course boundary no longer matches the camera; recalibrate or set
 
 **Wrong bib numbers** — confirm `--roster` is actually loaded (it logs the
 count at startup). Without it, a confident misread can lock.
+
+**Pavilion TV not updating** — results at the line are unaffected; this is
+display only. In order: is the ngrok terminal still open and showing the
+tunnel (`curl -s http://127.0.0.1:4040/api/tunnels`)? Does the Mac's hotspot
+have signal? Reload the page on the pavilion machine — it reconnects on its
+own after a blip, but a reload is the fastest confirmation. If ngrok itself
+died, restart the command from the sheet; the page recovers by itself.
+
+**Tablet can't reach `/admin`** — it must be on the *Mac's* hotspot, and the
+address is the Mac's IP on that hotspot (`ipconfig getifaddr en0` on the
+Mac), not its home-Wi-Fi address and not the `.local` name. Fallback: the
+tunnel URL works from anywhere, with the password.
