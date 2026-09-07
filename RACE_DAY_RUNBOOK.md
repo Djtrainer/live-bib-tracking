@@ -332,6 +332,52 @@ Concretely:
   (`ALL` is already ultralytics 8.3's default; the override is a guard
   against a future upgrade, not a race-day lever).
 
+## What is recorded, and how to recover
+
+Everything lands in `data/results/`, written as it happens, so a crash at any
+moment loses at most the change in flight.
+
+| file | written by | what it is |
+|---|---|---|
+| `events.jsonl` | `race_cv` | every detected finish, appended *before* delivery is attempted, and again when the API confirms it. The camera's own record; survives the API being down. |
+| `race_state.json` | the API | the complete race — every result and the clock — rewritten atomically on every change. **This is what a restart restores from.** |
+| `race_results.txt` | the API | the current leaderboard as a person reads it: place, bib, time, name, source. Rewritten on every change. With the API down and a runner at the booth, the answer is in this file. |
+| `race_log.txt` | the API | one line per change, appended, never rewritten: `14:02:11  ADD  bib 120 Jane 21:34.5 [race_cv]`, `EDIT`, `DELETE`, `CLOCK start`. The sequence, for disputes. |
+
+**If the API dies mid-race:** restart it exactly as before —
+
+```bash
+./start-race-cv.sh -c 0 -r roster.csv --native-frontend
+```
+
+— and it restores the previous results and clock on its own, logging
+`RESTORED previous race state … N results … clock running`. Manual adds, bib
+corrections and the clock start all come back. A detection `race_cv` was
+still retrying when the API died is re-sent and **does not duplicate**: every
+finish carries an `eventId`, and the API returns the existing record for one
+it has already seen. Manual adds carry no `eventId` and are always new, so two
+people with the same bib remain possible on purpose.
+
+**Starting a new race** on a machine that has a saved one:
+
+```bash
+./start-race-cv.sh -c 0 -r roster.csv --native-frontend --fresh
+```
+
+`--fresh` archives the old `race_state.json`, `race_results.txt` and
+`race_log.txt` with a timestamp instead of deleting them. Without it, a
+restart *restores*, which is the right default on race day and the wrong one
+at the next event — the startup log says which happened, loudly.
+
+**If the race Mac itself dies:** the three files above plus `events.jsonl`
+are on its disk. Copy `data/results/` to another machine, start the API
+there, and it restores the same way. Anything the camera saw but never
+delivered is in `events.jsonl`:
+
+```bash
+python scripts/replay_events.py --dry-run
+```
+
 ## If something goes wrong
 
 **Finishers not appearing on the leaderboard** — check `pending` in the health

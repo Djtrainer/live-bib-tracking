@@ -56,9 +56,12 @@ print_usage() {
     echo "                   of at its real frame rate (default is real time, so a"
     echo "                   rehearsal stresses the pipeline the way race day will)"
     echo "  --native-frontend"
-    echo "                   Serve the leaderboard with Vite's preview server instead"
-    echo "                   of a Docker container. Skips Docker Desktop entirely,"
-    echo "                   which on an 8 GB machine frees 1-2 GB for the detector."
+    echo "                   Skip Docker; the API serves the leaderboard and Live"
+    echo "                   Management itself on the API port, reachable from the"
+    echo "                   pavilion. Frees the 1-2 GB Docker Desktop holds."
+    echo "  --fresh          Start a NEW race: archive the saved results and clock"
+    echo "                   instead of restoring them. Without it, a restart puts"
+    echo "                   the previous race back (right mid-race, wrong next event)."
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Environment variables:"
@@ -103,6 +106,13 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fast)
             REALTIME=0
+            shift
+            ;;
+        --fresh)
+            # New race: archive the saved results/clock instead of restoring
+            # them. The default -- restore -- is right for a mid-race restart
+            # and wrong for the next event.
+            FRESH=1
             shift
             ;;
         --native-frontend)
@@ -372,13 +382,22 @@ start_api_server() {
 
     PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}" \
         nohup "$RACE_CV_PYTHON" src/api_backend/local_server.py \
-        --no-processor --host 0.0.0.0 --port "$PORT" \
+        --no-processor --host 0.0.0.0 --port "$PORT" ${FRESH:+--fresh} \
         > api_server.log 2>&1 &
     API_PID=$!
 
     for _ in $(seq 1 20); do
         if curl -s -o /dev/null "http://localhost:$PORT/"; then
             echo -e "${GREEN}✅ API server is up (PID: $API_PID)${NC}"
+            # Say whether this is a restored race or a fresh one. A restore
+            # at the start of a NEW event is the mistake this line prevents.
+            local record
+            record=$(grep -E "RESTORED previous race state|Starting a fresh race" api_server.log | tail -1 | sed 's/.* - //')
+            if [[ "$record" == RESTORED* ]]; then
+                echo -e "${YELLOW}⚠️  $record${NC}"
+            elif [[ -n "$record" ]]; then
+                echo -e "   $record"
+            fi
             return 0
         fi
         sleep 0.5

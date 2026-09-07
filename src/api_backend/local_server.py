@@ -27,6 +27,11 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+
+# Sibling module. The launcher runs this file as a script with PYTHONPATH=src;
+# make the same import work when it is run from anywhere.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from api_backend.journal import RaceJournal, _format_finish  # noqa: E402
 from fastapi.staticfiles import StaticFiles
 
 from image_processor.utils import get_logger
@@ -53,6 +58,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Code to run on startup
     logger.info("Application startup: FastAPI server ready")
+
+    # Put the race back the way it was if this is a restart mid-race.
+    # --fresh archives the old record instead. Either way, say what happened
+    # at the one moment an operator is reading the log.
+    if app_state.get("fresh"):
+        archived = journal.archive()
+        logger.info("Starting a fresh race%s", f"; previous record archived to {archived}" if archived else "")
+    else:
+        restored = journal.restore()
+        if restored:
+            saved_results, saved_clock = restored
+            race_results[:] = saved_results
+            race_clock_state.update(saved_clock)
+            finished = sum(1 for r in race_results if r.get("finishTime") is not None)
+            logger.warning(
+                "RESTORED previous race state from %s: %d results (%d finished), clock %s. "
+                "If this is a NEW race, stop and restart with --fresh.",
+                journal.state_path, len(race_results), finished, race_clock_state.get("status"),
+            )
 
     # Initialize processor using environment variables (for Docker) or command-line args (for direct execution)
     try:
@@ -320,6 +344,27 @@ race_clock_state = {
     "status": "stopped",  # 'stopped', 'running', or 'paused'
     "offset": 0,  # Manual time adjustment in milliseconds
 }
+
+# Crash-recoverable record of everything above. Written on every change,
+# restored at startup (unless --fresh). Same directory as race_cv's
+# events.jsonl, so all of a race's records are in one place. See journal.py
+# for why: with --no-processor nothing else persisted a manual add, a bib
+# correction, or when the clock started.
+journal = RaceJournal(Path(__file__).resolve().parents[2] / "data" / "results")
+
+
+def _journal(action: str, detail: str = "") -> None:
+    """Record the current results and clock after a change. Never raises."""
+    journal.record(action, race_results, race_clock_state, detail)
+
+
+def _describe(record: Dict[str, Any]) -> str:
+    return (
+        f"bib {record.get('bibNumber', '?')} "
+        f"{record.get('racerName') or ''} "
+        f"{_format_finish(record.get('finishTime'))} "
+        f"[{record.get('source') or 'manual'}]"
+    ).strip()
 
 # --- FastAPI App ---
 app = FastAPI(lifespan=lifespan, title="Live Bib Tracking - Unified Server")
@@ -873,6 +918,7 @@ async def upload_roster(file: UploadFile = File(...)) -> Dict[str, Any]:
         # Update the global race_results with the merged data
         race_results.clear()
         race_results.extend(existing_data.values())
+        _journal("ROSTER", f"{len(existing_data)} racers loaded")
 
         # CRITICAL: Update the original_roster dictionary (source of truth)
         # This preserves the original roster data for future lookups
@@ -1060,6 +1106,19 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     # Generate a unique ID using timestamp and bib number to ensure uniqueness
     import uuid
 
+    # Idempotency on the client's eventId. race_cv sends one with every
+    # finish and retries until this endpoint confirms; if the API died after
+    # storing a result but before answering, the retry -- and any later
+    # replay_events.py run -- would otherwise create a second finisher for
+    # the same crossing. Manual adds from Live Management carry no eventId
+    # and are always new, so duplicate bib numbers remain allowed.
+    event_id = finish_data.get("eventId")
+    if event_id:
+        for existing in race_results:
+            if existing.get("eventId") == event_id:
+                logger.info("Duplicate eventId %s; returning the existing finisher", event_id)
+                return {"success": True, "data": existing, "duplicate": True}
+
     unique_id = str(uuid.uuid4())
     logger.info(f"🔍 DEBUG: Generated unique ID: {unique_id}")
 
@@ -1077,6 +1136,8 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     # Create new finisher with merged data from roster and finish_data
     new_finisher = {
         "id": unique_id,  # Always use unique ID
+        "eventId": event_id,                                   # None for manual adds
+        "source": finish_data.get("source") or "manual",       # race_cv / race_cv_replay / manual
         "bibNumber": bib_number,
         "racerName": roster_data.get(
             "racerName", finish_data.get("racerName", f"Racer #{bib_number}")
@@ -1111,6 +1172,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
 
     # Add to race results (always creates new entry)
     race_results.append(new_finisher)
+    _journal("ADD", _describe(new_finisher))
     logger.info(
         f"🔍 DEBUG: Added new finisher to race_results. Total count: {len(race_results)}"
     )
@@ -1255,6 +1317,7 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
 
                 # Update the finisher with merged data (IMMUTABLE - no roster mutation)
                 race_results[i] = merged_data
+                _journal("EDIT", _describe(merged_data))
 
                 logger.info(
                     f"✅ DEBUG: Successfully merged roster data for bib #{new_bib}"
@@ -1299,6 +1362,7 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
                     )
 
                 race_results[i] = updated_data
+                _journal("EDIT", _describe(updated_data))
 
                 logger.info(
                     f"🔍 DEBUG: Updated finisher with regular data: {updated_data}"
@@ -1337,7 +1401,8 @@ async def delete_finisher(finisher_id: str) -> Dict[str, Any]:
     # Find and remove the finisher by ID
     for i, finisher in enumerate(race_results):
         if finisher["id"] == finisher_id:
-            _ = race_results.pop(i)
+            removed = race_results.pop(i)
+            _journal("DELETE", _describe(removed))
 
             # Broadcast reload message to all connected WebSocket clients
             await manager.broadcast(json.dumps({"action": "reload"}))
@@ -1383,6 +1448,7 @@ async def reorder_finishers(order_data: Dict[str, Any]) -> Dict[str, Any]:
     # Update the global race_results
     race_results.clear()
     race_results.extend(reordered_results)
+    _journal("REORDER", f"{len(reordered_results)} results")
 
     # Broadcast reload message to all connected WebSocket clients
     await manager.broadcast(json.dumps({"action": "reload"}))
@@ -1415,6 +1481,7 @@ async def start_race_clock() -> Dict[str, Any]:
     current_time = time.time()
     race_clock_state["raceStartTime"] = current_time
     race_clock_state["status"] = "running"
+    _journal("CLOCK", f"start at {time.strftime('%H:%M:%S', time.localtime(current_time))}")
 
     logger.info(f"🕐 Race clock started at {current_time}")
 
@@ -1436,6 +1503,7 @@ async def stop_race_clock() -> Dict[str, Any]:
     global race_clock_state
 
     race_clock_state["status"] = "stopped"
+    _journal("CLOCK", "stop")
 
     logger.info("🕐 Race clock stopped")
 
@@ -1480,6 +1548,7 @@ async def edit_race_clock(edit_data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         # If race hasn't started, set offset to the desired time
         race_clock_state["offset"] = time_ms
+    _journal("CLOCK", f"edit: set to {_format_finish(time_ms)} (offset {race_clock_state['offset']:.0f}ms)")
 
     logger.info(
         f"🕐 Race clock edited to {time_ms}ms (offset: {race_clock_state['offset']}ms)"
@@ -1508,6 +1577,7 @@ async def reset_race_clock() -> Dict[str, Any]:
         "offset": 0,
     }
 
+    _journal("CLOCK", "reset")
     logger.info("🕐 Race clock reset")
 
     # Broadcast clock update to all connected clients
@@ -1650,6 +1720,12 @@ def main() -> None:
         help="The index of the camera to use for live mode (e.g., 0 for built-in, 1 for iPhone).",
     )
     parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Start a new race: archive any saved race state instead of restoring it. "
+             "Without this, a restart puts the previous results and clock back.",
+    )
+    parser.add_argument(
         "--no-processor",
         action="store_true",
         help=(
@@ -1667,6 +1743,8 @@ def main() -> None:
     except Exception as e:
         logger.error(f"Unexpected error parsing arguments: {e}")
         return
+
+    app_state["fresh"] = bool(getattr(args, "fresh", False))
 
     if args.no_processor:
         if not (1 <= args.port <= 65535):
