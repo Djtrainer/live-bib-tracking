@@ -146,6 +146,42 @@ All in `config/race_cv.yaml`.
 | `ocr.crop_padding` | 15 | Tested 15/30/50; all read correctly with a roster loaded. Not a lever worth pulling. |
 | `stream.enabled` | true | Browser preview. Disable if bandwidth or CPU is tight; it cannot slow detection either way. |
 
+## Race-day lean mode: where the compute actually goes
+
+Measured on the race machine (M2, 8 GB, `bib_env`), realtime, full stack.
+The pipeline is not the problem: `race_cv` runs at **~0.75 of one core and
+~240 MB** with every worker thread asleep. What competes with it is
+everything else on the Mac, and on 8 GB the constraint is memory before CPU
+— `vm_stat` showed 1,000–2,000 pageouts a minute under the full stack, and a
+swap stall at the line looks exactly like a slow model.
+
+| cost | measured | race day |
+|---|---|---|
+| `race_cv` (detector + tracker + async OCR) | ~73% CPU, 239 MB | keep; it is already lean |
+| `--preview` window | 19 ms/frame *on the frame loop* before gating; now 10 fps, half-res | **leave it off**; watch the browser stream, which cannot slow detection |
+| frame streamer + API relay | no measurable CPU difference on vs off | keep on for the operator's browser; `stream.target_fps` 8 is fine |
+| Camo Studio + its extension | 20–27% CPU | needed for the iPhone camera; close Camo's own preview window |
+| WindowServer | 18–39% CPU, driven by on-screen windows | no preview window, no Camo preview, no browser on the race Mac |
+| Docker Desktop (frontend container) | a Linux VM holding 1–2 GB to serve a static folder | **`--native-frontend`** — Vite serves the same `dist/` natively |
+| editors, chat apps, other projects | ~40% CPU and hundreds of MB, measured | close them; they were the load in every profile |
+
+Concretely:
+
+```bash
+./start-race-cv.sh -c 0 -r roster.csv --native-frontend
+```
+
+- Plug in. On battery macOS throttles; Low Power Mode throttles harder.
+- Watch the leaderboard and the stream from a **phone or second laptop**, not
+  the race Mac — every browser tab there is CPU and RAM taken from detection.
+- The preflight prints reclaimable memory and warns under 1.5 GB. Take the
+  warning seriously; it is the one thing here that can lose a racer.
+- Two things that are *not* worth changing: OpenMP/torch thread caps (no
+  effect under `bib_env`'s torch 2.7; the spinning-pool problem exists only
+  under base miniconda's torch 2.2) and the CoreML compute-unit setting
+  (`ALL` is already ultralytics 8.3's default; the override is a guard
+  against a future upgrade, not a race-day lever).
+
 ## If something goes wrong
 
 **Finishers not appearing on the leaderboard** — check `pending` in the health

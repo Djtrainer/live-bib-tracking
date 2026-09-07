@@ -55,6 +55,10 @@ print_usage() {
     echo "  --fast           With -v, process the file as fast as possible instead"
     echo "                   of at its real frame rate (default is real time, so a"
     echo "                   rehearsal stresses the pipeline the way race day will)"
+    echo "  --native-frontend"
+    echo "                   Serve the leaderboard with Vite's preview server instead"
+    echo "                   of a Docker container. Skips Docker Desktop entirely,"
+    echo "                   which on an 8 GB machine frees 1-2 GB for the detector."
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Environment variables:"
@@ -99,6 +103,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --fast)
             REALTIME=0
+            shift
+            ;;
+        --native-frontend)
+            # Serve the built leaderboard with Vite's preview server instead of
+            # a Docker container. Docker Desktop on macOS is a Linux VM that
+            # holds 1-2 GB of an 8 GB machine to serve a static folder; on race
+            # day that memory is worth more to the detector than to a VM.
+            NATIVE_FRONTEND=1
             shift
             ;;
         -h|--help)
@@ -260,7 +272,31 @@ check_config() {
     echo -e "${GREEN}✅ Using $CONFIG${NC}"
 }
 
+check_memory() {
+    # This is an 8 GB machine and vm_stat has shown it paging out under the
+    # full stack. Swapping during a crossing looks exactly like a slow model:
+    # dropped frames at the line. Say so before the race, not after.
+    echo -e "${YELLOW}🧠 Checking memory...${NC}"
+    local page_bytes free_pages total_bytes free_gb total_gb swap
+    page_bytes=$(sysctl -n hw.pagesize 2>/dev/null || echo 16384)
+    total_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+    free_pages=$(vm_stat 2>/dev/null | awk '/Pages free|Pages inactive|Pages speculative/ {gsub(/\./,"",$NF); s+=$NF} END {print s+0}')
+    free_gb=$(awk -v p="$free_pages" -v b="$page_bytes" 'BEGIN {printf "%.1f", p*b/1073741824}')
+    total_gb=$(awk -v t="$total_bytes" 'BEGIN {printf "%.0f", t/1073741824}')
+    swap=$(sysctl -n vm.swapusage 2>/dev/null | sed -E 's/.*used = ([0-9.]+M).*/\1/')
+    echo -e "   ${total_gb} GB total, ~${free_gb} GB reclaimable, swap used ${swap:-?}"
+    if awk -v f="$free_gb" 'BEGIN {exit !(f < 1.5)}'; then
+        echo -e "${RED}⚠️  Under 1.5 GB reclaimable. Close browsers, editors, Camo's preview"
+        echo -e "   window and any other apps before racing; pass --native-frontend to"
+        echo -e "   avoid Docker Desktop's VM entirely.${NC}"
+    fi
+}
+
 start_frontend() {
+    if [[ "${NATIVE_FRONTEND:-0}" == "1" ]]; then
+        start_frontend_native
+        return
+    fi
     echo -e "${YELLOW}🎨 Starting frontend container...${NC}"
     docker compose up -d --build
     sleep 3
@@ -272,6 +308,45 @@ start_frontend() {
         docker compose logs
         exit 1
     fi
+}
+
+start_frontend_native() {
+    # Same artefact the container serves (`vite build` -> dist/), served by
+    # Vite's own preview server, which does SPA fallback and needs nothing
+    # installed beyond the existing node_modules. The API base URL is baked
+    # in at build time, so it is built here with localhost rather than the
+    # container's host.docker.internal.
+    echo -e "${YELLOW}🎨 Starting frontend natively (no Docker)...${NC}"
+    if ! command -v npm >/dev/null 2>&1; then
+        echo -e "${RED}❌ npm not found; install Node or drop --native-frontend${NC}"
+        exit 1
+    fi
+    local fe="$(pwd)/src/frontend"
+    if [[ ! -d "$fe/node_modules" ]]; then
+        echo -e "${RED}❌ $fe/node_modules missing. Run: (cd src/frontend && npm ci)${NC}"
+        exit 1
+    fi
+    # Rebuild when dist is missing or older than the sources.
+    if [[ ! -f "$fe/dist/index.html" ]] || [[ -n "$(find "$fe/src" "$fe/index.html" -newer "$fe/dist/index.html" 2>/dev/null | head -1)" ]]; then
+        echo -e "   building dist/ (API at http://localhost:$PORT)..."
+        (cd "$fe" && VITE_API_BASE_URL="http://localhost:$PORT" VITE_WS_BASE_URL="ws://localhost:$PORT" \
+            npm run build --silent > "$(pwd)/../../frontend_build.log" 2>&1) \
+            || { echo -e "${RED}❌ frontend build failed; see frontend_build.log${NC}"; exit 1; }
+    fi
+    (cd "$fe" && nohup npx vite preview --port 5173 --host 0.0.0.0 --strictPort \
+        > "$(pwd)/../../frontend.log" 2>&1 &
+     echo $! > "$(pwd)/../../.frontend.pid")
+    for _ in $(seq 1 20); do
+        if curl -s -o /dev/null "http://localhost:5173/"; then
+            echo -e "${GREEN}✅ Frontend serving natively (PID $(cat .frontend.pid))${NC}"
+            echo -e "${BLUE}🌐 Frontend available at: http://localhost:5173${NC}"
+            return 0
+        fi
+        sleep 0.5
+    done
+    echo -e "${RED}❌ Native frontend did not come up. Check frontend.log${NC}"
+    tail -n 20 frontend.log
+    exit 1
 }
 
 start_api_server() {
@@ -334,7 +409,13 @@ start_race_cv_background() {
 # --- Main execution ---
 echo -e "${BLUE}🔍 Running pre-flight checks...${NC}"
 echo ""
-check_docker
+if [[ "${NATIVE_FRONTEND:-0}" == "1" ]]; then
+    echo -e "${GREEN}✅ Docker not needed (--native-frontend)${NC}"
+else
+    check_docker
+fi
+echo ""
+check_memory
 echo ""
 check_ports
 echo ""

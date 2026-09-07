@@ -154,11 +154,26 @@ find_pids NATIVE_PIDS "run_live_native\.sh"
 stop_pids "run_live_native.sh" "${NATIVE_PIDS[@]}"
 echo ""
 
-# --- 4. the frontend container ---
+# --- 4. the frontend: native preview server and/or Docker container ---
 if [[ $KEEP_FRONTEND -eq 1 ]]; then
-    echo -e "${BLUE}Leaving frontend container running (--keep-frontend)${NC}"
+    echo -e "${BLUE}Leaving frontend running (--keep-frontend)${NC}"
 else
-    echo -e "${YELLOW}🎨 Stopping frontend container...${NC}"
+    # start-race-cv.sh --native-frontend records the Vite preview server's
+    # PID here instead of starting a container.
+    if [[ -f .frontend.pid ]]; then
+        fe_pid=$(cat .frontend.pid)
+        if kill -0 "$fe_pid" 2>/dev/null; then
+            echo -e "${YELLOW}🎨 Stopping native frontend (PID $fe_pid)...${NC}"
+            kill "$fe_pid" 2>/dev/null || true
+            sleep 1
+            kill -0 "$fe_pid" 2>/dev/null && kill -9 "$fe_pid" 2>/dev/null || true
+            echo -e "${GREEN}✅ Native frontend stopped${NC}"
+        fi
+        rm -f .frontend.pid
+    fi
+    # vite preview spawns a child that can outlive the recorded PID.
+    pkill -f "vite preview --port 5173" 2>/dev/null || true
+    echo -e "${YELLOW}🎨 Stopping frontend container (if any)...${NC}"
     if docker info >/dev/null 2>&1; then
         docker compose down
         echo -e "${GREEN}✅ Frontend container stopped${NC}"
