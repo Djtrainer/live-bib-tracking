@@ -108,12 +108,20 @@ class ResultSink:
 
         self.event_log = Path(config.event_log)
         self.event_log.parent.mkdir(parents=True, exist_ok=True)
+        # True while the worker holds an event it has dequeued but not yet
+        # delivered -- the retry-in-progress state the queue size cannot see.
+        self._inflight = False
 
     @property
     def stats(self) -> SinkStats:
         with self._lock:
             snapshot = SinkStats(**asdict(self._stats))
-            snapshot.pending = self._queue.qsize()
+            # The queue plus the event the worker is retrying right now. That
+            # one has already been taken off the queue, so counting the queue
+            # alone reported "pending 0 | delivered 0" on the health line
+            # while a finisher sat in a 30s backoff loop against a dead API
+            # -- the one state an operator most needs to see.
+            snapshot.pending = self._queue.qsize() + (1 if self._inflight else 0)
             return snapshot
 
     def _ensure_session(self):
@@ -176,10 +184,14 @@ class ResultSink:
                     pending = self._queue.get(timeout=0.2)
                 except queue.Empty:
                     continue
+                with self._lock:
+                    self._inflight = True
 
             if pending.event_id in self._delivered:
                 pending = None
                 backoff = self.config.retry_seconds
+                with self._lock:
+                    self._inflight = False
                 continue
 
             delivered, error = self.deliver_once(pending)
@@ -190,6 +202,7 @@ class ResultSink:
                     self._stats.delivered += 1
                     self._stats.last_success_ts = self._clock()
                     self._stats.last_error = None
+                    self._inflight = False
                 pending = None
                 backoff = self.config.retry_seconds
                 continue

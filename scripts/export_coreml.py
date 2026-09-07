@@ -17,15 +17,23 @@ Why this exists as a script rather than a one-liner in a README:
   ultralytics' convention and ``config/race_cv.yaml`` uses the same one.
   Getting it backwards produces a model CoreML rejects on every frame.
 
-The local ultralytics (8.1.x) predates YOLO11 and cannot load these weights.
-Run this with a newer one in an isolated environment:
+Run this with the race interpreter, which already has an ultralytics new
+enough to load YOLO11 weights (start-race-cv.sh resolves it; today that is
+the ``bib_env`` conda environment, ultralytics 8.3.x):
+
+    ~/miniconda3/envs/bib_env/bin/python scripts/export_coreml.py --size 512 928
+
+Do NOT use the base miniconda ``python3``: its ultralytics (8.1.x) predates
+YOLO11 and fails with "Can't get attribute 'C3k2'" on these weights. The
+launcher skips it for that reason. If neither is available, a throwaway
+venv works:
 
     python -m venv --system-site-packages /tmp/exportenv
     /tmp/exportenv/bin/pip install "ultralytics>=8.3"
     /tmp/exportenv/bin/python scripts/export_coreml.py --size 512 928
 
-The resulting .mlpackage loads fine under the older ultralytics that runs
-the race; CoreML models are self-contained.
+CoreML models are self-contained; whichever ultralytics exports them, any
+version can load them.
 """
 
 from __future__ import annotations

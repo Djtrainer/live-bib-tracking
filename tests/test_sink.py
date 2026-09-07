@@ -189,3 +189,39 @@ def test_event_ids_are_stable_and_unique():
     assert make_event_id(1, 100.0, "r") == make_event_id(1, 100.0, "r")
     assert make_event_id(1, 100.0, "r") != make_event_id(2, 100.0, "r")
     assert make_event_id(1, 100.0, "r") != make_event_id(1, 100.5, "r")
+
+
+class TestPendingCountsTheEventBeingRetried:
+    """The health line must not read "pending 0 | delivered 0" while a
+    finisher is stuck in a backoff loop against a dead API.
+
+    Measured on a profiling run: the worker had dequeued the event and was
+    retrying it, the queue was therefore empty, and the health line reported
+    pending 0 -- the one state an operator most needs to see.
+    """
+
+    def test_in_flight_retry_is_reported_as_pending(self, tmp_path):
+        session = FakeSession([ConnectionError("API down")] * 200)
+        sink = sink_for(tmp_path, session)
+        sink.start()
+        sink.submit(event())
+        time.sleep(0.3)                     # several failed attempts in
+        stats = sink.stats
+        try:
+            assert stats.delivered == 0
+            assert stats.pending == 1, stats
+            assert stats.last_error and "API down" in stats.last_error
+        finally:
+            sink.stop(drain_timeout=0.2)
+
+    def test_pending_returns_to_zero_once_delivered(self, tmp_path):
+        session = FakeSession([ConnectionError("blip")] + [FakeResponse({"success": True})])
+        sink = sink_for(tmp_path, session)
+        sink.start()
+        sink.submit(event())
+        time.sleep(0.3)
+        try:
+            assert sink.stats.delivered == 1
+            assert sink.stats.pending == 0
+        finally:
+            sink.stop(drain_timeout=0.2)

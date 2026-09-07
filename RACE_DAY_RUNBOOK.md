@@ -3,6 +3,29 @@
 Operational reference. For *why* the system is shaped this way, see
 [RACE_DAY_ANALYSIS.md](RACE_DAY_ANALYSIS.md).
 
+## Which Python runs the race
+
+`start-race-cv.sh` resolves an interpreter via `find_python()`: `.venv`, then
+the `bib_env` conda environment, then `python3` — taking the first one that
+has `ultralytics >= 8.3`. On this machine that is **`bib_env`** (Python 3.11,
+ultralytics 8.3.x, torch 2.7, FastAPI/Starlette compatible). The base
+miniconda `python3` is skipped on purpose: its ultralytics 8.1.x cannot load
+YOLO11 weights, and its Starlette is incompatible with its FastAPI so the
+results API will not even boot there.
+
+**Measure with the interpreter that runs the race.** Anything timed or
+scored under a different Python — a different ultralytics, torch, or thread
+defaults — describes a machine you are not racing on. To use the race
+interpreter explicitly:
+
+```bash
+RACE_CV_PYTHON=~/miniconda3/envs/bib_env/bin/python ./start-race-cv.sh -c 0 -r roster.csv
+```
+
+```bash
+~/miniconda3/envs/bib_env/bin/python scripts/smoke_test.py --expected smoke_test.yaml --roster data/raw/roster_example.csv
+```
+
 ## Before anything else
 
 ```bash
