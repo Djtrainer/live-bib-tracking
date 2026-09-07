@@ -175,6 +175,42 @@ class CameraSource:
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._warmup_seconds = warmup_seconds
 
+        # For recovery when the device stops delivering. Camo, a USB hub, or
+        # the phone locking can all make cap.read() fail for a while; the
+        # old loop retried every 5ms forever and never said a word.
+        self._index = index
+        self._requested = (width, height)
+        self.last_frame_ts: float | None = None
+        self.read_failures = 0        # consecutive failed reads right now
+        self.reopens = 0              # how many times the device was reopened
+        self.reopen_after_s = 5.0     # a stall this long triggers a reopen
+
+    def stalled_seconds(self, now: float | None = None) -> float:
+        """How long since the device last produced a frame."""
+        if self.last_frame_ts is None:
+            return 0.0
+        return max(0.0, (now if now is not None else time.time()) - self.last_frame_ts)
+
+    def _reopen(self) -> bool:
+        """Release and reopen the device in place. True if it came back."""
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        cap = cv2.VideoCapture(self._index)
+        if not cap.isOpened():
+            cap.release()
+            return False
+        width, height = self._requested
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap = cap
+        self.reopens += 1
+        return True
+
     @property
     def grabbed(self) -> int:
         return self._grabbed
@@ -186,12 +222,39 @@ class CameraSource:
 
     def _read_loop(self) -> None:
         index = 0
+        log = logging.getLogger(__name__)
+        stall_started: float | None = None
+        last_warned = 0.0
         while self._running:
             ok, image = self.cap.read()
             captured_at = time.time()
             if not ok or image is None:
+                self.read_failures += 1
+                if stall_started is None:
+                    stall_started = captured_at
+                stalled = captured_at - stall_started
+                if captured_at - last_warned >= 2.0:
+                    log.warning(
+                        "Camera %s: no frames for %.1fs (%d failed reads)",
+                        self._index, stalled, self.read_failures,
+                    )
+                    last_warned = captured_at
+                if stalled >= self.reopen_after_s:
+                    if self._reopen():
+                        log.warning("Camera %s reopened (reopen #%d)", self._index, self.reopens)
+                    else:
+                        log.error("Camera %s could not be reopened; retrying", self._index)
+                    stall_started = captured_at  # measure the next stall afresh
+                    time.sleep(0.5)
+                    continue
                 time.sleep(0.005)
                 continue
+            if self.read_failures:
+                log.info("Camera %s delivering again after %d failed reads",
+                         self._index, self.read_failures)
+            self.read_failures = 0
+            stall_started = None
+            self.last_frame_ts = captured_at
             with self._lock:
                 if self._latest is not None and self._latest.index > self._consumed_index:
                     self._dropped += 1

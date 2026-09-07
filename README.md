@@ -1,250 +1,123 @@
-# Live Bib Tracking - Monorepo Setup
-
-This document explains the new monorepo structure and how to run the application in different modes.
-
 # Live Bib Tracking
 
-Lightweight monorepo for live bib / race-place tracking using a React frontend, FastAPI backend, and computer-vision image processing.
+Times a running race from a camera at the finish line. A YOLO11 detector
+finds runners and their bibs, ByteTrack follows each runner to the line, an
+OCR pass reads the bib number, and every finish is posted to a results API
+that drives a live leaderboard and a Live Management page for corrections.
 
-This README gives an up-to-date quick-start, repo layout, configuration notes, and troubleshooting steps so you can run the system locally or in Docker.
+> **Running a race?** Everything operational — start/stop commands, the
+> two-hotspot network setup for the pavilion TV, what the health line means,
+> the config levers, and how to recover from a crash — is in
+> **[RACE_DAY_RUNBOOK.md](RACE_DAY_RUNBOOK.md)**. For *why* the system is
+> shaped the way it is, including what went wrong in 2025, see
+> [RACE_DAY_ANALYSIS.md](RACE_DAY_ANALYSIS.md).
 
-> **Running a race?** Use [RACE_DAY_RUNBOOK.md](RACE_DAY_RUNBOOK.md) — it has the
-> race-day start/stop commands, the two-hotspot network setup for the pavilion
-> TV, the config levers, and what the health line means. The Docker and
-> `start-dev.sh` flows below are for development. For why the system is shaped
-> the way it is, see [RACE_DAY_ANALYSIS.md](RACE_DAY_ANALYSIS.md).
-
-## Quick links
-
-- Code: `src/`
-- Frontend: `src/frontend`
-- Backend: `src/api_backend`
-- Image processing & training utils: `src/image_processor`, `yolo_utils`
-- Docker compose: `docker-compose.yml`
-- Helpful scripts: `start-dev.sh`, `run_live_native.sh`
-
-## Minimal prerequisites
-
-- macOS / Linux / Windows WSL
-- Python 3.10+ (3.11 recommended)
-- Node 16+ (Node 18+ recommended) and npm or yarn
-- Docker & docker-compose (for containerized runs)
-
-## Repo layout (top-level)
+## How it fits together
 
 ```
-README.md
-pyproject.toml         # Python project metadata
-docker-compose.yml
-src/
-   ├─ frontend/         # React app (Vite)
-   ├─ api_backend/      # FastAPI server
-   └─ image_processor/  # CV inference & utilities
-config/                # YAML config files
-data/                  # Video, images, labels, trained weights
-models/                # model outputs and artifacts
-notebooks/             # analysis & helper notebooks
+ camera ──► race_cv (detect · track · OCR · finish-line logic)
+                │  POST /api/results, one durable event per finish
+                ▼
+            results API (FastAPI) ── serves the site ──► leaderboard  /
+                │  journal: every change on disk         Live Management /admin
+                ▼
+         data/results/  (events.jsonl, race_state.json, race_results.txt, race_log.txt)
 ```
 
-## Setup (local development)
+Two processes, deliberately. `race_cv` owns the camera and the model and
+nothing else; it keeps running if the API, the network, or the browser go
+away, and logs every finish to disk *before* trying to deliver it. If it
+crashes or wedges, the launcher restarts it and it re-queues whatever was
+never confirmed. The API owns results, the clock, and persistence; a
+restart restores the race.
 
-1. Create & activate a Python virtual environment and install Python deps (uses pyproject.toml):
+## Layout
+
+| path | what |
+|---|---|
+| `src/race_cv/` | the CV service: `capture` (camera/file), `detect` (YOLO + ByteTrack), `ocr` (EasyOCR, async), `finish` (crossing detection, track hand-off), `boundary`, `pipeline`, `sink` (durable delivery), `run` (CLI) |
+| `src/api_backend/` | `local_server.py` (results API, WebSocket, serves the site), `journal.py` (crash-recoverable race record) |
+| `src/frontend/` | the React leaderboard (`/`) and Live Management (`/admin`) |
+| `config/race_cv.yaml` | every threshold, geometry point and model path — nothing is hardcoded |
+| `scripts/` | offline tooling: `replay.py`, `smoke_test.py`, `score.py`, `calibrate.py`, `export_coreml.py`, `replay_events.py`, plus dataset/training helpers |
+| `tests/` | 200+ tests; scripted detectors and fake OCR, no model needed |
+| `start-race-cv.sh` / `stop-race-cv.sh` | the race-day launcher and its counterpart |
+
+## Setup
+
+The race runs on macOS with the model exported to CoreML. Python 3.11:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-race.txt     # the exact versions the race has been validated on
 ```
 
-If the project uses a `requirements.txt` somewhere else, you can also install that; the package metadata is in `pyproject.toml`.
+`pyproject.toml` carries the version ranges; `requirements-race.txt` is the
+pinned set. `start-race-cv.sh` finds a suitable interpreter on its own
+(`.venv`, then the `bib_env` conda environment) — see the runbook.
 
-2. Install frontend deps and run the dev server:
+**Models are not in git.** `models/` is ignored. On a new machine, copy it
+from the race Mac, or export from the trained weights:
 
 ```bash
-cd src/frontend
-npm install
-npm run dev
+python scripts/export_coreml.py --size 512 928
 ```
 
-3. Start the backend (FastAPI) in another terminal:
+The frontend builds once and the API serves it:
 
 ```bash
-source .venv/bin/activate
-python src/api_backend/local_server.py
+(cd src/frontend && npm ci && npm run build)
 ```
 
-There is a convenience script `start-dev.sh` that aims to wire up dev servers; use it if you prefer a single command.
+## Run
 
-## Quick: run native (local) inference
-
-To run image/video inference locally (no Docker), use the provided script which loads models and processes video files:
+Race day, in one line (details and the network setup in the runbook):
 
 ```bash
-./run_live_native.sh
+./start-race-cv.sh -c 0 -r roster.csv
 ```
 
-Check `src/image_processor/video_inference.py` for configurable options (frame rate, model path, input source).
-
-## Docker / Production
-
-You can run the full stack with Docker Compose for a production-like environment. Example:
+A rehearsal against a recording, paced in real time with frames dropped
+exactly as a camera would drop them:
 
 ```bash
-docker compose up --build
+./start-race-cv.sh -v "data/raw/<clip>.mov" -r roster.csv
 ```
 
-This will build images and start services defined in `docker-compose.yml`. The FastAPI server typically serves the built frontend in production mode on port 8000.
-
-## Configuration
-
-- YAML files live in `config/` (e.g. `custom_tracker.yaml`, `yolo_config.yaml`).
-
-## Data & models
-
-- The repo now tracks the following data folders (example contents):
-
-   - `data/raw/`
-      - Raw video files and camera dumps (examples):
-         - `IMG_0066.MOV`
-
-   - `data/processed/`
-      - Processed images, labels and annotation sets used for training/evaluation:
-         - `annotations/`,
-         - `images/`
-         - `labels/`, 
-   - `data/results/`
-      - Generated or manually-curated race result artifacts
-- `models/` contains trained model artifacts and evaluation images (weights may be large; some model files are intentionally excluded by default).
-
-## Common scripts
-
-- `start-dev.sh` — helper to start frontend + backend in development (hot-reload). Verify it exists and adjust if paths differ.
-- `run_live_native.sh` — runs local video inference using the image processor code (useful for live demos without Docker).
-- `docker-compose.yml` — orchestrates services for local multi-container runs.
-
-Inspect each script before running to confirm environment and paths.
-
-## start-dev.sh — Hybrid development (frontend in Docker + backend native)
-
-`start-dev.sh` is a convenience script that launches the frontend inside Docker (Vite) and runs the backend natively on your machine. This is helpful on macOS where camera access is easier from a native process while keeping the frontend containerized.
-
-What it does:
-- Builds and starts the frontend with `docker compose up -d --build` and exposes it on http://localhost:5173
-- Runs `run_live_native.sh` in the background (native process) and binds the backend to http://localhost:8001
-- Writes backend logs to `backend.log` and prints the backend PID when started
-
-Prerequisites:
-- Docker Desktop running
-- Python (virtualenv recommended) and required Python packages installed
-
-Usage examples (zsh):
+Score every clip against `smoke_test.yaml`:
 
 ```bash
-# Use the default external camera (index 1)
-./start-dev.sh
-
-# Use built-in camera (index 0)
-./start-dev.sh -c 0
-
-# Process a local video file instead of camera
-./start-dev.sh -v data/raw/race_clip.mp4
-
-# Show help
-./start-dev.sh -h
+python scripts/smoke_test.py --expected smoke_test.yaml --roster roster.csv --realtime
 ```
 
-Management & troubleshooting:
-
-- Check frontend container status:
+Tests:
 
 ```bash
-docker compose ps
+python -m pytest tests/ -q
 ```
 
-- Stop frontend container:
+## Development
+
+For UI work, run the API and then Vite's dev server, which hot-reloads and
+proxies `/api` and `/ws` to the API:
 
 ```bash
-docker compose down
+python src/api_backend/local_server.py --port 8001
 ```
-
-- Tail backend logs (written to `backend.log` by the script):
 
 ```bash
-tail -f backend.log
+cd src/frontend && npm run dev
 ```
 
-- Stop the backend process (the script prints the PID when it starts):
+Nothing is containerised. The previous Docker frontend served a static
+build from a Linux VM holding 1–2 GB of an 8 GB machine, so it was retired;
+the launcher builds `dist/` when it is stale and the API serves it.
 
-```bash
-kill <PID>
-```
+## What the numbers are
 
-Notes:
-- The frontend container communicates with the native backend using `host.docker.internal:8001` for API and WebSocket connections.
-- If ports 5173 or 8001 are already in use, the script will exit with instructions to free them.
-
-## run_live_native.sh — Native live inference (macOS)
-
-`run_live_native.sh` runs the backend and the live/video inference natively. It includes pre-flight checks for Python, dependencies, camera or video readability, and the model file. This is the command the `start-dev.sh` script invokes for the native backend.
-
-Default behavior and ports:
-- Binds the backend server to port 8001 by default
-- Uses `models/yolo11_white_bibs/weights/last.mlpackage` as the default model path (relative to repo root)
-
-CLI options (copy-paste):
-
-```bash
-# Basic usage (uses camera index 1 and default model/port)
-./run_live_native.sh
-
-# Use built-in camera (index 0)
-./run_live_native.sh -c 0
-
-# Run against a local video file instead of camera
-./run_live_native.sh -v data/raw/race_clip.mp4
-
-# Use a custom model and port
-./run_live_native.sh -m /path/to/model.pt -p 8002
-
-# Show help
-./run_live_native.sh -h
-```
-
-Environment variables accepted:
-- `MODEL_PATH` — alternative to `-m`, absolute or relative path to a model file
-- `CAMERA_INDEX` — alternative to `-c`, camera device index
-
-If required Python packages are missing the script will list them and offer to install them via `pip` (or you can run `pip install -r requirements.txt` / `pip install -e .` beforehand).
-
-Common errors & fixes:
-- "Model file not found": ensure `MODEL_PATH` points to an existing `.pt` file (check `models/`)
-- "Cannot open camera": try a different `CAMERA_INDEX` (0, 1, 2...) and confirm macOS camera permissions for your terminal app
-- "Video file cannot open": verify the video file path and that OpenCV supports the container format
-
-When running locally in a virtualenv, activate it first to ensure correct dependencies:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
-```
-
-Then run the native server as shown above. The script will print checks and then run `src/api_backend/local_server.py` with the appropriate flags for `--inference_mode` (`live` or `test`).
-
-## Troubleshooting
-
-- Ports: Backend defaults to 8000 and frontend dev server to 5173 (Vite). If ports conflict, stop the conflicting services or change the port in Vite / FastAPI.
-- Frontend not loading: confirm `npm install` succeeded and `npm run build` or `npm run dev` shows no errors.
-- Backend API errors: check logs printed by `local_server.py` and any stack traces in the terminal.
-- Docker build failures: look for missing system libraries, Python wheels, or permission issues in the build output.
-
-Useful Docker commands:
-
-```bash
-docker compose ps
-docker compose logs -f
-docker compose up --build
-docker compose down
-```
+Measured on the race machine (M2, 8 GB) against 13 recorded clips with 23
+finishers: **22/23 found, 0 genuine ghosts, 22/22 bibs right**. The one miss
+is an expectation written past the end of its clip. The tracking loop runs in
+~20 ms against a 33 ms budget at 30 fps, and the race-day path processes
+~99.5% of frames. `RACE_DAY_ANALYSIS.md` has the measurements behind each
+decision.

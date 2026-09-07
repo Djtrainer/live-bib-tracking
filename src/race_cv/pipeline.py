@@ -59,6 +59,7 @@ class PipelineStats:
     ocr_dropped: int = 0
     ocr_wait_timeouts: int = 0
     ocr_mean_wait_ms: float = 0.0
+    frame_errors: int = 0        # frames skipped because process() raised
     first_capture_ts: float | None = None
     last_capture_ts: float | None = None
 

@@ -28,8 +28,10 @@ dependencies = [
     "numpy>=2.0",
     "coremltools>=8.0",            # required to load the .mlpackage race model on macOS
     # API backend
-    "fastapi>=0.115",
+    "fastapi>=0.115,<1",
+    "starlette<1",                 # 1.0 removed Router(on_startup=...); FastAPI <0.120 still passes it
     "uvicorn>=0.30",
+    "websockets>=12",              # uvicorn's WebSocket implementation for /ws
     "python-multipart>=0.0.9",     # required by FastAPI for UploadFile
     # Shared
     "requests>=2.31",

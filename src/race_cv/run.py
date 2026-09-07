@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
 import signal
 import sys
 import time
@@ -27,6 +28,7 @@ from .geometry_check import check_roi_covers_course, describe_roi
 from .ocr import BibReader
 from .pipeline import Pipeline
 from .preview import RateGate, downscale
+from .resilience import ErrorBudget, StallWatchdog
 from .sink import FinishEvent, ResultSink
 from .stream import FrameStreamer
 
@@ -224,6 +226,36 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
+    # Survive isolated bad frames; refuse to hide a persistent failure; and
+    # report a stalled loop from a thread that is not the stalled loop.
+    budget = ErrorBudget(max_consecutive=30)
+    heartbeat = {"ts": None}
+
+    def on_stall(stale: float) -> None:
+        camera = getattr(source, "stalled_seconds", None)
+        camera_silent = camera() if camera else 0.0
+        detail = f"; camera silent {camera_silent:.1f}s" if camera else ""
+        logger.error(
+            "NO FRAMES PROCESSED for %.0fs%s. Timing is not happening. "
+            "Check the camera/Camo, then the health line.", stale, detail,
+        )
+        # A silent camera is the capture thread's problem (it reopens the
+        # device itself) and a restart would not help. Frames arriving but
+        # none processed for this long means the loop is wedged -- inside
+        # CoreML, a driver, a lock -- and nothing in-process can unwedge it.
+        # Exit non-zero so the launcher's supervisor starts a fresh process;
+        # unconfirmed events are re-queued from the event log on start.
+        if stale >= 30 and camera_silent < 5:
+            logger.critical(
+                "Frame loop wedged for %.0fs with the camera still delivering. "
+                "Exiting with status 3 so the supervisor restarts race_cv.", stale,
+            )
+            logging.shutdown()
+            os._exit(3)
+
+    watchdog = StallWatchdog(heartbeat=lambda: heartbeat["ts"], on_stall=on_stall,
+                             threshold_s=5.0, interval_s=5.0)
+
     # Streaming publishes to the same API server results go to, so it's
     # automatically disabled whenever there's nowhere to send it (--no-api).
     streamer = None
@@ -285,7 +317,9 @@ def main(argv: list[str] | None = None) -> int:
                     stopping["flag"] = True
 
     last_report = time.time()
+    exit_code = 0   # 0 = deliberate stop (signal, 'q', end of file); 3 = gave up
     try:
+        watchdog.start()
         for frame in source.frames():
             if stopping["flag"]:
                 break
@@ -293,13 +327,32 @@ def main(argv: list[str] | None = None) -> int:
             if not pipeline.should_process(frame):
                 pipeline.stats.frames_paced_out += 1
                 continue
-            result = pipeline.process(frame)
-            if on_result is not None:
-                on_result(result)
+            try:
+                result = pipeline.process(frame)
+                if on_result is not None:
+                    on_result(result)
+                budget.record_ok()
+            except Exception as exc:
+                # One bad frame is a skipped frame, not the end of timing.
+                pipeline.stats.frame_errors += 1
+                if budget.record_error(exc):
+                    logger.critical(
+                        "%d consecutive frame errors; last: %s. Stopping -- this is "
+                        "structural, not a bad frame. Undelivered events are in the "
+                        "event log.", budget.consecutive, budget.last_error,
+                    )
+                    logger.exception("Last frame error")
+                    exit_code = 3
+                    break
+                if budget.total <= 5 or budget.total % 100 == 0:
+                    logger.exception("Frame %d failed (%d errors so far); continuing",
+                                     frame.index, budget.total)
+            heartbeat["ts"] = time.time()
             if time.time() - last_report >= 10:
                 _report(pipeline, sink, source, streamer)
                 last_report = time.time()
     finally:
+        watchdog.stop()
         pipeline.flush()
         pipeline.close()
         source.release()
@@ -313,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         _report(pipeline, sink, source, streamer)
         _report_undelivered(sink, stats)
 
-    return 0
+    return exit_code
 
 
 def _report(
@@ -325,10 +378,15 @@ def _report(
 
     message = (
         f"health | processed {stats.frames_processed} ({stats.processed_fps:.1f} fps) | "
-        f"paced out {stats.frames_paced_out} | source dropped {dropped} | "
+        f"paced out {stats.frames_paced_out} | source dropped {dropped}"
+        f"{f' | frame errors {stats.frame_errors}' if stats.frame_errors else ''}"
+        f"{f' | CAMERA SILENT {source.stalled_seconds():.0f}s' if getattr(source, 'stalled_seconds', None) and source.stalled_seconds() >= 2 else ''}"
+        f"{f' | reopens {source.reopens}' if getattr(source, 'reopens', 0) else ''} | "
         f"finishers {stats.events_emitted} (unknown bib {stats.unknown_bib_events}"
         f"{f', handed off {stats.handoffs}' if stats.handoffs else ''}) | "
         f"delivered {sink_stats.delivered} | pending {sink_stats.pending}"
+        f"{f' | recovered {sink_stats.recovered}' if sink_stats.recovered else ''}"
+        f"{f' | EVENT LOG WRITE FAILURES {sink_stats.log_failures}' if sink_stats.log_failures else ''}"
     )
     if pipeline.async_ocr is not None:
         ocr = pipeline.async_ocr.stats

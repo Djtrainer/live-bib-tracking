@@ -3,16 +3,14 @@ import asyncio
 import csv
 import io
 import json
-import os
 import sys
 import time
-import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, AsyncGenerator, Tuple
 
 import cv2
-import dotenv
+import logging
 import numpy as np
 import uvicorn
 from fastapi import (
@@ -32,14 +30,18 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 # make the same import work when it is run from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_backend.journal import RaceJournal, _format_finish  # noqa: E402
-from fastapi.staticfiles import StaticFiles
+from fastapi.staticfiles import StaticFiles  # noqa: F401  (kept for the legacy Docker image)
 
-from image_processor.utils import get_logger
-from image_processor.video_inference import VideoInferenceProcessor
-from image_processor.video_inference import FrameReader
-
-logger = get_logger()
-dotenv.load_dotenv()
+# The legacy in-process pipeline (image_processor.video_inference) is gone.
+# It was imported here unconditionally, which made the results API load
+# torch, EasyOCR and ultralytics at startup -- 1.8s and hundreds of MB on
+# an 8 GB race machine -- for a class it never instantiated in --no-processor
+# mode. race_cv owns the camera and the model; this process owns results.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("race_api")
 app_state = {}
 
 
@@ -78,113 +80,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 journal.state_path, len(race_results), finished, race_clock_state.get("status"),
             )
 
-    # Initialize processor using environment variables (for Docker) or command-line args (for direct execution)
-    try:
-        # Check if main() already decided what to do about a processor -- including
-        # the --no-processor case, where it deliberately sets app_state["processor"]
-        # to None. Checking "is not None" here would miss that: main() imports
-        # uvicorn at module scope, so "uvicorn" in sys.modules is true even for a
-        # direct `python local_server.py` run, and this lifespan would otherwise
-        # fall through to the env-var branch below and start a second pipeline.
-        if app_state.get("processor_configured"):
-            logger.info(
-                "Processor already configured in main() - skipping lifespan initialization"
-            )
-            yield
-            return
-
-        # Check if we're running via uvicorn (Docker) or direct execution
-        if "uvicorn" in sys.modules or any("uvicorn" in arg for arg in sys.argv):
-            # Running via uvicorn (Docker) - use environment variables
-            logger.info("Detected uvicorn execution - using environment variables")
-
-            # Get configuration from environment variables
-            video_path_str = os.getenv("VIDEO_PATH", "data/raw/race_1080p.mp4")
-            model_path_str = os.getenv(
-                "MODEL_PATH", "/app/models/yolo11_white_bibs/weights/last.mlpackage"
-            )
-            target_fps = int(os.getenv("TARGET_FPS", "8"))
-            confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.3"))
-
-            # Check for live mode environment variables
-            inference_mode = os.getenv("INFERENCE_MODE", "test")
-            camera_index = int(os.getenv("CAMERA_INDEX", "1"))
-
-            logger.info(f"Environment INFERENCE_MODE: {inference_mode}")
-            logger.info(f"Environment CAMERA_INDEX: {camera_index}")
-
-            # Set video source based on inference mode
-            if inference_mode == "live":
-                video_source = camera_index
-                logger.info(f"Live Mode: Using camera index {video_source}")
-            else:
-                video_source = video_path_str
-                logger.info(f"Test Mode: Using video file {video_source}")
-
-            # Validate model file exists
-            model_path = Path(model_path_str)
-            if not model_path.exists():
-                logger.warning(f"Model file not found: {model_path_str}")
-                app_state["processor"] = None
-                yield
-                return
-
-            # For test mode, validate video file exists
-            if inference_mode == "test":
-                video_path = Path(video_path_str)
-                if not video_path.exists():
-                    logger.warning(f"Video file not found: {video_path_str}")
-                    app_state["processor"] = None
-                    yield
-                    return
-
-            logger.info(f"Initializing processor - Mode: {inference_mode}")
-            logger.info(f"Model: {model_path_str}")
-            logger.info(f"Video source: {video_source}")
-            logger.info(f"Target FPS: {target_fps}, Confidence: {confidence_threshold}")
-
-            processor = VideoInferenceProcessor(
-                model_path=model_path_str, video_path=video_source
-            )
-            app_state["processor"] = processor
-
-            # Create and start a FrameReader to decouple blocking cap.read() from processing
-            try:
-                frame_reader = FrameReader(processor.cap, max_queue_size=1)
-                frame_reader.start()
-                app_state["frame_reader"] = frame_reader
-                logger.info("✅ FrameReader initialized and started during startup!")
-            except Exception as e:
-                logger.warning(f"Failed to start FrameReader: {e}")
-            logger.info("✅ Video processor initialized successfully during startup!")
-        else:
-            # Running directly - processor will be initialized in main()
-            logger.info(
-                "Direct execution detected - processor will be initialized in main()"
-            )
-            app_state["processor"] = None
-
-    except Exception as e:
-        logger.error(f"Failed to initialize processor during startup: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        app_state["processor"] = None
-
     yield
 
-    # Code to run on shutdown
-    logger.info("Application shutdown: Cleaning up resources.")
-    # Stop and cleanup FrameReader if present
-    if app_state.get("frame_reader"):
-        try:
-            app_state["frame_reader"].stop()
-        except Exception as e:
-            logger.warning(f"Error stopping FrameReader: {e}")
-
-    if app_state.get("processor"):
-        try:
-            app_state["processor"].cap.release()
-        except Exception as e:
-            logger.warning(f"Error releasing video capture: {e}")
+    logger.info("Application shutdown")
 
 
 class ConnectionManager:
@@ -212,9 +110,6 @@ class ConnectionManager:
         """
         await websocket.accept()
         self.active_connections.append(websocket)
-        print(
-            f"🔗 WebSocket client connected. Total clients: {len(self.active_connections)}"
-        )
         logger.info(
             f"🔗 WebSocket client connected. Total clients: {len(self.active_connections)}"
         )
@@ -230,9 +125,6 @@ class ConnectionManager:
         """
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        print(
-            f"❌ WebSocket client disconnected. Total clients: {len(self.active_connections)}"
-        )
         logger.info(
             f"❌ WebSocket client disconnected. Total clients: {len(self.active_connections)}"
         )
@@ -250,17 +142,11 @@ class ConnectionManager:
             Exception: Errors encountered while sending to individual clients are logged
                 and the failing connections are removed.
         """
-        print(
-            f"📡 BROADCAST DEBUG: Attempting to broadcast to {len(self.active_connections)} clients"
-        )
         logger.info(
             f"📡 BROADCAST DEBUG: Attempting to broadcast to {len(self.active_connections)} clients"
         )
 
         if len(self.active_connections) == 0:
-            print(
-                "⚠️ BROADCAST WARNING: No active WebSocket connections to broadcast to!"
-            )
             logger.warning(
                 "⚠️ BROADCAST WARNING: No active WebSocket connections to broadcast to!"
             )
@@ -270,9 +156,8 @@ class ConnectionManager:
         for i, connection in enumerate(self.active_connections):
             try:
                 await connection.send_text(message)
-                print(f"✅ Successfully sent message to client {i + 1}")
+                logger.debug(f"✅ Successfully sent message to client {i + 1}")
             except Exception as e:
-                print(f"❌ Failed to send message to client {i + 1}: {e}")
                 logger.error(f"❌ Failed to send message to client {i + 1}: {e}")
                 disconnected_clients.append(connection)
 
@@ -282,7 +167,7 @@ class ConnectionManager:
                 self.active_connections.remove(client)
 
         if disconnected_clients:
-            print(
+            logger.debug(
                 f"🧹 Cleaned up {len(disconnected_clients)} disconnected clients. Active clients: {len(self.active_connections)}"
             )
 
@@ -300,41 +185,15 @@ original_roster: Dict[str, Dict[str, Any]] = {}  # Key: bibNumber, Value: racer 
 
 
 def _save_server_leaderboard_snapshot() -> None:
-    """Build and persist a leaderboard snapshot from the in-memory `race_results`.
+    """Retired. Persistence is the journal (see ``journal.py``).
 
-    This function asks the configured VideoInferenceProcessor to write the leaderboard CSV
-    in the same format used by the frontend. If the processor is not available, the function
-    returns early.
-
-    Args:
-        None
-
-    Returns:
-        None
-
-    Raises:
-        Exception: Any exception that occurs while asking the processor to save the CSV
-            will be logged and suppressed to avoid crashing the server.
+    This used to ask the legacy in-process pipeline to write a CSV, and did
+    nothing at all when that pipeline was absent -- which is every race-day
+    run. The mutation sites that call it now also call ``_journal`` directly,
+    which writes the state, the human-readable leaderboard and the log. Kept
+    as a no-op so those call sites need no change.
     """
-    try:
-        processor = app_state.get("processor")
-        if not processor:
-            logger.debug("No processor in app_state; skipping leaderboard CSV save.")
-            return
-
-        # Use the processor's frontend CSV writer to produce the same CSV format as the UI
-        # Only include racers who have a finishTime (finished racers only), sorted by finish time
-        try:
-            finished = [r for r in race_results if r.get("finishTime") is not None]
-            finished.sort(key=lambda x: x.get("finishTime") or float("inf"))
-            processor.save_leaderboard_csv_frontend_format(finished)
-        except Exception:
-            # Fallback: write an empty file using the generic saver
-            processor.save_leaderboard_csv_frontend_format(
-                [], path=processor.leaderboard_csv_path
-            )
-    except Exception as e:
-        logger.warning(f"Failed to save server leaderboard snapshot: {e}")
+    return None
 
 
 # --- Race Clock State (Source of Truth) ---
@@ -561,216 +420,13 @@ async def video_feed(request: Request) -> Response:
     Raises:
         HTTPException: If the processor is not initialized or a critical error occurs.
     """
-    try:
-        # Get the processor from our state dictionary
-        processor = app_state.get("processor")
-
-        if processor is None:
-            # No in-process pipeline (--no-processor / race_cv mode). Relay
-            # whatever the external CV service last posted to /api/frame
-            # instead of failing outright -- race_cv owns the camera now, this
-            # process just republishes its frames for the browser.
-            return StreamingResponse(
-                _generate_relay_frames(), media_type="multipart/x-mixed-replace; boundary=frame"
-            )
-
-        async def generate_frames() -> AsyncGenerator[bytes, None]:
-            """Asynchronous generator yielding MJPEG frame byte chunks.
-
-            Yields:
-                bytes: A single MJPEG frame chunk including multipart boundaries.
-
-            Raises:
-                Exception: Errors during frame processing are logged and may lead to
-                    yielding an error frame or terminating the generator.
-            """
-            frame_count = 0
-            error_count = 0
-            max_errors = 10
-            start_time = time.time()
-
-            # Set processing start time for timing calculations
-            processor.processing_start_time = start_time
-
-            try:
-                logger.info("Starting video frame generation...")
-
-                # Main video processing loop
-                frame_reader = app_state.get("frame_reader")
-                while True:
-                    try:
-                        # Non-blocking read from FrameReader (keeps only latest frame)
-                        frame = None
-                        if frame_reader is not None:
-                            frame = frame_reader.get_latest_frame()
-                        else:
-                            # Fallback to direct read if FrameReader isn't available
-                            ret, frame = processor.cap.read()
-                            if not ret:
-                                logger.info("End of video reached")
-                                break
-
-                        # If no frame available yet, yield control briefly and continue
-                        if frame is None:
-                            # For non-live (file) mode, if the reader has stopped and there are no frames, end stream
-                            if (not processor.is_live_mode) and (
-                                frame_reader is not None and not frame_reader.running
-                            ):
-                                logger.info(
-                                    "End of video reached (frame reader stopped and no frames left)"
-                                )
-                                break
-
-                            await asyncio.sleep(0.005)
-                            continue
-
-                        if frame is None or frame.size == 0:
-                            logger.warning(f"Invalid frame at count {frame_count}")
-                            continue
-
-                        # If processor requested a skip cooldown, rapidly drop
-                        # frames from the FrameReader (or use cap.grab() as a
-                        # fallback) to avoid a visible pause caused by a slow
-                        # grab/read loop.
-                        if getattr(processor, "frames_to_skip", 0) > 0:
-                            skips = processor.frames_to_skip
-                            logger.info(
-                                f"Performing fast drop of {skips} frames to recover from idle period"
-                            )
-                            # If we have a FrameReader, consume latest frames without blocking
-                            if frame_reader is not None:
-                                while processor.frames_to_skip > 0:
-                                    _ = frame_reader.get_latest_frame()
-                                    # decrement counter even if no frame returned to ensure progress
-                                    processor.frames_to_skip -= 1
-                                # After dropping, get one fresh frame to process
-                                frame = frame_reader.get_latest_frame()
-                            else:
-                                # Fallback: use cap.grab() which is cheaper than full read
-                                cap = processor.cap
-                                while processor.frames_to_skip > 0 and cap.isOpened():
-                                    try:
-                                        cap.grab()
-                                    except Exception:
-                                        break
-                                    processor.frames_to_skip -= 1
-                                ret, frame = cap.read()
-
-                        # Process the frame (normal path)
-                        processed_frame = processor._process_frame(
-                            frame,
-                            frame_count,
-                            start_time,
-                            processor.cap,
-                            processor.timings,
-                        )
-
-                        # Validate processed frame
-                        if processed_frame is None or processed_frame.size == 0:
-                            logger.warning(
-                                f"Invalid processed frame at count {frame_count}"
-                            )
-                            continue
-
-                        ret, buffer = cv2.imencode(
-                            ".jpg", processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 85]
-                        )
-
-                        if not ret or buffer is None:
-                            logger.warning(f"Failed to encode frame {frame_count}")
-                            error_count += 1
-                            if error_count > max_errors:
-                                logger.error(
-                                    "Too many encoding errors, stopping stream"
-                                )
-                                break
-                            continue
-
-                        frame_bytes = buffer.tobytes()
-
-                        if len(frame_bytes) == 0:
-                            logger.warning(f"Empty frame bytes at count {frame_count}")
-                            continue
-
-                        # Yield the frame in MJPEG format
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-                        )
-
-                        frame_count += 1
-
-                        # Reset error count on successful frame
-                        if error_count > 0:
-                            error_count = 0
-
-                        # Allow the server to handle other tasks
-                        await asyncio.sleep(0.01)  # Small delay to prevent overwhelming
-
-                    except Exception as frame_error:
-                        error_count += 1
-                        logger.error(
-                            f"Error processing frame {frame_count}: {frame_error}"
-                        )
-
-                        if error_count > max_errors:
-                            logger.error(
-                                "Too many frame processing errors, stopping stream"
-                            )
-                            break
-                        continue
-
-                logger.info(
-                    f"Video stream ended. Processed {frame_count} frames with {error_count} errors."
-                )
-
-                # Generate final reports
-                processor._print_timing_report()
-                processor._generate_final_leaderboard()
-
-            except Exception as generator_error:
-                logger.error(f"Critical error in video generator: {generator_error}")
-                # Yield an error frame
-                try:
-
-                    error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                    cv2.putText(
-                        error_frame,
-                        "Video Processing Error",
-                        (50, 240),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 0, 255),
-                        2,
-                    )
-                    cv2.putText(
-                        error_frame,
-                        str(generator_error)[:50],
-                        (50, 280),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 0, 255),
-                        2,
-                    )
-
-                    ret, buffer = cv2.imencode(".jpg", error_frame)
-                    if ret:
-                        frame_bytes = buffer.tobytes()
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-                        )
-                except Exception as error_frame_error:
-                    logger.error(f"Failed to generate error frame: {error_frame_error}")
-
-        return StreamingResponse(
-            generate_frames(), media_type="multipart/x-mixed-replace; boundary=frame"
-        )
-
-    except Exception as endpoint_error:
-        error_msg = f"Error in video_feed endpoint: {str(endpoint_error)}"
-        logger.error(error_msg)
-        return Response(error_msg, status_code=500)
+    # race_cv owns the camera and the model; this process only republishes
+    # the frames it posts to /api/frame. The in-process pipeline that used to
+    # live inside this generator -- the architecture RACE_DAY_ANALYSIS.md
+    # names as the root cause of the 2025 failures -- is gone.
+    return StreamingResponse(
+        _generate_relay_frames(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 @app.get("/api/results")
@@ -1021,9 +677,9 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     Raises:
         HTTPException: For invalid inputs or when the race clock is not running and a wallClockTime is provided.
     """
-    logger.info("🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
-    logger.info("🔍 DEBUG: Raw finish_data received: %s", finish_data)
-    logger.info("🔍 DEBUG: Type of finish_data: %s", type(finish_data))
+    logger.debug("🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
+    logger.debug("🔍 DEBUG: Raw finish_data received: %s", finish_data)
+    logger.debug("🔍 DEBUG: Type of finish_data: %s", type(finish_data))
     logger.info(
         "🔍 DEBUG: Keys in finish_data: %s",
         list(finish_data.keys()) if isinstance(finish_data, dict) else "Not a dict",
@@ -1035,7 +691,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "message": "bibNumber is required"}
 
     bib_number = str(finish_data["bibNumber"])
-    logger.info("🔍 DEBUG: Extracted bib_number: '%s' (type: %s)", bib_number, type(bib_number))
+    logger.debug("🔍 DEBUG: Extracted bib_number: '%s' (type: %s)", bib_number, type(bib_number))
 
     # CRITICAL CHANGE: Handle both wall-clock time and legacy finish time formats
     finish_time = None
@@ -1043,7 +699,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     if "wallClockTime" in finish_data:
         # NEW: Wall-clock time from video processor - calculate official finish time
         wall_clock_time = float(finish_data["wallClockTime"])
-        logger.info("🔍 DEBUG: Received wall-clock time: %s", wall_clock_time)
+        logger.debug("🔍 DEBUG: Received wall-clock time: %s", wall_clock_time)
 
         if (
             race_clock_state["raceStartTime"] is not None
@@ -1072,7 +728,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     elif "finishTime" in finish_data:
         # LEGACY: Direct finish time (for manual entry or backward compatibility)
         raw_finish_time = finish_data["finishTime"]
-        logger.info("🔍 DEBUG: Raw finish_time: %s (type: %s)", raw_finish_time, type(raw_finish_time))
+        logger.debug("🔍 DEBUG: Raw finish_time: %s (type: %s)", raw_finish_time, type(raw_finish_time))
 
         if isinstance(raw_finish_time, str):
             time_ms = time_string_to_milliseconds(raw_finish_time)
@@ -1083,10 +739,10 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
                     "message": "Invalid time format. Use MM:SS.ms",
                 }
             finish_time = time_ms
-            logger.info("🔍 DEBUG: Converted string time to milliseconds: %s", finish_time)
+            logger.debug("🔍 DEBUG: Converted string time to milliseconds: %s", finish_time)
         else:
             finish_time = float(raw_finish_time)
-            logger.info("🔍 DEBUG: Finish time is already numeric: %s", finish_time)
+            logger.debug("🔍 DEBUG: Finish time is already numeric: %s", finish_time)
 
     else:
         logger.error("❌ DEBUG: Missing both wallClockTime and finishTime fields")
@@ -1096,7 +752,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # Debug: Show current race_results state
-    logger.info("🔍 DEBUG: Current race_results count: %d", len(race_results))
+    logger.debug("🔍 DEBUG: Current race_results count: %d", len(race_results))
     logger.info(
         "🔍 DEBUG: Current race_results bib numbers: %s",
         [r.get("bibNumber", "NO_BIB") for r in race_results],
@@ -1120,18 +776,18 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
                 return {"success": True, "data": existing, "duplicate": True}
 
     unique_id = str(uuid.uuid4())
-    logger.info(f"🔍 DEBUG: Generated unique ID: {unique_id}")
+    logger.debug(f"🔍 DEBUG: Generated unique ID: {unique_id}")
 
     # Calculate rank for new finisher
     current_finished_count = len(
         [r for r in race_results if r.get("finishTime") is not None]
     )
     new_rank = current_finished_count + 1
-    logger.info(f"🔍 DEBUG: Calculated new rank: {new_rank}")
+    logger.debug(f"🔍 DEBUG: Calculated new rank: {new_rank}")
 
     # Look up roster data for this bib number (if available)
     roster_data = original_roster.get(bib_number, {})
-    logger.info(f"🔍 DEBUG: Roster data for bib #{bib_number}: {roster_data}")
+    logger.debug(f"🔍 DEBUG: Roster data for bib #{bib_number}: {roster_data}")
 
     # Create new finisher with merged data from roster and finish_data
     new_finisher = {
@@ -1156,19 +812,19 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
             new_finisher["gender"] = "W"
         else:
             new_finisher["gender"] = gender
-        logger.info(f"🔍 DEBUG: Added gender: {new_finisher['gender']}")
+        logger.debug(f"🔍 DEBUG: Added gender: {new_finisher['gender']}")
 
     if roster_data.get("team") or finish_data.get("team"):
         team_source = roster_data.get("team") or finish_data.get("team")
         new_finisher["team"] = str(team_source).strip()
-        logger.info(f"🔍 DEBUG: Added team: {new_finisher['team']}")
+        logger.debug(f"🔍 DEBUG: Added team: {new_finisher['team']}")
 
     # Add optional age from roster or finish_data
     if roster_data.get("age") or finish_data.get("age"):
         new_finisher["age"] = roster_data.get("age") or finish_data.get("age")
-        logger.info(f"🔍 DEBUG: Added age: {new_finisher['age']}")
+        logger.debug(f"🔍 DEBUG: Added age: {new_finisher['age']}")
 
-    logger.info(f"🔍 DEBUG: Created new finisher object: {new_finisher}")
+    logger.debug(f"🔍 DEBUG: Created new finisher object: {new_finisher}")
 
     # Add to race results (always creates new entry)
     race_results.append(new_finisher)
@@ -1180,7 +836,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     # Recalculate ranks for all finished racers
     finished_racers = [r for r in race_results if r.get("finishTime") is not None]
     finished_racers.sort(key=lambda x: x["finishTime"])
-    logger.info("🔍 DEBUG: Total finished racers: %d", len(finished_racers))
+    logger.debug("🔍 DEBUG: Total finished racers: %d", len(finished_racers))
 
     # Update ranks for all finished racers
     for rank, finished_racer in enumerate(finished_racers, 1):
@@ -1190,9 +846,9 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
                 break
 
     # Broadcast the new finisher to all connected WebSocket clients
-    logger.info("🔍 DEBUG: About to broadcast new finisher data")
+    logger.debug("🔍 DEBUG: About to broadcast new finisher data")
     await manager.broadcast(json.dumps({"type": "add", "data": new_finisher}))
-    logger.info("✅ DEBUG: Successfully broadcasted new finisher data")
+    logger.debug("✅ DEBUG: Successfully broadcasted new finisher data")
 
     # Persist leaderboard snapshot after adding a new finisher
     try:
@@ -1220,8 +876,8 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
     Raises:
         HTTPException: Not raised directly here, but invalid time formats return a failure response.
     """
-    logger.info(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
-    logger.info(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
+    logger.debug(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
+    logger.debug(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
     logger.info(
         f"🔍 DEBUG: Original roster has {len(original_roster)} entries: {list(original_roster.keys())}"
     )
@@ -1249,7 +905,7 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
     # Find the finisher by ID
     for i, finisher in enumerate(race_results):
         if finisher["id"] == finisher_id:
-            logger.info(f"🔍 DEBUG: Found finisher at index {i}: {finisher}")
+            logger.debug(f"🔍 DEBUG: Found finisher at index {i}: {finisher}")
 
             # Check if bibNumber has been changed
             original_bib = finisher.get("bibNumber", "")
@@ -1280,7 +936,7 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
                     new_bib,
                 )
             else:
-                logger.info("🔍 DEBUG: Bib not changed - skipping roster lookup")
+                logger.debug("🔍 DEBUG: Bib not changed - skipping roster lookup")
 
             if roster_racer and bib_changed:
                 # Create new finisher object by merging roster data with existing finish data
@@ -1396,7 +1052,7 @@ async def delete_finisher(finisher_id: str) -> Dict[str, Any]:
     Returns:
         A dict indicating success or failure and a message.
     """
-    print(f"Deleting finisher {finisher_id}")
+    logger.debug(f"Deleting finisher {finisher_id}")
 
     # Find and remove the finisher by ID
     for i, finisher in enumerate(race_results):
@@ -1428,7 +1084,7 @@ async def reorder_finishers(order_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         A dict indicating success and a message.
     """
-    print(f"Reordering finishers: {order_data}")
+    logger.debug(f"Reordering finishers: {order_data}")
 
     new_order = order_data.get("order", [])
 
@@ -1478,6 +1134,15 @@ async def start_race_clock() -> Dict[str, Any]:
     """
     global race_clock_state
 
+    if race_clock_state.get("status") == "running":
+        # A second press would silently re-base every time already recorded.
+        # Found in review; the fix is to refuse, loudly, and leave the clock alone.
+        logger.warning("Start Clock pressed while already running; ignored")
+        return {
+            "success": False,
+            "message": "Race clock is already running. Use Reset (with force) to start over.",
+            "data": race_clock_state,
+        }
     current_time = time.time()
     race_clock_state["raceStartTime"] = current_time
     race_clock_state["status"] = "running"
@@ -1563,13 +1228,25 @@ async def edit_race_clock(edit_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.post("/api/clock/reset")
-async def reset_race_clock() -> Dict[str, Any]:
+async def reset_race_clock(force: bool = False) -> Dict[str, Any]:
     """Reset the race clock to its initial stopped state and broadcast the update.
 
     Returns:
         A dict with success flag and the reset race clock state.
     """
     global race_clock_state
+
+    finished = sum(1 for r in race_results if r.get("finishTime") is not None)
+    if finished and not force:
+        # Every recorded time is relative to the clock. Resetting it with
+        # results present makes them all meaningless; require intent.
+        logger.warning("Clock reset refused: %d finishers recorded (pass force=true)", finished)
+        return {
+            "success": False,
+            "message": f"{finished} finisher(s) are recorded against this clock. "
+                       "Reset with force=true if you really mean to invalidate their times.",
+            "data": race_clock_state,
+        }
 
     race_clock_state = {
         "raceStartTime": None,
@@ -1602,7 +1279,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         WebSocketDisconnect: When the client disconnects.
     """
     await manager.connect(websocket)
-    print(
+    logger.debug(
         f"WebSocket client connected. Total clients: {len(manager.active_connections)}"
     )
     try:
@@ -1611,7 +1288,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        print(
+        logger.debug(
             f"WebSocket client disconnected. Total clients: {len(manager.active_connections)}"
         )
 
@@ -1670,384 +1347,42 @@ else:
 
 
 def main() -> None:
-    """Initialize the VideoInferenceProcessor and start the FastAPI/uvicorn server.
+    """Run the results API.
 
-    This function parses CLI arguments, validates inputs, initializes the video processor,
-    and starts the server. It is intended to be invoked when running the module directly.
-
-    Returns:
-        None
-
-    Raises:
-        SystemExit: When argparse fails to parse CLI arguments.
-        Exception: Initialization errors are logged and cause an early return.
+    This process owns results, the clock, the journal, and the site. It does
+    not own a camera or a model: race_cv does, as a separate process that
+    posts finishes here. The flags the launcher passes are the only ones.
     """
-    parser = argparse.ArgumentParser(description="Live Bib Tracking - Unified Server")
+    parser = argparse.ArgumentParser(description="Live bib tracking results API")
+    parser.add_argument("--host", type=str, default="0.0.0.0",
+                        help="Bind address. 0.0.0.0 so the tablet and the pavilion can reach it.")
+    parser.add_argument("--port", type=int, default=8001)
     parser.add_argument(
-        "--video",
-        type=str,
-        default="data/raw/race_1080p.mp4",
-        help="Path to input video file",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="/app/models/last.mlpackage",
-        help="Path to trained YOLO model",
-    )
-    parser.add_argument(
-        "--fps", type=int, default=20, help="Target processing frame rate"
-    )
-    parser.add_argument(
-        "--conf", type=float, default=0.3, help="YOLO confidence threshold"
-    )
-    parser.add_argument(
-        "--host", type=str, default="0.0.0.0", help="Host to bind the server to"
-    )
-    parser.add_argument(
-        "--port", type=int, default=8000, help="Port to bind the server to"
-    )
-    parser.add_argument(
-        "--inference_mode",
-        choices=["test", "live"],
-        default="test",
-        help="Set the inference mode to use a test video file or a live camera stream.",
-    )
-    parser.add_argument(
-        "--camera_index",
-        type=int,
-        default=0,
-        help="The index of the camera to use for live mode (e.g., 0 for built-in, 1 for iPhone).",
-    )
-    parser.add_argument(
-        "--fresh",
-        action="store_true",
+        "--fresh", action="store_true",
         help="Start a new race: archive any saved race state instead of restoring it. "
              "Without this, a restart puts the previous results and clock back.",
     )
     parser.add_argument(
-        "--no-processor",
-        action="store_true",
-        help=(
-            "Run only the results API, WebSocket, and static frontend; do not "
-            "start a video pipeline. Use this when a separate CV service "
-            "(e.g. race_cv) will POST finish events to /api/results instead."
-        ),
+        "--no-processor", action="store_true",
+        help="Accepted for compatibility with start-race-cv.sh; this server never "
+             "runs an in-process pipeline any more.",
     )
+    args = parser.parse_args()
 
+    if not (1 <= args.port <= 65535):
+        logger.error("Invalid port %s; must be 1-65535", args.port)
+        sys.exit(2)
+    app_state["fresh"] = bool(args.fresh)
+
+    logger.info("Starting results API on http://%s:%s", args.host, args.port)
     try:
-        args = parser.parse_args()
-    except SystemExit as e:
-        logger.error(f"Argument parsing failed: {e}")
-        return
-    except Exception as e:
-        logger.error(f"Unexpected error parsing arguments: {e}")
-        return
-
-    app_state["fresh"] = bool(getattr(args, "fresh", False))
-
-    if args.no_processor:
-        if not (1 <= args.port <= 65535):
-            logger.error(
-                f"Invalid port number: {args.port}. Must be between 1 and 65535."
-            )
-            return
-        logger.info(
-            "Running in API-only mode (--no-processor): no video pipeline will "
-            "start here. Expecting an external CV service (e.g. race_cv) to "
-            "POST finish events to /api/results."
-        )
-        app_state["processor"] = None
-        app_state["processor_configured"] = True
-        try:
-            logger.info(f"Starting unified server on http://{args.host}:{args.port}")
-            uvicorn.run(
-                "__main__:app",
-                host=args.host,
-                port=args.port,
-                log_level="info",
-                access_log=True,
-            )
-        except OSError as e:
-            if "Address already in use" in str(e):
-                logger.error(
-                    f"Port {args.port} is already in use. Please try a different port."
-                )
-            else:
-                logger.error(f"Network error starting server: {e}")
-        except KeyboardInterrupt:
-            logger.info("Server stopped by user (Ctrl+C)")
-        except Exception as e:
-            logger.error(f"Unexpected error starting server: {e}")
-            logger.error(f"Error type: {type(e).__name__}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-        return
-
-    # Set video source based on inference mode
-    if args.inference_mode == "live":
-        video_source = args.camera_index
-        logger.info(f"Live Mode: Using camera index {video_source}")
-    else:  # test mode
-        video_source = args.video
-        logger.info(f"Test Mode: Using video file {video_source}")
-
-    # Validate input parameters
-    try:
-        if args.fps <= 0:
-            logger.error(f"Invalid FPS value: {args.fps}. Must be greater than 0.")
-            return
-
-        if not (0.0 <= args.conf <= 1.0):
-            logger.error(
-                f"Invalid confidence threshold: {args.conf}. Must be between 0.0 and 1.0."
-            )
-            return
-
-        if not (1 <= args.port <= 65535):
-            logger.error(
-                f"Invalid port number: {args.port}. Must be between 1 and 65535."
-            )
-            return
-
-    except Exception as e:
-        logger.error(f"Error validating parameters: {e}")
-        return
-
-    # Validate input files exist (skip video validation for live mode)
-    try:
-        model_path = Path(args.model)
-
-        if not model_path.exists():
-            logger.error(f"Model file not found: {args.model}")
-            logger.info("Please check the path and ensure the model file exists.")
-            return
-
-        # if not model_path.is_file():
-        #     logger.error(f"Model path is not a file: {args.model}")
-        #     return
-
-        # Check model file size (basic validation)
-        if model_path.is_file():
-            model_size = model_path.stat().st_size
-            if model_size == 0:
-                logger.error(f"Model file is empty: {args.model}")
-                return
-            logger.info(f"Model file size: {model_size / (1024 * 1024):.1f} MB")
-        else:
-            logger.info(f"Model package found at: {args.model}")
-
-        # Only validate video file for test mode
-        if args.inference_mode == "test":
-            video_path = Path(args.video)
-
-            if not video_path.exists():
-                logger.error(f"Video file not found: {args.video}")
-                logger.info("Please check the path and ensure the file exists.")
-                return
-
-            if not video_path.is_file():
-                logger.error(f"Video path is not a file: {args.video}")
-                return
-
-            # Check video file size (basic validation)
-            video_size = video_path.stat().st_size
-
-            if video_size == 0:
-                logger.error(f"Video file is empty: {args.video}")
-                return
-
-            logger.info(f"Video file size: {video_size / (1024 * 1024):.1f} MB")
-
-    except PermissionError as e:
-        logger.error(f"Permission denied accessing files: {e}")
-        return
-    except Exception as e:
-        logger.error(f"Error validating input files: {e}")
-        return
-
-    # Initialize the video processor with comprehensive error handling
-    try:
-        logger.info("Initializing video processor...")
-        if args.inference_mode == "live":
-            logger.info(f"Live Mode - Camera Index: {video_source}")
-        else:
-            logger.info(f"Test Mode - Video File: {video_source}")
-        logger.info(f"Model: {args.model}")
-        logger.info(f"Target FPS: {args.fps}")
-        logger.info(f"Confidence threshold: {args.conf}")
-
-        # Define callback function to handle race results
-        def result_callback(finisher_data: Dict[str, Any]) -> None:
-            """Callback invoked by the VideoInferenceProcessor when a racer finishes.
-
-            This schedules a call to the internal API endpoint to create the finisher record.
-
-            Args:
-                finisher_data: A dictionary containing finisher information as produced by the processor.
-
-            Returns:
-                None
-
-            Raises:
-                Exception: Any unexpected error during callback processing will be logged.
-            """
-            try:
-                logger.info("🔍 DEBUG: === CALLBACK FUNCTION CALLED ===")
-                logger.info("🔍 DEBUG: Callback received finisher_data: %s", finisher_data)
-
-                # CRITICAL FIX: Call the actual API endpoint instead of manipulating data directly
-                # This ensures the proper WebSocket broadcast happens through the endpoint
-
-                async def call_api_endpoint() -> None:
-                    """Asynchronously call the POST /api/results endpoint handler.
-
-                    Returns:
-                        None
-
-                    Raises:
-                        Exception: Errors from the API endpoint call are logged.
-                    """
-                    try:
-                        logger.info("🔍 DEBUG: CALLBACK - Calling POST /api/results endpoint")
-
-                        # Call the endpoint function directly (since we're in the same process)
-                        result = await update_finish_time(finisher_data)
-
-                        logger.info("✅ DEBUG: CALLBACK - API endpoint returned: %s", result)
-
-                        if result.get("success"):
-                            logger.info(
-                                "✅ DEBUG: CALLBACK - Successfully processed finisher via API endpoint"
-                            )
-                        else:
-                            logger.error(
-                                "❌ DEBUG: CALLBACK - API endpoint failed: %s",
-                                result.get("message", "Unknown error"),
-                            )
-
-                    except Exception as api_error:
-                        logger.error("❌ DEBUG: CALLBACK - Error calling API endpoint: %s", api_error)
-                        logger.error(
-                            "❌ DEBUG: CALLBACK - API error details: %s: %s",
-                            type(api_error).__name__,
-                            str(api_error),
-                        )
-
-                # Schedule the API call in the event loop
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        # Schedule the API call to run in the event loop
-                        # Schedule the API call to run in the event loop
-                        asyncio.run_coroutine_threadsafe(call_api_endpoint(), loop)
-                        logger.info("✅ DEBUG: CALLBACK - Scheduled API call in event loop")
-                    else:
-                        logger.warning(
-                            "Event loop is not running - cannot schedule API call"
-                        )
-                except RuntimeError as e:
-                    logger.warning(f"No event loop available for API call: {e}")
-                    # Fallback: Try to run the API call synchronously (not ideal but better than nothing)
-                    try:
-                        logger.info("🔍 DEBUG: CALLBACK - Attempting synchronous fallback")
-                        # Create a new event loop for this thread
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        new_loop.run_until_complete(call_api_endpoint())
-                        new_loop.close()
-                        logger.info("✅ DEBUG: CALLBACK - Synchronous fallback completed")
-                    except Exception as fallback_error:
-                        logger.error(
-                            f"❌ DEBUG: CALLBACK - Synchronous fallback failed: {fallback_error}"
-                        )
-
-                logger.info("✅ DEBUG: CALLBACK - Callback processing completed")
-
-            except Exception as e:
-                logger.error(f"❌ DEBUG: CALLBACK - Error in result callback: {e}")
-                logger.error(
-                    f"❌ DEBUG: CALLBACK - Exception details: {type(e).__name__}: {str(e)}"
-                )
-
-        processor = VideoInferenceProcessor(
-            model_path=args.model,
-            video_path=video_source,
-            result_callback=result_callback,
-        )
-
-        # Store processor in app state for the web endpoints
-        app_state["processor"] = processor
-        app_state["processor_configured"] = True
-        if args.inference_mode == "live":
-            logger.info("✅ Video processor initialized successfully in Live Mode!")
-        else:
-            logger.info("✅ Video processor initialized successfully in Test Mode!")
-
-    except FileNotFoundError as e:
-        logger.error(f"File not found during processor initialization: {e}")
-        return
-    except ValueError as e:
-        logger.error(f"Invalid value during processor initialization: {e}")
-        return
-    except ImportError as e:
-        logger.error(f"Missing dependency during processor initialization: {e}")
-        logger.info(
-            "Please ensure all required packages are installed (ultralytics, easyocr, opencv-python)"
-        )
-        return
-    except Exception as e:
-        logger.error(f"Unexpected error during processor initialization: {e}")
-        logger.error(f"Error type: {type(e).__name__}")
-
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return
-
-    # Start the FastAPI server with error handling
-    try:
-        logger.info(f"Starting unified server on http://{args.host}:{args.port}")
-        logger.info("This server handles:")
-        logger.info("  - REST API endpoints (/api/*)")
-        logger.info("  - WebSocket connections (/ws)")
-        logger.info("  - Live video stream (/video_feed)")
-        logger.info("  - Admin frontend (static files)")
-        logger.info(
-            "Open your browser and navigate to the server URL to view the live stream"
-        )
-        logger.info("Press Ctrl+C to stop the server")
-
-        uvicorn.run(
-            "__main__:app",
-            host=args.host,
-            port=args.port,
-            log_level="info",
-            access_log=True,
-        )
-
-    except OSError as e:
-        if "Address already in use" in str(e):
-            logger.error(
-                f"Port {args.port} is already in use. Please try a different port."
-            )
-        else:
-            logger.error(f"Network error starting server: {e}")
-        return
-    except KeyboardInterrupt:
-        logger.info("Server stopped by user (Ctrl+C)")
-        return
-    except Exception as e:
-        logger.error(f"Unexpected error starting server: {e}")
-        logger.error(f"Error type: {type(e).__name__}")
-
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return
-    finally:
-        # Cleanup
-        if app_state.get("processor"):
-            try:
-                app_state["processor"].cap.release()
-                logger.info("Video capture resources released")
-            except Exception as e:
-                logger.warning(f"Error releasing video capture: {e}")
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    except OSError as exc:
+        if "address already in use" in str(exc).lower() or getattr(exc, "errno", None) == 48:
+            logger.error("Port %s is already in use. Is a previous API still running? "
+                         "./stop-race-cv.sh, or: lsof -Pi :%s -sTCP:LISTEN", args.port, args.port)
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":

@@ -1,14 +1,10 @@
 #!/bin/bash
 
-# Live Bib Tracking - Stop everything started by start-race-cv.sh (or start-dev.sh)
+# Live Bib Tracking - Stop everything started by start-race-cv.sh
 #
 # Stops, in order:
 #   1. race_cv.run           -- SIGTERM, then wait for it to drain and exit
-#   2. local_server.py       -- API/WS/static server (--no-processor or legacy)
-#   3. run_live_native.sh    -- legacy wrapper, if that's what's running instead
-#   4. the frontend -- the native Vite preview server if start-race-cv.sh
-#      was run with --native-frontend (PID in .frontend.pid), and/or the
-#      Docker container (docker compose down)
+#   2. local_server.py       -- the results API, which also serves the site
 #
 # The ordering matters: race_cv is stopped *before* the API server so any
 # finish event still retrying (e.g. because the race clock wasn't running yet)
@@ -33,7 +29,6 @@ NC='\033[0m'
 
 GRACE_SECONDS=${GRACE_SECONDS:-20}
 FORCE=0
-KEEP_FRONTEND=0
 
 print_usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -41,12 +36,10 @@ print_usage() {
     echo "Options:"
     echo "  -f, --force          Skip the graceful wait; SIGKILL immediately"
     echo "  --grace SECONDS      How long to wait for graceful shutdown (default: 20)"
-    echo "  --keep-frontend      Leave the Docker frontend container running"
     echo "  -h, --help           Show this help message"
     echo ""
-    echo "Stops race_cv, the results API server (local_server.py, either mode),"
-    echo "the legacy run_live_native.sh wrapper if that's what's running, and the"
-    echo "frontend container -- whichever of start-race-cv.sh / start-dev.sh you used."
+    echo "Stops race_cv, then the results API server (local_server.py), which"
+    echo "also serves the site -- everything start-race-cv.sh started."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -58,10 +51,6 @@ while [[ $# -gt 0 ]]; do
         --grace)
             GRACE_SECONDS="$2"
             shift 2
-            ;;
-        --keep-frontend)
-            KEEP_FRONTEND=1
-            shift
             ;;
         -h|--help)
             print_usage
@@ -144,33 +133,10 @@ find_pids RACE_CV_PIDS "race_cv[/.]run"
 stop_pids "race_cv" "${RACE_CV_PIDS[@]}"
 echo ""
 
-# --- 2. the API/results server, whichever mode it's running in ---
+# --- 2. the API/results server, which also serves the site ---
 echo -e "${YELLOW}🐍 Stopping backend (local_server.py)...${NC}"
 find_pids BACKEND_PIDS "api_backend/local_server\.py"
 stop_pids "backend" "${BACKEND_PIDS[@]}"
-echo ""
-
-# --- 3. the legacy wrapper script, if start-dev.sh was used instead ---
-echo -e "${YELLOW}🎬 Stopping run_live_native.sh (if present)...${NC}"
-find_pids NATIVE_PIDS "run_live_native\.sh"
-stop_pids "run_live_native.sh" "${NATIVE_PIDS[@]}"
-echo ""
-
-# --- 4. the frontend: native preview server and/or Docker container ---
-if [[ $KEEP_FRONTEND -eq 1 ]]; then
-    echo -e "${BLUE}Leaving frontend running (--keep-frontend)${NC}"
-else
-    # With --native-frontend the API serves the site itself, so stopping the
-    # API (step 2) already stopped it; only a Docker container is left here.
-    echo -e "${YELLOW}🎨 Stopping frontend container (if any)...${NC}"
-    if docker info >/dev/null 2>&1; then
-        docker compose down
-        echo -e "${GREEN}✅ Frontend container stopped${NC}"
-    else
-        echo -e "${BLUE}  Docker is not running; nothing to stop${NC}"
-    fi
-fi
-
 echo ""
 echo -e "${GREEN}✅ Done.${NC}"
 

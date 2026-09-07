@@ -1,15 +1,13 @@
 #!/bin/bash
 
-# Live Bib Tracking - Hybrid Development Launcher (race_cv pipeline)
+# Live Bib Tracking - Race-day launcher
 #
-# Same shape as start-dev.sh: frontend in Docker, everything else native on
-# macOS. The difference is what runs the pipeline. start-dev.sh launches
-# run_live_native.sh, which runs the legacy VideoInferenceProcessor in-process
-# inside local_server.py -- the pipeline documented in RACE_DAY_ANALYSIS.md as
-# the source of the race-day failures (silently dropped finishers, frame-skip
-# bursts, hardcoded finish-line geometry).
+# Everything runs natively on macOS; nothing is containerised. (The 2025
+# pipeline ran the detector inside the API server's video endpoint and served
+# the site from Docker Desktop -- RACE_DAY_ANALYSIS.md covers why neither
+# survived race day.)
 #
-# This script instead starts:
+# This script starts:
 #   1. local_server.py --no-processor  -- just the results API, WebSocket,
 #      and static frontend. No video pipeline runs inside it.
 #   2. race_cv.run                     -- the standalone CV service, owning
@@ -55,11 +53,7 @@ print_usage() {
     echo "  --fast           With -v, process the file as fast as possible instead"
     echo "                   of at its real frame rate (default is real time, so a"
     echo "                   rehearsal stresses the pipeline the way race day will)"
-    echo "  --native-frontend"
-    echo "                   Skip Docker; the API serves the leaderboard and Live"
-    echo "                   Management itself on the API port, reachable from the"
-    echo "                   pavilion. Frees the 1-2 GB Docker Desktop holds."
-    echo "  --fresh          Start a NEW race: archive the saved results and clock"
+    echo "  --fresh         Start a NEW race: archive the saved results and clock"
     echo "                   instead of restoring them. Without it, a restart puts"
     echo "                   the previous race back (right mid-race, wrong next event)."
     echo "  -h, --help       Show this help message"
@@ -116,11 +110,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --native-frontend)
-            # Serve the built leaderboard with Vite's preview server instead of
-            # a Docker container. Docker Desktop on macOS is a Linux VM that
-            # holds 1-2 GB of an 8 GB machine to serve a static folder; on race
-            # day that memory is worth more to the detector than to a VM.
-            NATIVE_FRONTEND=1
+            # Accepted for muscle memory; this is now the only mode. The
+            # Docker frontend container is gone -- it was a Linux VM holding
+            # 1-2 GB of an 8 GB machine to serve a static folder.
             shift
             ;;
         -h|--help)
@@ -142,7 +134,7 @@ fi
 
 echo -e "${BLUE}🚀 Live Bib Tracking - race_cv Development Setup${NC}"
 echo "=============================================================="
-echo -e "${YELLOW}Frontend:  Docker Container (port 5173)${NC}"
+echo -e "${YELLOW}Frontend:  built once, served by the API (port $PORT)${NC}"
 echo -e "${YELLOW}API/WS:    Native macOS, no video pipeline (port $PORT)${NC}"
 echo -e "${YELLOW}Pipeline:  race_cv, native macOS${NC}"
 
@@ -158,29 +150,28 @@ else
 fi
 echo ""
 
-# Function to check if Docker is running
-check_docker() {
-    echo -e "${YELLOW}🐳 Checking Docker...${NC}"
-    if ! docker info >/dev/null 2>&1; then
-        echo -e "${RED}❌ Docker is not running${NC}"
-        echo -e "${BLUE}💡 Please start Docker Desktop and try again${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}✅ Docker is running${NC}"
-}
 
 # Function to check if ports are available
 check_ports() {
     echo -e "${YELLOW}🔍 Checking port availability...${NC}"
-    # 5173 is not checked here: docker compose owns that port, and
-    # `docker compose up -d --build` is idempotent -- reusing an already-running
-    # frontend container is the normal case, not a conflict. Only the backend
-    # port needs to be free, since that's a plain native process this script
-    # is about to start.
+    # A second race_cv is the one thing worse than none: two detectors post
+    # every finish twice under different event ids, and the API cannot tell.
+    # The API port check below does not catch this when the API has died
+    # and only race_cv is left running.
+    local running
+    running=$(pgrep -f "race_cv\.run" 2>/dev/null | tr '\n' ' ')
+    if [[ -n "$running" ]]; then
+        echo -e "${RED}❌ race_cv is already running (PID $running).${NC}"
+        echo -e "${BLUE}   Two detectors would report every finisher twice.${NC}"
+        echo -e "${BLUE}   Stop it first:  ./stop-race-cv.sh${NC}"
+        exit 1
+    fi
+    # The API port is the only one that has to be free: the site is served
+    # from it too, and race_cv is a client, not a listener.
     if lsof -Pi :"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
         echo -e "${RED}❌ Port $PORT is already in use${NC}"
-        echo -e "${BLUE}💡 If this is a previous run_live_native.sh or race_cv session,${NC}"
-        echo -e "${BLUE}   find it with: lsof -Pi :$PORT -sTCP:LISTEN${NC}"
+        echo -e "${BLUE}💡 If this is a previous session, stop it with ./stop-race-cv.sh,${NC}"
+        echo -e "${BLUE}   or find it with: lsof -Pi :$PORT -sTCP:LISTEN${NC}"
         exit 1
     fi
     echo -e "${GREEN}✅ Port $PORT is available${NC}"
@@ -255,6 +246,9 @@ print(os.environ.get('MODEL_PATH_OVERRIDE') or config.model.path)
     fi
     if [[ ! -e "$effective_model" ]]; then
         echo -e "${RED}❌ Model not found: $effective_model${NC}"
+        echo -e "${BLUE}   models/ is not in git. On a new machine, copy models/ from the race Mac,${NC}"
+        echo -e "${BLUE}   or export from the trained weights:${NC}"
+        echo -e "${BLUE}     python scripts/export_coreml.py --size 512 928${NC}"
         exit 1
     fi
 
@@ -297,38 +291,20 @@ check_memory() {
     echo -e "   ${total_gb} GB total, ~${free_gb} GB reclaimable, swap used ${swap:-?}"
     if awk -v f="$free_gb" 'BEGIN {exit !(f < 1.5)}'; then
         echo -e "${RED}⚠️  Under 1.5 GB reclaimable. Close browsers, editors, Camo's preview"
-        echo -e "   window and any other apps before racing; pass --native-frontend to"
-        echo -e "   avoid Docker Desktop's VM entirely.${NC}"
+        echo -e "   window, Docker Desktop and any other apps before racing.${NC}"
     fi
 }
 
 start_frontend() {
-    if [[ "${NATIVE_FRONTEND:-0}" == "1" ]]; then
-        start_frontend_native
-        return
-    fi
-    echo -e "${YELLOW}🎨 Starting frontend container...${NC}"
-    docker compose up -d --build
-    sleep 3
-    if docker compose ps | grep -q "Up"; then
-        echo -e "${GREEN}✅ Frontend container started successfully${NC}"
-        echo -e "${BLUE}🌐 Frontend available at: http://localhost:5173${NC}"
-    else
-        echo -e "${RED}❌ Failed to start frontend container${NC}"
-        docker compose logs
-        exit 1
-    fi
-}
-
-start_frontend_native() {
-    # Same artefact the container serves (`vite build` -> dist/), served by
-    # Vite's own preview server, which does SPA fallback and needs nothing
-    # installed beyond the existing node_modules. The API base URL is baked
-    # in at build time, so it is built here with localhost rather than the
-    # container's host.docker.internal.
-    echo -e "${YELLOW}🎨 Starting frontend natively (no Docker)...${NC}"
+    # `vite build` -> dist/, which the API then serves itself. Nothing runs
+    # here beyond the build, and only when dist/ is missing or stale.
+    echo -e "${YELLOW}🎨 Building frontend if needed...${NC}"
     if ! command -v npm >/dev/null 2>&1; then
-        echo -e "${RED}❌ npm not found; install Node or drop --native-frontend${NC}"
+        if [[ -f "$(pwd)/src/frontend/dist/index.html" ]]; then
+            echo -e "${YELLOW}   npm not found; serving the existing dist/ as is${NC}"
+            return
+        fi
+        echo -e "${RED}❌ npm not found and no src/frontend/dist/ to serve; install Node${NC}"
         exit 1
     fi
     local fe="$(pwd)/src/frontend"
@@ -355,7 +331,11 @@ start_frontend_native() {
 lan_urls() {
     # What to type into the pavilion TV's browser and the tablet at the line.
     local ip host
-    ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+    # `|| true` throughout: this runs under set -e after every service is
+    # already up, and a missing LAN address or ngrok agent must not abort
+    # the script (it did -- the management commands never printed and the
+    # launcher exited 1 with everything running).
+    ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
     host="$(scutil --get LocalHostName 2>/dev/null).local"
     echo -e "${YELLOW}📺 From other machines on the same network:${NC}"
     [[ -n "$ip" ]] && echo -e "   leaderboard (pavilion TV):   ${BLUE}http://$ip:$PORT/${NC}"
@@ -367,7 +347,7 @@ lan_urls() {
     # never has to hunt for it. See RACE_DAY_RUNBOOK.md, "Who opens what".
     local tunnel
     tunnel=$(curl -s --max-time 1 http://127.0.0.1:4040/api/tunnels 2>/dev/null \
-        | python3 -c "import json,sys; ts=json.load(sys.stdin).get('tunnels',[]); print(ts[0]['public_url'] if ts else '')" 2>/dev/null)
+        | python3 -c "import json,sys; ts=json.load(sys.stdin).get('tunnels',[]); print(ts[0]['public_url'] if ts else '')" 2>/dev/null || true)
     if [[ -n "$tunnel" ]]; then
         echo -e "   pavilion TV (via ngrok):     ${BLUE}$tunnel/${NC}"
     else
@@ -426,10 +406,41 @@ build_race_cv_args() {
 }
 
 start_race_cv_background() {
-    echo -e "${YELLOW}📹 Starting race_cv pipeline natively (background)...${NC}"
+    echo -e "${YELLOW}📹 Starting race_cv pipeline natively (background, supervised)...${NC}"
     build_race_cv_args
+    # --fresh archives the API's saved race; the same must happen to
+    # race_cv's event log, or every unconfirmed event from the last
+    # rehearsal is re-queued on start and lands in the new race as a
+    # finisher (16 of them did, in testing).
+    if [[ "${FRESH:-0}" == "1" ]]; then
+        local event_log rotated
+        event_log=$(grep -A1 '^sink:' "$CONFIG" | grep event_log | awk '{print $2}' || true)
+        event_log=${event_log:-data/results/events.jsonl}
+        if [[ -s "$event_log" ]]; then
+            rotated="${event_log%.jsonl}.$(date +%Y%m%d-%H%M%S).jsonl"
+            mv "$event_log" "$rotated"
+            echo -e "   --fresh: previous event log moved to $rotated"
+        fi
+    fi
+    # Crash-only supervisor. race_cv exits 0 when it was told to stop
+    # (stop-race-cv.sh, 'q' in the preview, end of a file) and that is final.
+    # Any other exit -- error budget exhausted, a wedged frame loop the
+    # watchdog bailed out of, an uncaught crash, the OS killing it -- is
+    # restarted after a short pause, indefinitely: a dead detector at the
+    # finish line is worse than a noisy log. Restarting is safe because the
+    # sink re-queues every unconfirmed event from the event log on start and
+    # the API is idempotent on eventId.
     PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}" \
-        nohup "$RACE_CV_PYTHON" -m race_cv.run "${RACE_CV_ARGS[@]}" \
+        nohup bash -c '
+            py="$1"; shift
+            attempt=0
+            while :; do
+                "$py" -m race_cv.run "$@"; status=$?
+                [ "$status" -eq 0 ] && exit 0
+                attempt=$((attempt + 1))
+                echo "$(date "+%Y-%m-%d %H:%M:%S") SUPERVISOR race_cv exited with status $status; RESTART #$attempt in 5s" >&2
+                sleep 5
+            done' race_cv_supervisor "$RACE_CV_PYTHON" "${RACE_CV_ARGS[@]}" \
         > race_cv.log 2>&1 &
     RACE_CV_PID=$!
     sleep 2
@@ -444,12 +455,6 @@ start_race_cv_background() {
 
 # --- Main execution ---
 echo -e "${BLUE}🔍 Running pre-flight checks...${NC}"
-echo ""
-if [[ "${NATIVE_FRONTEND:-0}" == "1" ]]; then
-    echo -e "${GREEN}✅ Docker not needed (--native-frontend)${NC}"
-else
-    check_docker
-fi
 echo ""
 check_memory
 echo ""
@@ -485,23 +490,16 @@ start_race_cv_background
 echo ""
 echo -e "${GREEN}🎉 All services are running!${NC}"
 echo ""
-if [[ "${NATIVE_FRONTEND:-0}" == "1" ]]; then
-    echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:$PORT (served by the API)"
-else
-    echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:5173 (Docker container)"
-fi
+echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:$PORT (served by the API)"
 echo -e "${BLUE}🔧 API/WS:${NC}    http://localhost:$PORT (native, PID: $API_PID)"
 echo -e "${BLUE}📹 race_cv:${NC}   native, PID: $RACE_CV_PID"
 echo ""
 lan_urls
 echo ""
 echo -e "${YELLOW}📋 Management Commands:${NC}"
-echo -e "${BLUE}  Check frontend status:${NC} docker compose ps"
-echo -e "${BLUE}  Stop frontend:${NC}         docker compose down"
 echo -e "${BLUE}  Tail API logs:${NC}         tail -f api_server.log"
 echo -e "${BLUE}  Tail pipeline logs:${NC}    tail -f race_cv.log"
-echo -e "${BLUE}  Stop API server:${NC}       kill $API_PID"
-echo -e "${BLUE}  Stop race_cv:${NC}          kill $RACE_CV_PID"
-echo -e "${BLUE}  Stop everything:${NC}       docker compose down && kill $API_PID $RACE_CV_PID"
+echo -e "${BLUE}  Stop everything:${NC}       ./stop-race-cv.sh   (race_cv first, so it can drain)"
+echo -e "${BLUE}  Stop race_cv only:${NC}     pkill -TERM -f race_cv.run   (kills the supervisor too)"
 echo ""
 echo -e "${YELLOW}💡 Undelivered finish events, if any, are preserved in $(grep -A1 '^sink:' "$CONFIG" | grep event_log | awk '{print $2}')${NC}"

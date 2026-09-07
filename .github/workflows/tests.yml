@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+    branches: [main, race-day-hardening]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      # The unit tests exercise the pipeline logic with scripted detectors and
+      # fake OCR readers, so they need the light dependencies only. The CoreML
+      # model, EasyOCR weights and the race footage are not in the repo, and
+      # the tests that need them skip themselves.
+      - run: pip install -r requirements-ci.txt
+      - run: python -m pytest tests/ -q

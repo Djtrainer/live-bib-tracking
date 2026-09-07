@@ -42,13 +42,13 @@ a number anyone in the race is wearing.
 ## Live, against the camera
 
 ```bash
-./start-race-cv.sh -c 0 -r data/raw/roster_example.csv --native-frontend
+./start-race-cv.sh -c 0 -r data/raw/roster_example.csv
 ```
 
 - `-c 0` built-in camera, `-c 1` external/iPhone
 - `-r` start-list CSV — needs a `Bib` column, see `data/raw/roster_example.csv`
-- `--native-frontend` skips Docker; the API serves the leaderboard and Live
-  Management itself on port 8001 (see the next section for who opens what)
+- The API serves the leaderboard and Live Management itself on port 8001
+  (see the next section for who opens what); nothing runs in Docker
 - `--preview` opens an annotated window and runs in the foreground. It is
   redrawn at 10fps at half resolution (`--preview-fps`, `--preview-scale` on
   `race_cv.run`). This is not cosmetic: a full-rate, full-res preview cost
@@ -147,7 +147,7 @@ cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then edit the passw
 1. Mac on your phone's hotspot; tablet on the same hotspot. Plug the Mac in.
 2. Start the stack:
    ```bash
-   ./start-race-cv.sh -c 0 -r roster.csv --native-frontend
+   ./start-race-cv.sh -c 0 -r roster.csv
    ```
    It prints the local addresses. Note the IP.
 3. Start the tunnel in a second terminal and leave it open:
@@ -209,7 +209,15 @@ live ones.
 
 Stops `race_cv` first and gives it a graceful drain window, so a finish event
 still retrying gets a chance to land before the API it is retrying against goes
-away. `--keep-frontend` leaves Docker up; `-f` skips the graceful wait.
+away. `-f` skips the graceful wait.
+
+`race_cv` runs under a small supervisor: a deliberate stop (this script, `q`
+in the preview, the end of a file) is final, but any other exit — a crash, an
+exhausted error budget, a wedged frame loop — is restarted after 5 s,
+indefinitely, and the restarted process re-queues every finish the API never
+confirmed. The consequence: `kill <pid>` on the detector alone just gets it
+restarted. Use the stop script, or `pkill -TERM -f race_cv.run`, which takes
+the supervisor with it.
 
 ## A "live" test against a recording
 
@@ -243,6 +251,11 @@ health | processed 739 (14.7 fps) | paced out 576 | source dropped 202 | finishe
 | `ocr … skipped N` | crops dropped because the reader was backed up | climbing steadily |
 | `ocr … late N` | finishes resolved before their reads landed | anything above 0 |
 | `TWO-STAGE FAILING` | second-stage inference is erroring | **ever** — the config is wrong |
+| `frame errors N` | frames skipped because processing raised | a few is a bad frame; 30 in a row stops the process and the supervisor restarts it |
+| `CAMERA SILENT Ns` | the device has produced nothing for N seconds | 2 s+ during the race — check Camo/cable; the capture thread reopens it every 5 s |
+| `reopens N` | times the camera was reopened after a stall | a climbing count is a bad cable or hub |
+| `recovered N` | finishes re-queued from the event log at start | only after a restart; with `--fresh` it should be absent |
+| `EVENT LOG WRITE FAILURES N` | `events.jsonl` cannot be written | **ever** — delivery continues but crash recovery is gone; free disk space |
 
 `source dropped` is the number that matters. It is coverage you lost at the
 line, and it is the thing a fast replay cannot show you.
@@ -312,13 +325,13 @@ swap stall at the line looks exactly like a slow model.
 | frame streamer + API relay | no measurable CPU difference on vs off | keep on for the operator's browser; `stream.target_fps` 8 is fine |
 | Camo Studio + its extension | 20–27% CPU | needed for the iPhone camera; close Camo's own preview window |
 | WindowServer | 18–39% CPU, driven by on-screen windows | no preview window, no Camo preview, no browser on the race Mac |
-| Docker Desktop (frontend container) | a Linux VM holding 1–2 GB to serve a static folder | **`--native-frontend`** — the API serves the same `dist/` itself on 8001, reachable from the pavilion |
+| Docker Desktop | a Linux VM holding 1–2 GB even when idle | quit it; the site is served by the API itself on 8001, nothing needs Docker any more |
 | editors, chat apps, other projects | ~40% CPU and hundreds of MB, measured | close them; they were the load in every profile |
 
 Concretely:
 
 ```bash
-./start-race-cv.sh -c 0 -r roster.csv --native-frontend
+./start-race-cv.sh -c 0 -r roster.csv
 ```
 
 - Plug in. On battery macOS throttles; Low Power Mode throttles harder.
@@ -347,7 +360,7 @@ moment loses at most the change in flight.
 **If the API dies mid-race:** restart it exactly as before —
 
 ```bash
-./start-race-cv.sh -c 0 -r roster.csv --native-frontend
+./start-race-cv.sh -c 0 -r roster.csv
 ```
 
 — and it restores the previous results and clock on its own, logging
@@ -361,13 +374,19 @@ people with the same bib remain possible on purpose.
 **Starting a new race** on a machine that has a saved one:
 
 ```bash
-./start-race-cv.sh -c 0 -r roster.csv --native-frontend --fresh
+./start-race-cv.sh -c 0 -r roster.csv --fresh
 ```
 
 `--fresh` archives the old `race_state.json`, `race_results.txt` and
-`race_log.txt` with a timestamp instead of deleting them. Without it, a
-restart *restores*, which is the right default on race day and the wrong one
-at the next event — the startup log says which happened, loudly.
+`race_log.txt` with a timestamp instead of deleting them, and moves
+`events.jsonl` aside the same way. That last part matters: `race_cv`
+re-queues every unconfirmed event it finds in that log on start, so without
+the rotation the leftovers of the last rehearsal would be delivered into the
+new race as finishers (16 of them were, in testing). If `--fresh` is
+forgotten, unconfirmed events older than 12 hours are ignored with a warning
+rather than re-delivered. Without `--fresh`, a restart *restores*, which is
+the right default on race day and the wrong one at the next event — the
+startup log says which happened, loudly.
 
 **If the race Mac itself dies:** the three files above plus `events.jsonl`
 are on its disk. Copy `data/results/` to another machine, start the API
@@ -385,6 +404,29 @@ line and the race clock. Events are never dropped: they are appended to
 `data/results/events.jsonl` *before* any delivery attempt, and retried until
 the API confirms. On shutdown anything undelivered is printed with bib and
 timestamp.
+
+**`race_cv` restarted on its own** — `race_cv.log` has a `SUPERVISOR ...
+RESTART #n` line with the exit status, and the next health line shows
+`recovered N` for the finishes re-queued from the event log. One restart is
+worth a look at the traceback above it; a restart every minute means
+something structural (a camera that opens and dies, a model that no longer
+loads) and the log will say which.
+
+**`NO FRAMES PROCESSED for Ns`** — the frame loop has stopped while the
+process is alive. If the same line says `camera silent`, the device stopped
+delivering: the capture thread reopens it every 5 s on its own, so check
+Camo, the cable and the phone's lock screen. If the camera is *not* silent,
+the loop is wedged; after 30 s it exits with status 3 and the supervisor
+starts a fresh process.
+
+**`CAMERA SILENT Ns` / `reopens N` in the health line** — same thing, seen
+from the health line. A few reopens after a cable wiggle are fine; a
+climbing count is a bad cable or hub.
+
+**`EVENT LOG WRITE FAILURES N`** — `events.jsonl` cannot be written (disk
+full, permissions). Delivery continues and finishers still reach the
+leaderboard, but a crash would now lose anything undelivered. Free disk space
+before assuming it is safe.
 
 **Pipeline falling behind** (`source dropped` climbing) — lower `target_fps`
 to 15 first; it was 26 dropped there against 36 at 30. Do **not** reach for

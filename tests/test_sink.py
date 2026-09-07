@@ -225,3 +225,69 @@ class TestPendingCountsTheEventBeingRetried:
             assert sink.stats.pending == 0
         finally:
             sink.stop(drain_timeout=0.2)
+
+
+class TestLogWriteFailureCannotKillTheLoop:
+    def test_append_failure_is_counted_and_delivery_still_happens(self, tmp_path):
+        session = FakeSession([FakeResponse({"success": True})])
+        sink = sink_for(tmp_path, session)
+        sink.event_log = tmp_path / "no_such_dir" / "events.jsonl"   # every append fails
+        sink.start()
+        sink.submit(event())                                        # must not raise
+        time.sleep(0.3)
+        try:
+            stats = sink.stats
+            assert stats.delivered == 1
+            assert stats.log_failures >= 1
+            # last_error is delivery state (it clears on success); the log
+            # failure is surfaced through the counter and an ERROR log line.
+            assert stats.last_error is None
+        finally:
+            sink.stop(drain_timeout=0.2)
+
+
+class TestRecoverPendingFromAPreviousRun:
+    def test_pending_events_from_the_log_are_requeued_and_delivered(self, tmp_path):
+        # A previous run logged two events; one was confirmed, one never was.
+        session = FakeSession([FakeResponse({"success": True})] * 5)
+        earlier = sink_for(tmp_path, session)
+        confirmed, lost = event(track_id=1, bib="10"), event(track_id=2, bib="20", ts=1001.0)
+        earlier._append(confirmed, "pending"); earlier._append(confirmed, "delivered")
+        earlier._append(lost, "pending")
+        # New run, same log directory.
+        sink = sink_for(tmp_path, session)
+        assert sink.recover_pending() == 1
+        sink.start()
+        time.sleep(0.3)
+        try:
+            assert sink.stats.delivered == 1
+            assert session.posts[-1]["eventId"] == lost.event_id
+        finally:
+            sink.stop(drain_timeout=0.2)
+
+    def test_nothing_to_recover_is_zero(self, tmp_path):
+        assert sink_for(tmp_path, FakeSession([])).recover_pending() == 0
+
+    def test_start_recovers_automatically(self, tmp_path):
+        session = FakeSession([FakeResponse({"success": True})])
+        sink_for(tmp_path, session)._append(event(bib="30"), "pending")
+        sink = sink_for(tmp_path, session)
+        sink.start(); time.sleep(0.3)
+        try:
+            assert sink.stats.recovered == 1 and sink.stats.delivered == 1
+        finally:
+            sink.stop(drain_timeout=0.2)
+
+    def test_yesterdays_rehearsal_is_not_todays_finisher(self, tmp_path):
+        # A --fresh start rotates the log, but if someone forgets, an
+        # unconfirmed event from a previous day must not be re-delivered
+        # into today's race. In testing, 16 of them were.
+        now = time.time()
+        earlier = sink_for(tmp_path, FakeSession([]))
+        earlier._append(event(track_id=1, bib="10", ts=now - 2 * 24 * 3600), "pending")  # old
+        earlier._append(event(track_id=2, bib="20", ts=now - 600), "pending")            # this race
+        earlier._append(event(track_id=3, bib="30", ts=1000.0), "pending")               # file-relative
+        sink = sink_for(tmp_path, FakeSession([]))
+        assert sink.recover_pending() == 2
+        queued = {sink._queue.get_nowait().bib_number for _ in range(2)}
+        assert queued == {"20", "30"}

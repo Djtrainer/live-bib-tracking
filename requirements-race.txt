@@ -1,0 +1,22 @@
+# The exact versions the race runs on (the bib_env interpreter on the race Mac,
+# captured 2026-09-07). Install into a fresh env with:
+#   pip install -r requirements-race.txt
+# Ranges live in pyproject.toml; this file is the reproducible race-day set.
+ultralytics==8.3.176
+torch==2.7.1
+torchvision==0.22.1
+coremltools==9.0
+easyocr==1.7.2
+opencv-python==4.12.0.88
+numpy==2.2.0
+fastapi==0.116.1
+starlette==0.47.2
+uvicorn==0.35.0
+websockets==15.0.1
+python-multipart==0.0.20
+requests==2.32.4
+PyYAML==6.0.2
+pandas==2.3.0
+python-dotenv==1.1.1
+pytest==9.1.1
+httpx==0.28.1

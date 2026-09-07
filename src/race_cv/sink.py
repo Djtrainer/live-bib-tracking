@@ -25,6 +25,7 @@ The contract here is the opposite:
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
@@ -86,6 +87,8 @@ class SinkStats:
     pending: int = 0
     last_success_ts: float | None = None
     last_error: str | None = None
+    log_failures: int = 0      # durable-log writes that failed (delivery still attempted)
+    recovered: int = 0         # events re-queued from a previous run's log at startup
 
     @property
     def undelivered(self) -> int:
@@ -94,6 +97,10 @@ class SinkStats:
 
 class ResultSink:
     """Append-then-deliver sink with an unbounded retry worker."""
+
+    # Unconfirmed events older than this are not re-queued on start; see
+    # recover_pending(). Class attribute so a test (or an operator) can lower it.
+    recover_max_age_s: float = 12 * 3600
 
     def __init__(self, config: SinkConfig, session=None, clock=time.time):
         self.config = config
@@ -144,9 +151,89 @@ class ResultSink:
         self._queue.put(event)
 
     def _append(self, event: FinishEvent, status: str) -> None:
+        """Append to the durable log. Never raises.
+
+        The log is the backup channel; delivery is the primary one. A full
+        disk or a bad permission must not turn a durability write into the
+        thing that kills the frame loop -- which it did, because submit()
+        runs on the pipeline's thread. Log it, count it, deliver anyway.
+        """
         record = {"status": status, "logged_at": self._clock(), **asdict(event)}
-        with self.event_log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        try:
+            with self.event_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record) + "\n")
+        except Exception as exc:
+            with self._lock:
+                self._stats.log_failures += 1
+                self._stats.last_error = f"event log write failed: {type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).error(
+                "Could not append to %s (%s). The event is still queued for "
+                "delivery, but it will NOT be recoverable from the log.",
+                self.event_log, exc,
+            )
+
+    def recover_pending(self) -> int:
+        """Re-queue events a previous run logged but never got confirmed.
+
+        race_cv dying with finishes still retrying used to require someone
+        to remember scripts/replay_events.py after the race. The API is
+        idempotent on event_id, so re-sending on the next start is safe.
+        Returns the number of events re-queued.
+        """
+        if not self.event_log.is_file():
+            return 0
+        latest: dict[str, dict] = {}
+        delivered: set[str] = set()
+        try:
+            for line in self.event_log.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event_id = record.get("event_id")
+                if not event_id:
+                    continue
+                latest.setdefault(event_id, record)
+                if record.get("status") == "delivered":
+                    delivered.add(event_id)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Could not read %s for recovery: %s", self.event_log, exc)
+            return 0
+        fields = FinishEvent.__dataclass_fields__
+        count = 0
+        stale = 0
+        now = time.time()
+        for event_id, record in latest.items():
+            if event_id in delivered or event_id in self._delivered:
+                continue
+            try:
+                event = FinishEvent(**{k: v for k, v in record.items() if k in fields})
+            except TypeError:
+                continue
+            # An unconfirmed event from yesterday's rehearsal is not a
+            # finisher in today's race. Judge only epoch-like timestamps:
+            # offline replays stamp frames relative to the file start.
+            if event.capture_ts > 1e9 and now - event.capture_ts > self.recover_max_age_s:
+                stale += 1
+                continue
+            self._queue.put(event)
+            count += 1
+        if stale:
+            logging.getLogger(__name__).warning(
+                "Ignored %d unconfirmed event(s) in %s older than %.0fh -- a "
+                "previous race or rehearsal. Start with --fresh to archive the log.",
+                stale, self.event_log, self.recover_max_age_s / 3600,
+            )
+        if count:
+            with self._lock:
+                self._stats.recovered += count
+            logging.getLogger(__name__).warning(
+                "Re-queued %d finish event(s) from %s that a previous run never "
+                "got confirmed", count, self.event_log,
+            )
+        return count
 
     def deliver_once(self, event: FinishEvent) -> tuple[bool, str | None]:
         """Attempt a single delivery. Returns ``(delivered, error)``."""
@@ -218,6 +305,7 @@ class ResultSink:
     def start(self) -> None:
         if self._running:
             return
+        self.recover_pending()
         self._running = True
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()

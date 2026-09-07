@@ -45,5 +45,5 @@ data/error_analysis*.json
 # Private copy of the ngrok traffic policy with the real race-day password
 config/ngrok-policy.local.yml
 
-# Frontend build output; the API serves it, the Dockerfile builds its own
+# Frontend build output; the launcher builds it and the API serves it
 src/frontend/dist/
