@@ -333,20 +333,25 @@ start_frontend_native() {
             npm run build --silent > "$(pwd)/../../frontend_build.log" 2>&1) \
             || { echo -e "${RED}❌ frontend build failed; see frontend_build.log${NC}"; exit 1; }
     fi
-    (cd "$fe" && nohup npx vite preview --port 5173 --host 0.0.0.0 --strictPort \
-        > "$(pwd)/../../frontend.log" 2>&1 &
-     echo $! > "$(pwd)/../../.frontend.pid")
-    for _ in $(seq 1 20); do
-        if curl -s -o /dev/null "http://localhost:5173/"; then
-            echo -e "${GREEN}✅ Frontend serving natively (PID $(cat .frontend.pid))${NC}"
-            echo -e "${BLUE}🌐 Frontend available at: http://localhost:5173${NC}"
-            return 0
-        fi
-        sleep 0.5
-    done
-    echo -e "${RED}❌ Native frontend did not come up. Check frontend.log${NC}"
-    tail -n 20 frontend.log
-    exit 1
+    # No separate server. The API serves dist/ itself on $PORT, which is the
+    # only arrangement that works from other machines: both pages build
+    # their /api and /ws URLs from window.location.host, so a site served
+    # from any other port would need a proxy back to the API. (An earlier
+    # version of this started `vite preview` on 5173 -- it loaded, and every
+    # API call from it failed.)
+    echo -e "${GREEN}✅ Frontend built; the API serves it on port $PORT${NC}"
+}
+
+lan_urls() {
+    # What to type into the pavilion TV's browser and the tablet at the line.
+    local ip host
+    ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+    host="$(scutil --get LocalHostName 2>/dev/null).local"
+    echo -e "${YELLOW}📺 From other machines on the same network:${NC}"
+    [[ -n "$ip" ]] && echo -e "   leaderboard (pavilion TV):   ${BLUE}http://$ip:$PORT/${NC}"
+    [[ -n "$ip" ]] && echo -e "   Live Management (tablet):    ${BLUE}http://$ip:$PORT/admin${NC}"
+    echo -e "   or by name:                  ${BLUE}http://$host:$PORT/${NC}  (mDNS; some hotspots block it -- use the IP)"
+    [[ -z "$ip" ]] && echo -e "${RED}   no LAN address on en0/en1 -- join the same Wi-Fi/hotspot as the pavilion machine${NC}"
 }
 
 start_api_server() {
@@ -452,6 +457,8 @@ echo ""
 echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:5173 (Docker container)"
 echo -e "${BLUE}🔧 API/WS:${NC}    http://localhost:$PORT (native, PID: $API_PID)"
 echo -e "${BLUE}📹 race_cv:${NC}   native, PID: $RACE_CV_PID"
+echo ""
+lan_urls
 echo ""
 echo -e "${YELLOW}📋 Management Commands:${NC}"
 echo -e "${BLUE}  Check frontend status:${NC} docker compose ps"

@@ -33,6 +33,9 @@ interface EditingCell {
 }
 
 export default function AdminDashboard() {
+  // Bumped when the WebSocket drops; re-runs the connection effect (fresh
+  // socket + fresh fetch). See Index.tsx.
+  const [wsGen, setWsGen] = useState(0);
   const [finishers, setFinishers] = useState<Finisher[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
@@ -106,6 +109,7 @@ export default function AdminDashboard() {
     // Set up WebSocket connection for real-time updates
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    let cancelled = false;   // set by cleanup so an intentional close never reconnects
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
@@ -161,6 +165,9 @@ export default function AdminDashboard() {
     
     ws.onclose = () => {
       console.log('WebSocket connection closed');
+      if (!cancelled) {
+        setTimeout(() => setWsGen((g) => g + 1), 2000);
+      }
     };
     
     ws.onerror = (error) => {
@@ -168,9 +175,10 @@ export default function AdminDashboard() {
     };
 
     return () => {
+      cancelled = true;
       ws.close();
     };
-  }, []);
+  }, [wsGen]);
 
   // Auto-scroll to bottom of results
   const scrollToBottom = () => {

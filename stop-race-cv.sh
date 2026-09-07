@@ -160,21 +160,8 @@ echo ""
 if [[ $KEEP_FRONTEND -eq 1 ]]; then
     echo -e "${BLUE}Leaving frontend running (--keep-frontend)${NC}"
 else
-    # start-race-cv.sh --native-frontend records the Vite preview server's
-    # PID here instead of starting a container.
-    if [[ -f .frontend.pid ]]; then
-        fe_pid=$(cat .frontend.pid)
-        if kill -0 "$fe_pid" 2>/dev/null; then
-            echo -e "${YELLOW}🎨 Stopping native frontend (PID $fe_pid)...${NC}"
-            kill "$fe_pid" 2>/dev/null || true
-            sleep 1
-            kill -0 "$fe_pid" 2>/dev/null && kill -9 "$fe_pid" 2>/dev/null || true
-            echo -e "${GREEN}✅ Native frontend stopped${NC}"
-        fi
-        rm -f .frontend.pid
-    fi
-    # vite preview spawns a child that can outlive the recorded PID.
-    pkill -f "vite preview --port 5173" 2>/dev/null || true
+    # With --native-frontend the API serves the site itself, so stopping the
+    # API (step 2) already stopped it; only a Docker container is left here.
     echo -e "${YELLOW}🎨 Stopping frontend container (if any)...${NC}"
     if docker info >/dev/null 2>&1; then
         docker compose down

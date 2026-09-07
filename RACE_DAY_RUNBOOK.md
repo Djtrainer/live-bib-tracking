@@ -65,6 +65,43 @@ a browser tab cannot affect race timing.
 Watch at `http://localhost:5173` (leaderboard) or `http://localhost:8001`
 (raw annotated stream).
 
+## The pavilion TV and the tablet at the line
+
+The leaderboard and Live Management are two pages of **one site served by
+the API** — `/` and `/admin` on port 8001. Any browser on the same network
+can open either; nothing needs configuring per machine, and nothing needs
+screen sharing. The launcher prints the addresses at startup:
+
+```
+📺 From other machines on the same network:
+   leaderboard (pavilion TV):   http://10.0.0.81:8001/
+   Live Management (tablet):    http://10.0.0.81:8001/admin
+   or by name:                  http://dans-macbook-air.local:8001/
+```
+
+**Do not screen-share the leaderboard from the race Mac.** A Google Meet
+share is a browser tab encoding the screen at up to 30 fps — a large slice of
+a core and hundreds of MB on a machine that already pages under the
+pipeline — for a blurrier, laggier picture than the pavilion opening the
+page itself.
+
+Setup:
+
+- **Network.** Both machines on one network. A phone hotspot both join is
+  simplest where there is signal; otherwise a Wi-Fi router at the booth or
+  an outdoor access point. Plain Ethernet is good to ~100 m, so 300 yards
+  needs a switch mid-run. Some hotspots block mDNS, so prefer the IP over
+  the `.local` name.
+- **Pavilion machine.** Anything with a browser, hard-wired to the TV. Open
+  the leaderboard URL, full screen (Chrome: `chrome --kiosk <url>`, or
+  press F11). If the network drops, the page keeps showing the last results
+  and **reconnects on its own** every 2 s, re-fetching everything it missed.
+- **Finish line.** Live Management on a tablet or a second laptop, *not* a
+  browser on the race Mac. Manual add, bib correction, and the clock all
+  live there and work from anywhere on the network.
+- **Docker is unnecessary** for this. `--native-frontend` builds the site and
+  the API serves it; the 5173 container remains only for `start-dev.sh`.
+
 ## Stopping
 
 ```bash
@@ -176,7 +213,7 @@ swap stall at the line looks exactly like a slow model.
 | frame streamer + API relay | no measurable CPU difference on vs off | keep on for the operator's browser; `stream.target_fps` 8 is fine |
 | Camo Studio + its extension | 20–27% CPU | needed for the iPhone camera; close Camo's own preview window |
 | WindowServer | 18–39% CPU, driven by on-screen windows | no preview window, no Camo preview, no browser on the race Mac |
-| Docker Desktop (frontend container) | a Linux VM holding 1–2 GB to serve a static folder | **`--native-frontend`** — Vite serves the same `dist/` natively |
+| Docker Desktop (frontend container) | a Linux VM holding 1–2 GB to serve a static folder | **`--native-frontend`** — the API serves the same `dist/` itself on 8001, reachable from the pavilion |
 | editors, chat apps, other projects | ~40% CPU and hundreds of MB, measured | close them; they were the load in every profile |
 
 Concretely:

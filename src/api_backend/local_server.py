@@ -26,7 +26,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from image_processor.utils import get_logger
@@ -376,6 +376,11 @@ async def root() -> HTMLResponse:
         Exception: Unexpected errors while generating the HTML response will propagate as
             HTTP errors handled by FastAPI.
     """
+    # When the built frontend is present, "/" is the leaderboard -- the page
+    # the pavilion TV opens. The viewer page below is the fallback when it
+    # is not built.
+    if _FRONTEND_DIST is not None:
+        return FileResponse(_FRONTEND_DIST / "index.html")
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -1541,23 +1546,55 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         )
 
 
-# Mount the frontend dist directory to serve static files (index.html, etc.)
-# Use different paths for development vs production (Docker)
-static_dir = None
-if os.path.exists("../frontend/dist"):
-    # Development mode - running from src/api_backend
-    static_dir = "../frontend/dist"
-elif os.path.exists("frontend/dist"):
-    # Production mode - running from Docker container
-    static_dir = "frontend/dist"
+# Serve the built frontend from this same server, so the leaderboard and the
+# Live Management page are reachable from ANY machine on the network at
+# http://<this-host>:<port>/ and /admin -- the pavilion TV, a tablet at the
+# finish line -- with no screen sharing and no per-machine configuration.
+#
+# Why here rather than a separate static server: both pages build their API
+# and WebSocket URLs from window.location.host, i.e. strictly same-origin.
+# A site served from a different port only works if that server proxies
+# /api and /ws back here. Serving from here makes that a non-problem.
+#
+# dist/ is resolved relative to THIS FILE, not the working directory. The
+# previous lookup ("../frontend/dist" or "frontend/dist") depended on where
+# the process was started from and found nothing when launched from the
+# repo root, which is how start-race-cv.sh launches it.
+_FRONTEND_DIST = None
+for _candidate in (
+    Path(__file__).resolve().parents[1] / "frontend" / "dist",
+    Path("../frontend/dist"),
+    Path("frontend/dist"),
+):
+    if (_candidate / "index.html").is_file():
+        _FRONTEND_DIST = _candidate.resolve()
+        break
 
-# Only mount static files if the directory exists
-if static_dir and os.path.exists(static_dir):
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
-    logger.info(f"Mounted static files from: {static_dir}")
+if _FRONTEND_DIST is not None:
+    logger.info(f"Serving the frontend from {_FRONTEND_DIST}")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def _frontend(path: str):
+        """Static files from dist/, and index.html for everything else.
+
+        Registered last, so every API route above wins first. Unknown paths
+        get index.html because the React app owns its own routes (/admin):
+        a plain static mount 404s on them, which is exactly what happened.
+        """
+        if path.startswith(("api/", "ws", "video_feed")):
+            raise HTTPException(status_code=404)
+        candidate = (_FRONTEND_DIST / path).resolve() if path else None
+        if (
+            candidate is not None
+            and str(candidate).startswith(str(_FRONTEND_DIST))
+            and candidate.is_file()
+        ):
+            return FileResponse(candidate)
+        return FileResponse(_FRONTEND_DIST / "index.html")
 else:
     logger.warning(
-        "Frontend dist directory not found - static files will not be served"
+        "Frontend dist directory not found - static files will not be served. "
+        "Build it with: (cd src/frontend && npm run build)"
     )
     logger.info("The server will still provide API endpoints and video streaming")
 

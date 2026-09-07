@@ -20,6 +20,11 @@ interface TeamScore {
 }
 
 const Index = () => {
+  // Bumped when the WebSocket drops, which re-runs the connection effect:
+  // a fresh socket AND a fresh fetch of results, so the pavilion TV catches
+  // up on anything it missed while the network was down instead of going
+  // silently stale for the rest of the race.
+  const [wsGen, setWsGen] = useState(0);
   const [finishers, setFinishers] = useState<Finisher[]>([]);
   const [totalFinishers, setTotalFinishers] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
@@ -128,6 +133,7 @@ const Index = () => {
     // Set up WebSocket connection for real-time updates
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    let cancelled = false;   // set by cleanup so an intentional close never reconnects
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
@@ -231,6 +237,9 @@ const Index = () => {
     
     ws.onclose = () => {
       console.log('WebSocket connection closed');
+      if (!cancelled) {
+        setTimeout(() => setWsGen((g) => g + 1), 2000);
+      }
     };
     
     ws.onerror = (error) => {
@@ -238,9 +247,10 @@ const Index = () => {
     };
 
     return () => {
+      cancelled = true;
       ws.close();
     };
-  }, []);
+  }, [wsGen]);
 
   return (
     <Layout totalFinishers={totalFinishers} lastUpdated={lastUpdated}>
