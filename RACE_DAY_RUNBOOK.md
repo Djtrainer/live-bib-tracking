@@ -311,6 +311,8 @@ All in `config/race_cv.yaml`.
 | `finish_line.handoff_window_s` | 1.0 | Recovers a crossing when the tracker issues a new id right at the line — a racer reaching a close camera gets large and clipped, and ByteTrack breaks the track a few frames short. Both genuine misses on the 13-clip set were this; both are found now. A track born past the line within this window of an approaching track vanishing nearby is treated as its continuation. Widen only if `handed off` stays 0 while racers are still being missed at the line; 0 disables it. |
 | `ocr.crop_padding` | 15 | Tested 15/30/50; all read correctly with a roster loaded. Not a lever worth pulling. |
 | `stream.enabled` | true | Browser preview. Disable if bandwidth or CPU is tight; it cannot slow detection either way. |
+| `ocr.min_votes_off_roster` | 2 | With a roster loaded, a number not on it needs two agreeing reads to win; one stray read is what a bibless racer looks like. **Load the full roster on race day** — on the 14-clip set, bib 76 resolved only once it was on the list. |
+| `ocr.snap_fragments_to_roster` | true | An off-roster winner of 2+ digits that is one digit short of exactly one roster bib is a clipped bib and resolves to it (bib 120 read as "20" twice with an arm over the first digit). Fragments several roster bibs could own are left as read; single digits never snap. |
 
 ## Race-day lean mode: where the compute actually goes
 

@@ -192,3 +192,55 @@ class TestOffRosterNeedsAgreement:
         v = self._voter(min_votes=1)
         v.add(1, read("1", ocr=0.85))
         assert v.resolve(1).text == "1"
+
+
+class TestClippedBibSnapsToRoster:
+    """Seen on the 14-clip set: bib 120 crossed with an arm over the first
+    digit, read "20" twice and nothing else, and "20" won. With a roster
+    loaded, a fragment that exactly one roster bib starts or ends with is
+    that bib; a fragment several bibs could own is left as read."""
+
+    def _voter(self, roster, snap=True):
+        return BibVoter(OcrConfig(lock_conf=0.99, snap_fragments_to_roster=snap),
+                        roster=roster)
+
+    def test_suffix_fragment_of_one_roster_bib_resolves_to_it(self):
+        v = self._voter({"120", "121", "225"})
+        v.add(1, read("20", ocr=0.9)); v.add(1, read("20", ocr=0.8))
+        verdict = v.resolve(1)
+        assert verdict.text == "120"
+        assert verdict.in_roster
+
+    def test_prefix_fragment_works_the_same_way(self):
+        v = self._voter({"120", "121", "225"})
+        v.add(1, read("22", ocr=0.9)); v.add(1, read("22", ocr=0.8))
+        assert v.resolve(1).text == "225"
+
+    def test_ambiguous_fragment_is_left_as_read(self):
+        v = self._voter({"120", "220", "225"})
+        v.add(1, read("20", ocr=0.9)); v.add(1, read("20", ocr=0.8))
+        verdict = v.resolve(1)
+        assert verdict.text == "20"
+        assert not verdict.in_roster
+
+    def test_snap_can_be_disabled(self):
+        v = self._voter({"120", "121", "225"}, snap=False)
+        v.add(1, read("20", ocr=0.9)); v.add(1, read("20", ocr=0.8))
+        assert v.resolve(1).text == "20"
+
+    def test_a_real_off_roster_number_is_not_snapped(self):
+        v = self._voter({"120", "121", "225"})
+        v.add(1, read("77", ocr=0.9)); v.add(1, read("77", ocr=0.8))
+        assert v.resolve(1).text == "77"
+
+    def test_a_single_digit_never_snaps(self):
+        """The bibless-racer bug must not come back through this door: a
+        stray "1" is a prefix of every bib in the 100s."""
+        v = BibVoter(OcrConfig(lock_conf=0.99, min_votes_off_roster=1), roster={"120", "225"})
+        v.add(1, read("1", ocr=0.85))
+        assert v.resolve(1).text == "1"
+
+    def test_two_missing_digits_is_not_a_clipped_bib(self):
+        v = self._voter({"1234", "225"})
+        v.add(1, read("34", ocr=0.9)); v.add(1, read("34", ocr=0.8))
+        assert v.resolve(1).text == "34"

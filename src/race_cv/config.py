@@ -205,6 +205,12 @@ class OcrConfig:
     # Two agreeing off-roster reads are kept as evidence the roster is
     # incomplete; one is noise. Set to 1 to restore the old behaviour.
     min_votes_off_roster: int = 2
+    # An off-roster winner of 2+ digits that is exactly one digit short of
+    # exactly one roster bib, at either end, is a clipped bib ("20" for 120,
+    # an arm over the first digit) and resolves to that bib. Fragments that
+    # several roster bibs could own are left as read, so the operator sees
+    # an off-roster number, not a wrong racer. Single digits never snap.
+    snap_fragments_to_roster: bool = True
 
     # Read bibs on a background thread instead of inline in the frame loop.
     # An EasyOCR read costs ~27ms and fires only when a bib is legible, i.e.

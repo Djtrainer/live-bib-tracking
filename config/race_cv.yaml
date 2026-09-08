@@ -139,6 +139,15 @@ ocr:
   crop_padding: 15
   target_height: 120
 
+  # With a roster loaded, a number NOT on it needs this many agreeing reads
+  # to be the verdict (one stray read is what a bibless racer looks like
+  # after a few hundred frames of OCR on a logo). And an off-roster winner
+  # of 2+ digits that is exactly one digit short of exactly ONE roster bib
+  # is a clipped bib -- "20" read twice with 120 on the list -- and
+  # resolves to that bib. Ambiguous fragments are left as read.
+  min_votes_off_roster: 2
+  snap_fragments_to_roster: true
+
   # Read bibs on a background thread. A read costs ~27ms and only fires when a
   # bib is legible -- which is to say at the finish line. Inline, that pushed a
   # crossing frame to ~76ms against a 66ms budget at 15fps, so the pipeline fell

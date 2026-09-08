@@ -115,9 +115,13 @@ the launcher builds `dist/` when it is stale and the API serves it.
 
 ## What the numbers are
 
-Measured on the race machine (M2, 8 GB) against 13 recorded clips with 23
-finishers: **22/23 found, 0 genuine ghosts, 22/22 bibs right**. The one miss
-is an expectation written past the end of its clip. The tracking loop runs in
+Measured on the race machine (M2, 8 GB) against 14 recorded clips with 26
+finishers, paced in real time: **25/26 found, 0 genuine ghosts** (the two
+flagged are real crossings the expectations file omits), median time drift
+0.4 s. The one miss is an expectation sitting on the final frame of its
+clip. Bibs: 22/25 with the three-bib example roster — one clipped 120 read
+as "20" (now resolved by the roster snap), and two racers off that roster,
+one of whom resolves as soon as they are on it. The tracking loop runs in
 ~20 ms against a 33 ms budget at 30 fps, and the race-day path processes
 ~99.5% of frames. `RACE_DAY_ANALYSIS.md` has the measurements behind each
 decision.

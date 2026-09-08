@@ -270,9 +270,32 @@ class BibVoter:
                     return BibVerdict(text=None, score=0.0, votes=len(reads), locked=False)
 
         winner = max(scores, key=scores.get)
+        if (
+            self.roster
+            and winner not in self.roster
+            and self.config.snap_fragments_to_roster
+            and len(winner) >= 2
+        ):
+            # A clipped bib reads as a fragment: an arm over the first digit
+            # turns 120 into "20", twice, and "20" then beats nothing. When
+            # exactly one roster bib is that fragment plus ONE more digit at
+            # either end, that bib is the answer. Anything looser is the
+            # bibless-racer bug in a new coat: a stray "1" is a prefix of
+            # every bib in the 100s, so a fragment must be at least two
+            # digits and one digit short, not a substring. When several
+            # bibs qualify (a 300-bib list makes "20" fit 120, 220, 320...)
+            # the fragment is left as read, so the operator sees an
+            # off-roster number rather than a wrong racer.
+            owners = [
+                bib for bib in self.roster
+                if len(bib) == len(winner) + 1
+                and (bib.startswith(winner) or bib.endswith(winner))
+            ]
+            if len(owners) == 1:
+                winner = owners[0]
         return BibVerdict(
             text=winner,
-            score=scores[winner],
+            score=scores.get(winner, max(scores.values())),
             votes=len(reads),
             locked=False,
             in_roster=winner in self.roster,
