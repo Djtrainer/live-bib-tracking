@@ -87,6 +87,20 @@ def main(argv=None) -> int:
         help="Build without FP16. The default is FP16, which is what the Orin's "
              "tensor cores are for; FP32 exists to measure the difference.")
     parser.add_argument(
+        "--nms", action="store_true",
+        help="Bake NMS into the engine (ultralytics nms=True, an 'end2end' export). "
+             "The engine then returns final boxes and ultralytics skips its own "
+             "torch NMS, which costs ~4 ms per frame on the Orin's CPU-side "
+             "launch overhead. conf/iou are frozen at export from --conf/--iou.")
+    parser.add_argument("--conf", type=float, default=0.25, help="NMS confidence baked in with --nms")
+    parser.add_argument("--iou", type=float, default=0.7, help="NMS IoU baked in with --nms")
+    parser.add_argument(
+        "--opset", type=int, default=17,
+        help="ONNX opset for the intermediate export. Pinned because ultralytics "
+             "8.3.176's 'latest opset' probe reads torch.onnx attributes that torch "
+             "2.9 no longer exposes and falls back to 10, which cannot express "
+             "torchvision::nms (opset 11+). 17 is what TensorRT 10 expects.")
+    parser.add_argument(
         "--workspace", type=float, default=2.0,
         help="TensorRT workspace in GiB. Bounded on purpose: the default "
              "(auto) lets the builder take everything on an 8 GB board.")
@@ -104,7 +118,8 @@ def main(argv=None) -> int:
         print(f"weights not found: {weights}", file=sys.stderr)
         return 1
     precision = "fp32" if args.fp32 else "fp16"
-    out = Path(args.out or f"models/exports/trt_{width}x{height}_{precision}.engine")
+    suffix = "_nms" if args.nms else ""
+    out = Path(args.out or f"models/exports/trt_{width}x{height}_{precision}{suffix}.engine")
     if out.exists() and not args.force:
         print(f"{out} exists; pass --force to replace it", file=sys.stderr)
         return 1
@@ -141,6 +156,10 @@ def main(argv=None) -> int:
             dynamic=False,
             simplify=True,
             workspace=args.workspace,
+            opset=args.opset,
+            nms=args.nms,
+            conf=args.conf,
+            iou=args.iou,
             verbose=False,
         )
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -161,7 +180,8 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             return 1
         print(f"wrote {out}  (input {shape} {dtype}, "
-              f"{out.stat().st_size / 1e6:.1f} MB, metadata imgsz {metadata.get('imgsz')})")
+              f"{out.stat().st_size / 1e6:.1f} MB, metadata imgsz {metadata.get('imgsz')}, "
+              f"nms {metadata.get('args', {}).get('nms')})")
     print(f"\nconfig/race_cv.jetson.yaml:\n  model:\n    path: {out}\n"
           f"    imgsz: [{height}, {width}]\n    device: cuda:0\n    half: {'false' if args.fp32 else 'true'}")
     return 0

@@ -128,6 +128,18 @@ static shape, 2 GiB workspace). Engines live in `models/exports/`
 | engine | command | build time | peak RAM during build (tegrastats) |
 |---|---|---|---|
 | `trt_928x512_fp16.engine` (8.6 MB) | `YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 512 928` | 334 s engine generation, 348 s total | 6168 MB of 7485 (desktop session idle ~3.1-3.9 GB of that), GR3D 99%, tj 58 C |
+| `trt_1280x736_fp16.engine` (8.6 MB) | `... --size 736 1280` | 359 s | 6390 MB, tj 59 C |
+| `trt_1376x768_fp16.engine` (7.9 MB) | `... --size 768 1376` (the ROI crop is 1383x756; nearest multiples of 32) | 355 s | 6390 MB |
+| `trt_1920x1088_fp16.engine` (8.2 MB) | `... --size 1088 1920` | 399 s | **6802 MB of 7485**, tj 61 C -- the closest call; the builder itself sat at ~2.4 GB RSS on top of the desktop session |
+| `trt_640x640_fp16.engine` (8.6 MB) | `... --size 640 640` (second stage) | 331 s | 6802 MB window |
+| `trt_928x512_fp32.engine` (12.8 MB) | `... --size 512 928 --fp32` | 115 s | -- |
+
+All built with the desktop session (gnome-shell, Cursor server, update
+manager) resident: ~3.5-4.9 GB in use before the builder started, no swap.
+Nothing was OOM-killed, but 1920x1088 left under 700 MB free. On a board
+that runs headless there would be 3 GB more headroom; on this one, build
+one engine at a time (the chain script did) and do not run the race
+stack while building.
 
 Notes on the engine: the input binding stays `FLOAT` (fp32) with FP16
 layers inside, which is how ultralytics builds `half=True` engines;
@@ -319,3 +331,99 @@ camera offers `MJPG 1920x1080 @ 60`):
 PYTHONPATH=src .venv/bin/python -m race_cv.run --config config/race_cv.jetson.yaml -r roster.csv --source \
   'v4l2src device=/dev/video0 io-mode=2 ! image/jpeg,width=1920,height=1080,framerate=60/1 ! jpegparse ! nvv4l2decoder mjpeg=1 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true max-buffers=1'
 ```
+
+## 2. Detector cost matrix
+
+`scratchpad/run_matrix.sh` -> `scripts/bench_detector.py`, reference clip
+`14-48-12` frames 930-1529 (the 36 s crossing: one runner approaching,
+spectators in shot), race config with the OCR worker running, roster
+loaded, **MAXN_SUPER, DVFS (no `jetson_clocks`)**, `model.cv2_threads: 4`
+unless marked t0. "loop" is `Pipeline.process()` -- what a frame costs the
+frame loop; "e2e" adds the CPU HEVC decode (5.7 ms), which a camera
+source would not pay in this form.
+
+| configuration | detector median / p90 | **loop median / p90 / mean** | fps at loop median | e2e fps flat out | people / bib boxes in 600 frames |
+|---|---|---|---|---|---|
+| 928x512 FP16 crop, cv2 threads 0 (the Mac config, as shipped) | 19.4 / 21.0 ms | 19.5 / 21.1 / 19.8 | 51 | 38.4 | 79 / 53 |
+| **928x512 FP16 crop**, threads 4 | 15.8 / 17.4 | **15.9 / 17.5 / 16.1** | **63** | 45.0 | 79 / 53 |
+| 928x512 FP32 crop, threads 4 | 19.6 / 21.2 | 19.7 / 21.3 / 19.9 | 51 | 38.8 | 80 / 53 |
+| 1280x736 FP16 crop | 23.5 / 24.0 | 23.6 / 24.2 / 23.7 | 42 | 34.0 | 544 / 84 |
+| **1376x768 FP16 crop (native)** | 20.9 / 25.2 | **21.0 / 25.4 / 22.6** (max 136) | 48 | 35.3 | 161 / 94 |
+| 1920x1088 FP16 full frame, ROI off | 30.3 / 34.7 | 30.4 / 34.8 / 31.8 (max 153) | 33 | 26.6 | 147 / 92 |
+| 928x512 FP16 + two-stage 640x640 on each runner | 16.0 / 17.5 | 16.1 / **30.2** / 17.9 | 62 | 41.6 | 79 / 82 (+29 from the second stage) |
+
+Readings:
+
+- **FP16 vs FP32 at 928x512: 3.8 ms.** The FP32 engine's inference is ~9 ms
+  against ~5 ms; everything else is identical. FP16 everywhere.
+- **What clears 30 fps (33 ms) with margin:** 928x512, 1376x768 and
+  1280x736 all do, with p90s of 17.5, 25.4 and 24.2 ms. The full
+  1920x1088 frame does not: 30.4 ms median, 34.8 ms p90 -- it would drop
+  frames at every crossing.
+- **What clears 60 fps (16.7 ms):** only 928x512, and only at the median
+  (15.9 ms; p90 17.5). That is not margin. Nothing else is close.
+- **1376x768 is cheaper than 1280x736** despite more pixels: the 1280
+  input scales the 1383-wide crop by 0.925, which makes objects ~1.4x
+  their training scale and the detector fires on far more small people
+  (544 person boxes vs 161), and NMS/ByteTrack cost grows with candidates.
+  At 1376x768 the crop is fed at ~1:1 (scale 0.995). Neither number says
+  which is *right* -- the smoke test does.
+- **Two-stage is nearly free at the median and expensive at the tail:**
+  +0.2 ms median, but p90 30 ms because a frame with a runner in it pays a
+  640x640 pass per crop (~14 ms each). Mean 17.9 ms. Affordable at 30 fps.
+- Inference is 5 ms of every one of these; the rest is CPU glue. Preprocess
+  (resize, transpose, upload) and NMS/sync are the two remaining blocks,
+  and the next experiment (an engine with NMS inside TensorRT) targets the
+  second.
+
+### 60 fps ingestion on real 60 fps footage
+
+The one 60 fps recording (`2026-09-05 15-11-20`, 15.3 s, 920 frames, no
+expectations file entry) played in real time with `target_fps: 60`,
+`confirm_frames: 16`, `min_observations: 10` and a 240-frame
+`track_buffer` (the 30 fps values doubled), `scratchpad/run_60fps.sh`:
+
+| config | health line at end of clip |
+|---|---|
+| 928x512 FP16, threads 4 | `processed 698 (45.9 fps) \| source dropped 222 \| finishers 1` |
+| 1280x736 FP16 | `processed 483 (31.8 fps) \| source dropped 437 \| finishers 1` |
+
+So a 60 fps *file* is consumed at 46 fps at 928x512, with a quarter of
+the frames dropped. Two caveats that go opposite ways: (1) a file source
+decodes HEVC on the frame-loop thread (5.7 ms/frame), which a camera does
+not -- the capture thread decodes on its own core -- so the loop alone
+(15.9 ms median) sits right at the 16.7 ms a 60 fps camera allows;
+(2) "right at" means p90 17.5 ms, which is over. Verdict from throughput:
+**60 fps is not affordable with margin at any size today.** It becomes
+affordable at 928x512 only if the loop loses ~4 ms, which is what the
+end2end-NMS engine below is for.
+
+### MJPEG decode, quiet board (final numbers)
+
+Same 120 q85 frames, nothing else running:
+
+| decode path | ms/frame | fps |
+|---|---|---|
+| `cv2.imdecode` (CPU; OpenCV's V4L2 backend does this for an MJPEG camera) | 23.5 | 43 |
+| GStreamer `jpegdec` (CPU) → `videoconvert` | 26.2 | 38 |
+| GStreamer `nvjpegdec` → `nvvidconv` → `videoconvert` | 22.3 | 45 |
+| **GStreamer `nvv4l2decoder mjpeg=1` → `nvvidconv` BGRx → `videoconvert` BGR** | **10.8** | **93** |
+
+A 1080p60 MJPEG camera opened by index (`cv2.VideoCapture(0)`) would be
+decoded on the CPU at ~43 fps -- it cannot even reach 60, and it would
+take a whole core from the frame loop while trying. Through
+`nvv4l2decoder mjpeg=1` the JPEG engine does it at 93 fps and the CPU pays
+only the BGRx→BGR conversion. That is the pipeline string quoted above,
+and it is the reason `open_source` now accepts one.
+
+### ONNX opset under torch 2.9 (found while building the NMS engine)
+
+ultralytics 8.3.176 picks the ONNX opset with `get_latest_opset()`, which
+counts `torch.onnx.symbolic_opset*` attributes; torch 2.9 exposes only
+`symbolic_opset9/10`, so the probe returns **9** and the export runs at
+opset 10. The plain engines above were built from such a graph: they
+parse, build and detect (the smoke and replay results are on them), but
+`torchvision::nms` needs opset 11+, so the `--nms` export failed with
+"opset version 10 is not supported". `scripts/export_tensorrt.py` now
+pins `--opset 17`. The engines the recommendation names are rebuilt at
+opset 17 below and re-benchmarked; earlier opset-10 rows are labelled.
