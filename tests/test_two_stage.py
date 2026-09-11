@@ -200,3 +200,23 @@ class TestImgszNormalization:
         for bad in ("1280", [1280], [1, 2, 3], None, True):
             with pytest.raises(ValueError):
                 normalize_imgsz(bad)
+
+
+class TestEngineInputDetection:
+    """A TensorRT engine is fixed-size too; its size is read without CUDA."""
+
+    def test_reads_imgsz_from_ultralytics_metadata(self, tmp_path):
+        import json
+
+        meta = json.dumps({"imgsz": [512, 928], "batch": 1}).encode()
+        engine = tmp_path / "trt_928x512_fp16.engine"
+        engine.write_bytes(len(meta).to_bytes(4, "little") + meta + b"\x00" * 64)
+        assert _fixed_input_size(engine) == (928, 512)
+
+    def test_engine_without_metadata_or_tensorrt_never_blocks_startup(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setitem(sys.modules, "tensorrt", None)  # import raises
+        engine = tmp_path / "bare.engine"
+        engine.write_bytes(b"\xff\xff\xff\x7f" + b"\x00" * 16)
+        assert _fixed_input_size(engine) is None

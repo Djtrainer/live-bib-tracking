@@ -18,7 +18,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from race_cv.capture import VideoFileSource, open_source
+import cv2
+
+from race_cv.capture import VideoFileSource, is_gstreamer_pipeline, open_source
 
 TINY = str(Path(__file__).parent / "fixtures_tiny.mp4")  # 30 frames @ 30fps
 
@@ -133,3 +135,93 @@ class TestOpenSource:
     def test_missing_file_raises(self):
         with pytest.raises(FileNotFoundError):
             VideoFileSource("does/not/exist.mp4")
+
+
+class FakeCapture:
+    """Stands in for cv2.VideoCapture: records what was asked of the device."""
+
+    instances: list = []
+
+    def __init__(self, spec, backend=None):
+        self.spec, self.backend = spec, backend
+        self.props: dict = {}
+        FakeCapture.instances.append(self)
+
+    def isOpened(self):
+        return True
+
+    def set(self, prop, value):
+        self.props[prop] = value
+
+    def get(self, prop):
+        return {cv2.CAP_PROP_FRAME_WIDTH: 1920, cv2.CAP_PROP_FRAME_HEIGHT: 1080,
+                cv2.CAP_PROP_FPS: 30.0}.get(prop, 0)
+
+    def read(self):
+        return False, None
+
+    def release(self):
+        pass
+
+
+class TestCameraSpecs:
+    """A camera index behaves as it always has; a pipeline and a rate are new."""
+
+    def setup_method(self):
+        FakeCapture.instances.clear()
+
+    def test_an_index_requests_nothing_extra(self, monkeypatch):
+        monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+        source = open_source("1")
+        cap = FakeCapture.instances[-1]
+        assert cap.spec == 1 and cap.backend is None
+        assert cv2.CAP_PROP_FPS not in cap.props      # the Mac path: no rate request
+        assert cap.props[cv2.CAP_PROP_BUFFERSIZE] == 1
+        assert source.is_live
+        source.release()
+
+    def test_a_rate_request_reaches_the_driver(self, monkeypatch):
+        monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+        source = open_source("1", camera_fps=60)
+        assert FakeCapture.instances[-1].props[cv2.CAP_PROP_FPS] == 60.0
+        source.release()
+
+    def test_a_gstreamer_pipeline_opens_with_the_gstreamer_backend(self, monkeypatch):
+        monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+        pipeline = "v4l2src device=/dev/video0 ! image/jpeg ! nvv4l2decoder mjpeg=1 ! nvvidconv ! appsink"
+        source = open_source(pipeline)
+        cap = FakeCapture.instances[-1]
+        assert cap.spec == pipeline and cap.backend == cv2.CAP_GSTREAMER
+        assert source.is_live
+        source.release()
+
+    def test_reopen_reapplies_the_same_requests(self, monkeypatch):
+        monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+        source = open_source("0", camera_fps=60)
+        assert source._reopen()
+        assert len(FakeCapture.instances) == 2
+        assert FakeCapture.instances[-1].props[cv2.CAP_PROP_FPS] == 60.0
+        assert source.reopens == 1
+        source.release()
+
+    def test_a_path_with_a_bang_in_it_is_still_a_file(self):
+        assert not is_gstreamer_pipeline("data/raw/race!take2.mov")
+        assert is_gstreamer_pipeline("videotestsrc ! video/x-raw ! appsink drop=true")
+
+
+@pytest.mark.skipif(
+    "GStreamer:                   YES" not in cv2.getBuildInformation(),
+    reason="OpenCV built without GStreamer",
+)
+def test_a_real_gstreamer_pipeline_delivers_live_frames():
+    source = open_source(
+        "videotestsrc is-live=true ! video/x-raw,width=320,height=240,framerate=30/1,format=BGR "
+        "! appsink drop=true max-buffers=1"
+    )
+    try:
+        frames = source.frames()
+        first = next(frames)
+        assert first.image.shape == (240, 320, 3)
+        assert source.is_live and source.frame_width == 320
+    finally:
+        source.release()

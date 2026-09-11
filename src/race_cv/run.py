@@ -147,6 +147,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "(several times real time), which will not surface coverage gaps."
         ),
     )
+    parser.add_argument(
+        "--camera-fps", type=float, default=None,
+        help="Ask the camera for this frame rate (CAP_PROP_FPS). A request, not "
+             "a promise: the startup log prints what the device actually gave. "
+             "Unset sends nothing, which is what the Mac has always done. "
+             "--source may also be a GStreamer launch string ending in appsink, "
+             "for a Jetson decoding a USB camera's MJPEG on hardware.",
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
 
@@ -167,7 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         config.model.path = args.model
 
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    source = open_source(args.source, start_epoch=time.time(), realtime=args.realtime)
+    source = open_source(
+        args.source, start_epoch=time.time(), realtime=args.realtime,
+        camera_fps=args.camera_fps,
+    )
     logger.info(
         "Source %s: %dx%d @ %.1f fps (%s)",
         args.source,

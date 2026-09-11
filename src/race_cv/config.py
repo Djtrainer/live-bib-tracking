@@ -63,6 +63,16 @@ class ModelConfig:
     # if the pipeline ever dies at model load, set this to CPU_AND_NE.
     coreml_compute_units: str = "ALL"
 
+    # OpenCV worker threads for the frame loop's image work. Importing
+    # ultralytics calls cv2.setNumThreads(0), which leaves every OpenCV op
+    # in this process single-threaded -- including the letterbox resize
+    # ultralytics itself runs on each frame before inference. On a Jetson
+    # Orin Nano (six A78 cores at 1.7 GHz) that resize is the largest
+    # single cost in the frame loop: 5.5 ms of a 19.6 ms frame at 928x512
+    # with one thread, 1.8 ms with four. Measured output is identical.
+    # 0 leaves ultralytics' choice alone, which is what the Mac runs.
+    cv2_threads: int = 0
+
     # Two-stage detection: find people on the full frame, then re-run the
     # detector on each person's crop to find their bib. A bib is a small object
     # -- median 46px wide in finish-line footage, which is 15px once a 1920px

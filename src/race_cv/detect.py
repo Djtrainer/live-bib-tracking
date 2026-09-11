@@ -13,6 +13,7 @@ exactly one place, :meth:`Detector._to_full_frame`, so it can be tested.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,8 +109,55 @@ def to_imgsz_arg(size: tuple[int, int]):
     return width if width == height else [height, width]
 
 
+def _engine_input_size(model_path: Path) -> tuple[int, int] | None:
+    """The one input size a TensorRT engine accepts, as (width, height).
+
+    An engine is built for a fixed input shape unless it was exported with
+    dynamic axes (none of this repo's are). ultralytics prefixes its engines
+    with a 4-byte length and a JSON metadata block that records the export
+    ``imgsz`` as ``[height, width]``, so the size is read from there without
+    deserializing the engine; an engine with no metadata is deserialized and
+    its input tensor's shape read directly. Best effort: None on any failure.
+    """
+    try:
+        data = model_path.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 4:
+        return None
+    meta_len = int.from_bytes(data[:4], "little")
+    if 0 < meta_len < len(data) - 4:
+        try:
+            metadata = json.loads(data[4 : 4 + meta_len].decode("utf-8"))
+            imgsz = metadata.get("imgsz")
+            if isinstance(imgsz, (list, tuple)) and len(imgsz) == 2:
+                height, width = imgsz
+                return int(width), int(height)
+            data = data[4 + meta_len :]
+        except (UnicodeDecodeError, ValueError, AttributeError):
+            pass
+    try:
+        import tensorrt as trt
+
+        with trt.Runtime(trt.Logger(trt.Logger.ERROR)) as runtime:
+            engine = runtime.deserialize_cuda_engine(data)
+        if engine is None:
+            return None
+        for i in range(engine.num_io_tensors):
+            name = engine.get_tensor_name(i)
+            if engine.get_tensor_mode(name) != trt.TensorIOMode.INPUT:
+                continue
+            shape = tuple(int(d) for d in engine.get_tensor_shape(name))
+            if len(shape) == 4 and -1 not in shape:
+                return shape[3], shape[2]
+            return None
+    except Exception:
+        return None
+    return None
+
+
 def _fixed_input_size(model_path: Path) -> tuple[int, int] | None:
-    """The one input size a CoreML export accepts, as (width, height).
+    """The one input size a fixed-size export accepts, as (width, height).
 
     A ``.mlpackage`` is exported at a single input resolution and, unless it
     was given size flexibility (none of this repo's exports were), CoreML
@@ -117,9 +165,14 @@ def _fixed_input_size(model_path: Path) -> tuple[int, int] | None:
 
         RuntimeError: Image size 640 x 640 not in allowed set of image sizes
 
-    Returns None when the model is flexible, is not CoreML, or cannot be
+    A TensorRT ``.engine`` is fixed the same way, and ultralytics asserts on
+    every inference whose input does not match the engine's binding shape.
+
+    Returns None when the model is flexible, is neither format, or cannot be
     inspected -- in all of which cases ``imgsz`` means what it says.
     """
+    if model_path.suffix == ".engine":
+        return _engine_input_size(model_path)
     if model_path.suffix != ".mlpackage":
         return None
     try:
@@ -203,6 +256,12 @@ class Detector:
         frame_height: int,
     ):
         from ultralytics import YOLO  # imported lazily: heavy and optional for tests
+
+        # ultralytics' import just set cv2's thread count to 0. Put it back
+        # if the config asks: the letterbox resize it runs on every frame
+        # is the biggest CPU cost on the frame loop on a Jetson.
+        if model_config.cv2_threads > 0:
+            cv2.setNumThreads(int(model_config.cv2_threads))
 
         model_path = Path(model_config.path)
         if not model_path.exists():

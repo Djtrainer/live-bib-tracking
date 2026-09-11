@@ -140,25 +140,35 @@ class CameraSource:
 
     def __init__(
         self,
-        index: int,
+        index: int | str,
         width: int | None = None,
         height: int | None = None,
         warmup_seconds: float = 2.0,
+        fps: float | None = None,
     ):
-        self.cap = cv2.VideoCapture(index)
+        # ``index`` is a device index on the Mac. It may also be a GStreamer
+        # pipeline string ending in ``appsink`` -- the way a Jetson gets a
+        # USB camera's MJPEG stream decoded on the NVJPG engine instead of
+        # the CPU, and the only way OpenCV lets the frame rate be
+        # negotiated up front there. Nothing about the Mac path changes:
+        # an int still goes through the default backend as before.
+        self._index = index
+        self._requested = (width, height)
+        self._fps_requested = fps
+        self.cap = self._open()
         if not self.cap.isOpened():
             self.cap.release()
+            if isinstance(index, str):
+                raise ValueError(
+                    f"Could not open GStreamer pipeline {index!r}. Check that this "
+                    "OpenCV was built with GStreamer (cv2.getBuildInformation()) "
+                    "and that the pipeline runs under gst-launch-1.0."
+                )
             raise ValueError(
                 f"Could not open camera index {index}. "
                 "Try a different index (0 = built-in, 1 = external) and confirm "
                 "the terminal has macOS camera permission."
             )
-        if width:
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-        if height:
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-        # Ask the driver for a shallow buffer where the backend supports it.
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -178,8 +188,6 @@ class CameraSource:
         # For recovery when the device stops delivering. Camo, a USB hub, or
         # the phone locking can all make cap.read() fail for a while; the
         # old loop retried every 5ms forever and never said a word.
-        self._index = index
-        self._requested = (width, height)
         self.last_frame_ts: float | None = None
         self.read_failures = 0        # consecutive failed reads right now
         self.reopens = 0              # how many times the device was reopened
@@ -191,22 +199,42 @@ class CameraSource:
             return 0.0
         return max(0.0, (now if now is not None else time.time()) - self.last_frame_ts)
 
+    def _open(self) -> "cv2.VideoCapture":
+        """Open the device (or pipeline) and apply the requested properties.
+
+        Property requests are best effort and only made when asked for: a
+        driver that cannot honour them keeps its defaults, and the Mac path
+        never asked for a frame rate, so with ``fps`` unset nothing is sent.
+        """
+        if isinstance(self._index, str):
+            cap = cv2.VideoCapture(self._index, cv2.CAP_GSTREAMER)
+        else:
+            cap = cv2.VideoCapture(self._index)
+        if not cap.isOpened():
+            return cap
+        width, height = self._requested
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        if self._fps_requested:
+            # A USB camera advertises several rates per mode and V4L2
+            # picks one for you unless told; 1080p60 is never the default.
+            cap.set(cv2.CAP_PROP_FPS, float(self._fps_requested))
+        # Ask the driver for a shallow buffer where the backend supports it.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
     def _reopen(self) -> bool:
         """Release and reopen the device in place. True if it came back."""
         try:
             self.cap.release()
         except Exception:
             pass
-        cap = cv2.VideoCapture(self._index)
+        cap = self._open()
         if not cap.isOpened():
             cap.release()
             return False
-        width, height = self._requested
-        if width:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-        if height:
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.cap = cap
         self.reopens += 1
         return True
@@ -298,14 +326,26 @@ class CameraSource:
         self.cap.release()
 
 
+def is_gstreamer_pipeline(spec: str) -> bool:
+    """A GStreamer launch string: elements joined by ``!``, ending in appsink."""
+    return "!" in spec and spec.rstrip().split("!")[-1].strip().startswith("appsink")
+
+
 def open_source(
-    spec: str, start_epoch: float = 0.0, realtime: bool = False
+    spec: str,
+    start_epoch: float = 0.0,
+    realtime: bool = False,
+    camera_fps: float | None = None,
 ) -> VideoFileSource | CameraSource:
     """Open a frame source from a CLI spec.
 
-    A bare integer means a camera index; anything else is treated as a path.
-    ``realtime`` applies only to files -- a camera is already real time.
+    A bare integer means a camera index; a GStreamer launch string (``... !
+    appsink``) is a live pipeline; anything else is treated as a path.
+    ``realtime`` applies only to files -- a camera is already real time --
+    and ``camera_fps`` only to cameras, where it is a request, not a promise.
     """
     if spec.isdigit():
-        return CameraSource(int(spec))
+        return CameraSource(int(spec), fps=camera_fps)
+    if is_gstreamer_pipeline(spec):
+        return CameraSource(spec, fps=camera_fps)
     return VideoFileSource(spec, start_epoch=start_epoch, realtime=realtime)

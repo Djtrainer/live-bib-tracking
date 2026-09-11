@@ -1,0 +1,223 @@
+# Jetson Orin Nano configuration. Same geometry and thresholds as
+# race_cv.yaml (the Mac config, which must keep working); only the model
+# backend, device, and what JETSON_NOTES.md justifies differ. Pass it with
+# --config config/race_cv.jetson.yaml everywhere.
+#
+# The model is a TensorRT engine built ON THIS BOARD by
+# scripts/export_tensorrt.py. An engine is fixed to one input size, one GPU
+# and one TensorRT version: model.imgsz must match the export by hand, and
+# the engine must be rebuilt after a JetPack upgrade.
+#
+# Race CV pipeline configuration.
+#
+# Geometry is NORMALIZED (fractions of frame width/height) so a config survives
+# a resolution change. Values outside [0, 1] are legal -- the finish line is
+# usually anchored off-frame.
+#
+# IMPORTANT: the finish_line below is carried over from the 2025 setup and is
+# only correct for that exact camera position. Re-run scripts/calibrate.py
+# against this year's camera before the race and confirm the overlay.
+
+model:
+  # A rectangular export of the same 1280-trained weights, sized to the
+  # racer-only crop below. Regenerate with scripts/export_coreml.py.
+  #
+  # Why not the square 1280 export: a 1920x1080 frame letterboxed into a
+  # square spends 43.8% of every forward pass on grey padding, and the crop
+  # alone cannot fix that -- with a fixed-size export the cropped region is
+  # scaled back up to the same tensor. Sizing the export to the crop is what
+  # actually removes the pixels. Object scale stays at x0.667, exactly what
+  # the weights were trained at, so nothing about bib legibility changes.
+  #
+  # Measured on the 14-48-12 clip, realtime, solo:
+  #   square 1280 @15fps  75% recall  2/3 bibs  ~5600 frames dropped
+  #   928x512    @15fps   75% recall  2/3 bibs     26 frames dropped
+  #   928x512    @30fps   75% recall  3/3 bibs     36 frames dropped (of 9338)
+  # Tracking loop 20.2ms median / 26ms p90 against a 33ms budget at 30fps.
+  path: models/exports/trt_928x512_fp16.engine
+  tracker: config/custom_tracker.yaml
+  imgsz: [512, 928]    # [height, width] -- ultralytics' ordering. Must match the export.
+  conf: 0.25          # now actually reaches the model (it never used to)
+  iou: 0.7
+  device: cuda:0      # the Orin's GPU; every engine, and EasyOCR, runs here
+  half: true          # the engine is FP16; ultralytics reads the dtype off it anyway
+
+  # Give OpenCV its threads back. Importing ultralytics sets cv2's thread
+  # count to 0 and the letterbox resize it runs before every inference then
+  # costs 5.5 ms of a 19.6 ms frame at 928x512 on this CPU (9.4 ms at
+  # 1376x768). Four threads: 1.8 ms and 2.8 ms, identical output. The
+  # sixth core is left for the OCR worker and the capture thread.
+  cv2_threads: 4
+  person_class: 0
+  bib_class: 1
+
+  # Two-stage: find people on the full frame, then re-run the detector on each
+  # person's crop to find their bib.
+  #
+  # Leave this off unless you have a small export to point two_stage_model at.
+  # A CoreML .mlpackage accepts exactly ONE input size and raises on any other,
+  # so with two_stage_model unset the crops run through the 1280 model at 1280
+  # -- measured at 54.9ms per person, which roughly doubles the frame cost
+  # (56.8ms -> 111.7ms with one runner in shot) instead of saving anything.
+  # Against a real 640 export it is 12.2ms per crop, which is the point.
+  #
+  # Until 2026-09-05 this failed silently: 640 crops against the 1280 model
+  # raised on every call, the error was swallowed, and the feature reported
+  # zero extra bibs as though it were merely unhelpful. It now auto-corrects
+  # the size, logs a CONFIG MISMATCH at startup, and counts any failure into
+  # the health line.
+  two_stage: false
+  two_stage_model: null    # null = reuse model.path (see the cost warning above)
+  two_stage_imgsz: 640
+  two_stage_padding: 0.15
+  two_stage_max_crops: 6   # largest boxes win: nearest the camera, nearest the line
+
+roi:
+  # Crop away the left strip, where the spectators stand and the course is not.
+  #
+  # Read this before changing the numbers, because cropping is the one setting
+  # here that fails INVISIBLY. A racer outside the crop is not a weak detection
+  # or a dropped frame -- they are not in the input at all, and no counter can
+  # report someone the detector never saw. That is exactly how 2025 lost racers.
+  # race_cv now cross-checks this against course_boundary at startup and prints
+  # CONFIG MISMATCH if the crop cuts into declared course.
+  #
+  # What this actually buys -- and it is NOT speed. The CoreML export has a
+  # fixed 1280x1280 input, so the cropped region is letterboxed back up to
+  # 1280 either way and the forward pass costs the same (measured 65.8ms
+  # full-frame vs 72.1ms cropped -- marginally *worse*, from padding).
+  # What it buys is RESOLUTION: full-frame, 1920px is squeezed into 1280, so
+  # everything lands at x0.667. Cropping to 1421px wide raises that to x0.901.
+  # A 46px bib arrives as 41px instead of 31px. That is the same lever that
+  # took tiny-bib recall from 16% to 80% when the model went 640 -> 1280.
+  #
+  # The racer-only region: racers are never on the left 28% of the frame
+  # (course_boundary's leftmost declared point is 0.285), and never above
+  # y=0.30 -- the course is declared from y=0.49 and the treeline sits
+  # above 0.45. race_cv cross-checks both edges against course_boundary at
+  # startup and prints CONFIG MISMATCH if the crop cuts into it.
+  #
+  # The top crop is a real saving ONLY because model.imgsz is rectangular.
+  # With the old square export, width was what bound against the input and
+  # cropping the top changed nothing; with height free, the y0.20 -> y0.30
+  # step alone took the input from 928x576 to 928x512. It also proved
+  # cleaner: the band between y0.20 and y0.30 generated ~3000 spurious
+  # person detections and a duplicate-track ghost in testing.
+  #
+  # If you retrain or re-export at a different size, re-derive the crop
+  # from the boundary, not the other way round: the crop must contain the
+  # course, never the reverse.
+  enabled: true
+  polygon: [[0.28, 0.30], [1.0, 0.30], [1.0, 1.0], [0.28, 1.0]]
+  scale: 1.0
+
+course_boundary:
+  # Reproduces the 2025 setup's guide_line_left / guide_line_right: a person
+  # is only tracked as a runner if at least one corner of their box falls
+  # between these two lines. This is what keeps someone walking outside the
+  # driveway from ever being recorded as a racer.
+  #
+  # Unlike 2025, this isn't a silent filter: PipelineStats.people_outside_boundary
+  # counts everyone it excludes, and the overlay (scripts/replay.py --video-out,
+  # or --preview) draws both the lines and anyone gated out by them in gray, so
+  # a boundary that no longer matches the camera is visible, not a mystery.
+  #
+  # These are the exact 2025 numbers. Recalibrate if the camera moves.
+  enabled: true
+  left_p1: [0.31, 1.0]
+  left_p2: [0.285, 0.49]
+  right_p1: [1.0, 0.78]
+  right_p2: [0.32, 0.49]
+
+finish_line:
+  p1: [0.0, 1.09]
+  p2: [1.0, 0.78]
+  side: below              # which half-plane counts as finished
+  confirm_frames: 8        # frames to keep reading the bib after the crossing
+  reference_point: bottom_center   # feet: stable when the box widens
+  require_approach: true   # a track first seen past the line is not a finisher
+  # A track must be seen this many times before it may finish. Measured to cut
+  # ghosts from 10 to 4 at 1280 with no recall loss; real racers were observed
+  # 10+ times, fragments 6 or fewer.
+  min_observations: 5
+
+ocr:
+  enabled: true
+  # 0.70 gated OCR to only the most confident bib boxes, which was fine when
+  # every frame was processed but starves the voter at 15 fps: half the frames
+  # means half the chances of catching a >0.70 box. Measured on the smoke set,
+  # lowering this took bib accuracy from 9/13 to 12/13 with no new misreads and
+  # no extra compute -- OCR is ~27ms and only fires on detected bibs.
+  min_bib_yolo_conf: 0.25
+  min_ocr_conf: 0.40
+  lock_conf: 0.99
+  min_len: 1               # was effectively 2: bibs 1-9 could never resolve
+  max_len: 5
+  crop_padding: 15
+  target_height: 120
+
+  # With a roster loaded, a number NOT on it needs this many agreeing reads
+  # to be the verdict (one stray read is what a bibless racer looks like
+  # after a few hundred frames of OCR on a logo). And an off-roster winner
+  # of 2+ digits that is exactly one digit short of exactly ONE roster bib
+  # is a clipped bib -- "20" read twice with 120 on the list -- and
+  # resolves to that bib. Ambiguous fragments are left as read.
+  min_votes_off_roster: 2
+  snap_fragments_to_roster: true
+
+  # Read bibs on a background thread. A read costs ~27ms and only fires when a
+  # bib is legible -- which is to say at the finish line. Inline, that pushed a
+  # crossing frame to ~76ms against a 66ms budget at 15fps, so the pipeline fell
+  # behind precisely while a racer was crossing and the camera dropped the
+  # frames that mattered most. A late bib costs nothing: the crossing timestamp
+  # is fixed when it happens, and the event is held for confirm_frames anyway.
+  async_reads: true
+  async_queue_size: 48
+  async_max_inflight_per_track: 3
+
+  # Keeping the worker current with the frame loop. Measured on real bib
+  # crops a read is ~48ms on MPS (not the 21ms a synthetic crop suggested),
+  # so the worker manages ~20 reads/s while the loop could offer 29/s per
+  # runner. Left unshaped, a bib_env replay dropped 68 crops, resolved two
+  # finishes before their reads landed, and turned a bib legible on 53
+  # frames into "No bib". Votes lose nothing at ~8 reads/s.
+  async_min_submit_interval_s: 0.12
+  # Crop widths (after scaling to target_height) padded up to a fixed set the
+  # warm-up sweeps. On MPS the first read at a NEW width compiles a kernel:
+  # 155ms, 410ms, 1084ms outliers against a 48ms median. Real crops arrive at
+  # arbitrary widths; without buckets the stall lands on a live runner.
+  width_buckets_px: [128, 160, 192, 224, 256, 320, 384, 448]
+  # A finish whose racer still has reads in flight is held -- without
+  # blocking the loop -- up to this long. The crossing time is already fixed.
+  resolve_grace_s: 1.0
+  resolve_timeout: 0.1     # final blocking wait when the event is built; last resort
+
+pipeline:
+  # 1280 inference costs ~49ms/frame (20.5 fps ceiling) against ~12ms at 640.
+  # 30 fps is not sustainable at this resolution, so this leaves headroom for
+  # OCR spikes and the preview stream. CameraSource drops frames rather than
+  # falling behind if it still cannot keep up, and reports it as "source dropped".
+  # 30 = every frame of a 30fps camera. The tracking loop runs at ~20ms
+  # against a 33ms budget with the 928x512 export, and at 30fps realtime on
+  # the 14-48-12 clip it processed 9302 of 9338 frames and read 3/3 bibs.
+  # If `source dropped` climbs in the health line, drop this to 15 before
+  # anything else; it was 26 dropped at 15fps.
+  target_fps: 30.0         # 0 = process every frame (replay uses this)
+  log_every_n_frames: 300
+
+sink:
+  api_url: http://localhost:8001
+  event_log: data/results/events.jsonl
+  retry_seconds: 2.0
+  max_retry_seconds: 30.0
+  timeout_seconds: 5.0
+
+stream:
+  # Publishes annotated frames to <sink.api_url>/api/frame so the browser
+  # (localhost:8001/ or the React frontend) can show a live preview. Uses
+  # drop-oldest semantics -- a slow network never adds latency to detection
+  # or finish-line timing. Disable if bandwidth/CPU is tight on race day.
+  enabled: false      # benchmarks run with no API to publish to; turn on for the race
+  target_fps: 8.0
+  jpeg_quality: 80
+  timeout_seconds: 2.0

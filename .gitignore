@@ -47,3 +47,6 @@ config/ngrok-policy.local.yml
 
 # Frontend build output; the launcher builds it and the API serves it
 src/frontend/dist/
+
+# Jetson venv (see JETSON_NOTES.md)
+.venv/
