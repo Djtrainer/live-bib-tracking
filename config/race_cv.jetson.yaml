@@ -6,7 +6,14 @@
 # The model is a TensorRT engine built ON THIS BOARD by
 # scripts/export_tensorrt.py. An engine is fixed to one input size, one GPU
 # and one TensorRT version: model.imgsz must match the export by hand, and
-# the engine must be rebuilt after a JetPack upgrade.
+# the engine must be rebuilt after a JetPack upgrade. Build both engines
+# this config names with:
+#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 512 928 --nms
+#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 640 640 --nms
+#
+# Validated on the board (JETSON_NOTES.md, section 6): 14 clips in real
+# time, 25/26 found, 23/25 bibs, median drift 0.3 s, ~0.1% frames dropped,
+# frame loop 8.9 ms median at 30 fps, MAXN_SUPER.
 #
 # Race CV pipeline configuration.
 #
@@ -34,13 +41,13 @@ model:
   #   928x512    @15fps   75% recall  2/3 bibs     26 frames dropped
   #   928x512    @30fps   75% recall  3/3 bibs     36 frames dropped (of 9338)
   # Tracking loop 20.2ms median / 26ms p90 against a 33ms budget at 30fps.
-  path: models/exports/trt_928x512_fp16.engine
+  path: models/exports/trt_928x512_fp16_nms.engine
   tracker: config/custom_tracker.yaml
   imgsz: [512, 928]    # [height, width] -- ultralytics' ordering. Must match the export.
   conf: 0.25          # now actually reaches the model (it never used to)
   iou: 0.7
   device: cuda:0      # the Orin's GPU; every engine, and EasyOCR, runs here
-  half: true          # the engine is FP16; ultralytics reads the dtype off it anyway
+  half: true          # the engine is FP16 inside; its input binding is fp32 and that is what it is fed
 
   # Give OpenCV its threads back. Importing ultralytics sets cv2's thread
   # count to 0 and the letterbox resize it runs before every inference then
@@ -48,6 +55,16 @@ model:
   # 1376x768). Four threads: 1.8 ms and 2.8 ms, identical output. The
   # sixth core is left for the OCR worker and the capture thread.
   cv2_threads: 4
+
+  # Run the engine directly (detect.TrtRunner) instead of through
+  # ultralytics' predictor. Measured on the 14-48-12 crossing window: loop
+  # 19.5 ms as shipped -> 15.3 ms (cv2 threads) -> 13.4 ms (NMS in the
+  # engine) -> 8.9 ms median / 9.8 ms p90 here, with the same boxes (IoU
+  # median 0.999 against the ultralytics path on the same engine) and the
+  # same tracks. The engine MUST be an --nms export: it returns final boxes
+  # with conf 0.25 / IoU 0.7 frozen at export, so model.conf and model.iou
+  # below no longer reach the first stage -- re-export to change them.
+  backend: trt
   person_class: 0
   bib_class: 1
 
@@ -66,8 +83,15 @@ model:
   # zero extra bibs as though it were merely unhelpful. It now auto-corrects
   # the size, logs a CONFIG MISMATCH at startup, and counts any failure into
   # the health line.
+  # Jetson, 14-clip real-time smoke: two-stage found ~40% more bib boxes,
+  # doubled OCR reads, and changed no bib (23/25 either way). Through
+  # ultralytics it cost 8x the dropped frames (51 -> 426); through the
+  # direct backend a 640 crop is ~5 ms and the loop's p90 goes 9.8 -> 16.5
+  # ms, still inside a 30 fps budget. Off because it bought nothing on
+  # this footage; one line to enable if a roster or camera position shows
+  # bibs being missed at distance.
   two_stage: false
-  two_stage_model: null    # null = reuse model.path (see the cost warning above)
+  two_stage_model: models/exports/trt_640x640_fp16_nms.engine   # an --nms 640 export; the direct backend needs one
   two_stage_imgsz: 640
   two_stage_padding: 0.15
   two_stage_max_crops: 6   # largest boxes win: nearest the camera, nearest the line
@@ -173,7 +197,7 @@ ocr:
   # is fixed when it happens, and the event is held for confirm_frames anyway.
   async_reads: true
   async_queue_size: 48
-  async_max_inflight_per_track: 3
+  async_max_inflight_per_track: 4
 
   # Keeping the worker current with the frame loop. Measured on real bib
   # crops a read is ~48ms on MPS (not the 21ms a synthetic crop suggested),
@@ -181,7 +205,12 @@ ocr:
   # runner. Left unshaped, a bib_env replay dropped 68 crops, resolved two
   # finishes before their reads landed, and turned a bib legible on 53
   # frames into "No bib". Votes lose nothing at ~8 reads/s.
-  async_min_submit_interval_s: 0.12
+  # Jetson: a real-crop read is 26.9 ms on CUDA (48 ms on MPS), the worker
+  # sustains ~36 reads/s, and new crop widths cost ~65 ms rather than a
+  # second. 0.12 -> 0.05 raised reads 54 -> 77 on the 14-clip set with 0
+  # skipped and 0 late, and bib accuracy unchanged (23/25); 0.03 / 6 also
+  # kept up (116 reads) but leaves no room for two runners abreast.
+  async_min_submit_interval_s: 0.05
   # Crop widths (after scaling to target_height) padded up to a fixed set the
   # warm-up sweeps. On MPS the first read at a NEW width compiles a kernel:
   # 155ms, 410ms, 1084ms outliers against a 48ms median. Real crops arrive at
@@ -217,7 +246,7 @@ stream:
   # (localhost:8001/ or the React frontend) can show a live preview. Uses
   # drop-oldest semantics -- a slow network never adds latency to detection
   # or finish-line timing. Disable if bandwidth/CPU is tight on race day.
-  enabled: false      # benchmarks run with no API to publish to; turn on for the race
+  enabled: true       # as on the Mac; --no-api (every benchmark here) switches it off by itself
   target_fps: 8.0
   jpeg_quality: 80
   timeout_seconds: 2.0

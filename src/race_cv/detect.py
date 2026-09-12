@@ -191,6 +191,218 @@ def _fixed_input_size(model_path: Path) -> tuple[int, int] | None:
     return None
 
 
+def letterbox_geometry(
+    height: int, width: int, target_h: int, target_w: int
+) -> tuple[float, int, int, int, int]:
+    """Where ultralytics' LetterBox puts an image: (ratio, new_w, new_h, left, top).
+
+    Reproduces ``LetterBox(new_shape, auto=False, center=True, scaleup=True)``
+    exactly -- the transform ultralytics applies before a fixed-size export
+    -- so a GPU letterbox can place pixels where the CPU one would, and the
+    weights see the geometry they were trained and validated with.
+    """
+    r = min(target_h / height, target_w / width)
+    new_w, new_h = int(round(width * r)), int(round(height * r))
+    dw, dh = (target_w - new_w) / 2, (target_h - new_h) / 2
+    return r, new_w, new_h, int(round(dw - 0.1)), int(round(dh - 0.1))
+
+
+def unletterbox_boxes(
+    boxes: np.ndarray, height: int, width: int, target_h: int, target_w: int
+) -> np.ndarray:
+    """Map xyxy boxes from the letterboxed input back to image pixels, in place.
+
+    The same arithmetic as ``ultralytics.utils.ops.scale_boxes`` (gain from
+    the unrounded ratio, padding rounded with its -0.1 nudge, then clipped),
+    so boxes from the direct path land where ultralytics would put them.
+    """
+    if len(boxes) == 0:
+        return boxes
+    gain = min(target_h / height, target_w / width)
+    pad_x = round((target_w - width * gain) / 2 - 0.1)
+    pad_y = round((target_h - height * gain) / 2 - 0.1)
+    boxes[:, [0, 2]] -= pad_x
+    boxes[:, [1, 3]] -= pad_y
+    boxes[:, :4] /= gain
+    boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, width)
+    boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, height)
+    return boxes
+
+
+def _engine_metadata(data: bytes) -> tuple[dict, bytes]:
+    """Split ultralytics' JSON header off a serialized engine."""
+    if len(data) < 4:
+        return {}, data
+    meta_len = int.from_bytes(data[:4], "little")
+    if 0 < meta_len < len(data) - 4:
+        try:
+            return json.loads(data[4 : 4 + meta_len].decode("utf-8")), data[4 + meta_len :]
+        except (UnicodeDecodeError, ValueError):
+            pass
+    return {}, data
+
+
+class TrtRunner:
+    """Run an ultralytics end2end TensorRT engine directly, preprocessing on the GPU.
+
+    What ultralytics does per frame around a 5 ms TensorRT inference on an
+    Orin Nano, measured: a single-threaded ``cv2.resize`` letterbox, a
+    BGR→RGB / HWC→CHW copy, a pageable host→device copy, its own torch NMS
+    with a GPU sync, ``get_cfg`` validation of every call's arguments, a
+    fresh ``LoadPilAndNumpy`` dataset, and a ``Results`` object -- ~10 ms of
+    CPU on a 1.7 GHz A78 core while the GPU idles. This class keeps only
+    the parts that touch pixels: the crop goes to the GPU through a pinned
+    buffer, the letterbox is a bilinear resize and a pad in torch, the
+    engine returns final boxes because NMS is inside it, and the few
+    surviving rows come back in one small copy.
+
+    Requires an engine from ``scripts/export_tensorrt.py --nms``: the
+    output is then ``(1, max_det, 6)`` rows of ``x1 y1 x2 y2 conf cls`` in
+    input-pixel coordinates, zero-padded, with the export's conf/IoU
+    already applied.
+    """
+
+    def __init__(self, engine_path: Path, device: str = "cuda:0"):
+        data = engine_path.read_bytes()
+        self.metadata, data = _engine_metadata(data)
+        if not self.metadata:
+            raise ValueError(
+                f"{engine_path.name} carries no ultralytics metadata; model.backend "
+                "'trt' needs an engine from scripts/export_tensorrt.py --nms."
+            )
+        if not self.metadata.get("args", {}).get("nms"):
+            raise ValueError(
+                f"{engine_path.name} was exported without NMS inside it. model.backend "
+                "'trt' needs final boxes from the engine: rebuild with "
+                "scripts/export_tensorrt.py --nms (and set model.path to it)."
+            )
+        import tensorrt as trt
+        import torch
+
+        self._torch = torch
+        self.runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+        self.engine = self.runtime.deserialize_cuda_engine(data)
+        if self.engine is None:
+            raise RuntimeError(
+                f"TensorRT {trt.__version__} could not deserialize {engine_path}; "
+                "engines are tied to the TensorRT version and GPU they were built on."
+            )
+        self.context = self.engine.create_execution_context()
+        self.device = torch.device("cuda:0" if device in ("", "cuda", "gpu") else device)
+
+        self.input_name = self.output_name = None
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            shape = tuple(int(d) for d in self.engine.get_tensor_shape(name))
+            dtype = self._torch_dtype(trt.nptype(self.engine.get_tensor_dtype(name)))
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                self.input_name, self.input_shape, in_dtype = name, shape, dtype
+            else:
+                self.output_name, self.output_shape, out_dtype = name, shape, dtype
+        if (
+            self.input_name is None or self.output_name is None
+            or len(self.input_shape) != 4 or -1 in self.input_shape
+            or len(self.output_shape) != 3 or self.output_shape[-1] != 6
+        ):
+            raise ValueError(
+                f"{engine_path.name}: expected one static (1,3,H,W) input and one "
+                f"(1,max_det,6) output, got {self.input_shape} -> {self.output_shape}"
+            )
+        self.input_hw = (self.input_shape[2], self.input_shape[3])
+        self.inp = torch.empty(self.input_shape, dtype=in_dtype, device=self.device)
+        self.out = torch.empty(self.output_shape, dtype=out_dtype, device=self.device)
+        self.context.set_tensor_address(self.input_name, self.inp.data_ptr())
+        self.context.set_tensor_address(self.output_name, self.out.data_ptr())
+        self._staging = None  # pinned host copy of the crop, reused across frames
+        self._class_filters: dict[tuple[int, ...], "torch.Tensor"] = {}
+
+    @staticmethod
+    def _torch_dtype(np_dtype):
+        import torch
+
+        return {
+            np.dtype("float32"): torch.float32,
+            np.dtype("float16"): torch.float16,
+            np.dtype("int32"): torch.int32,
+            np.dtype("int64"): torch.int64,
+            np.dtype("uint8"): torch.uint8,
+        }[np.dtype(np_dtype)]
+
+    @property
+    def input_size(self) -> tuple[int, int]:
+        """(width, height) the engine accepts."""
+        return self.input_hw[1], self.input_hw[0]
+
+    def preprocess(self, image: np.ndarray) -> None:
+        """Letterbox ``image`` (BGR uint8) into the engine's input on the GPU."""
+        torch = self._torch
+        h, w = image.shape[:2]
+        H, W = self.input_hw
+        _, new_w, new_h, left, top = letterbox_geometry(h, w, H, W)
+        if self._staging is None or tuple(self._staging.shape) != image.shape:
+            self._staging = torch.empty(image.shape, dtype=torch.uint8, pin_memory=True)
+        # copy_ handles the ROI view's strides; the pinned buffer makes the
+        # device copy a DMA instead of a pageable staging copy.
+        self._staging.copy_(torch.from_numpy(image))
+        x = self._staging.to(self.device, non_blocking=True)
+        x = x.permute(2, 0, 1).unsqueeze(0).to(self.inp.dtype)
+        if (new_h, new_w) != (h, w):
+            x = torch.nn.functional.interpolate(
+                x, size=(new_h, new_w), mode="bilinear", align_corners=False
+            )
+        self.inp.fill_(114.0)  # ultralytics' grey border
+        self.inp[:, :, top : top + new_h, left : left + new_w] = x.flip(1)  # BGR -> RGB
+        self.inp.div_(255.0)
+
+    def detect(
+        self, image: np.ndarray, conf: float, classes: list[int] | None = None
+    ) -> np.ndarray:
+        """Final boxes for one BGR image: ``(n, 6)`` of x1 y1 x2 y2 conf cls, image pixels."""
+        torch = self._torch
+        self.preprocess(image)
+        stream = torch.cuda.current_stream(self.device)
+        if not self.context.execute_async_v3(stream.cuda_stream):
+            raise RuntimeError("TensorRT execution failed")
+        out = self.out[0]
+        keep = out[:, 4] > conf  # ultralytics keeps strictly above conf_thres
+        if classes:
+            key = tuple(sorted(classes))
+            wanted = self._class_filters.get(key)
+            if wanted is None:
+                wanted = torch.tensor(key, device=self.device, dtype=out.dtype)
+                self._class_filters[key] = wanted
+            keep &= (out[:, 5:6] == wanted).any(1)
+        dets = out[keep].float().cpu().numpy()  # the one sync per frame
+        h, w = image.shape[:2]
+        return unletterbox_boxes(dets, h, w, self.input_hw[0], self.input_hw[1])
+
+
+class ByteTrackDirect:
+    """ultralytics' own BYTETracker, driven the way its predictor drives it.
+
+    Same tracker yaml, same ``frame_rate=30`` construction, updated on every
+    frame including empty ones (so lost tracks age), GMC fed the same crop.
+    """
+
+    def __init__(self, tracker_path: Path):
+        from ultralytics.trackers.byte_tracker import BYTETracker
+        from ultralytics.utils import YAML, IterableSimpleNamespace
+
+        cfg = IterableSimpleNamespace(**YAML.load(str(tracker_path)))
+        if cfg.tracker_type != "bytetrack":
+            raise ValueError(
+                f"model.backend 'trt' supports tracker_type bytetrack, got {cfg.tracker_type!r}"
+            )
+        self._tracker = BYTETracker(args=cfg, frame_rate=30)
+
+    def update(self, dets: np.ndarray, image: np.ndarray) -> np.ndarray:
+        """Rows of ``x1 y1 x2 y2 id conf cls idx`` for the tracks alive this frame."""
+        from ultralytics.engine.results import Boxes
+
+        boxes = Boxes(np.ascontiguousarray(dets, dtype=np.float32), image.shape[:2])
+        return self._tracker.update(boxes, image)
+
+
 @dataclass
 class Detection:
     """One detected object, in full-frame pixel coordinates."""
@@ -248,6 +460,13 @@ class Roi:
 class Detector:
     """Stateful YOLO tracker over a fixed frame geometry."""
 
+    # Class-level defaults so a Detector assembled without __init__ (the
+    # tests build them around fake models) behaves as the ultralytics path.
+    backend = "ultralytics"
+    runner = None
+    tracker = None
+    second_runner = None
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -281,7 +500,20 @@ class Detector:
                 model_config.coreml_compute_units
             )
 
-        self.model = YOLO(str(model_path))
+        self.backend = model_config.backend
+        if self.backend not in ("ultralytics", "trt"):
+            raise ValueError(
+                f"Unknown model.backend {self.backend!r}; expected 'ultralytics' or 'trt'."
+            )
+        self.runner = self.tracker = self.second_runner = None
+        if self.backend == "trt":
+            if model_path.suffix != ".engine":
+                raise ValueError("model.backend 'trt' needs a TensorRT .engine as model.path")
+            self.runner = TrtRunner(model_path, model_config.device)
+            self.tracker = ByteTrackDirect(tracker_path)
+            self.model = None
+        else:
+            self.model = YOLO(str(model_path))
 
         # Second stage may run its own, smaller export. Sharing one YOLO object
         # across the two passes would also be a threading hazard if the second
@@ -317,9 +549,16 @@ class Detector:
             second_path = Path(model_config.two_stage_model or model_config.path)
             if not second_path.exists():
                 raise FileNotFoundError(f"Two-stage model not found: {second_path}")
-            self.second_stage = (
-                self.model if second_path == model_path else YOLO(str(second_path))
-            )
+            if self.backend == "trt":
+                self.second_runner = (
+                    self.runner if second_path == model_path
+                    else TrtRunner(second_path, model_config.device)
+                )
+                self.second_stage = None
+            else:
+                self.second_stage = (
+                    self.model if second_path == model_path else YOLO(str(second_path))
+                )
             second_fixed = (
                 fixed if second_path == model_path else _fixed_input_size(second_path)
             )
@@ -345,6 +584,15 @@ class Detector:
         """
         started = time.time()
         blank = np.zeros((frame_height, frame_width, 3), dtype=np.uint8)
+        if self.backend == "trt":
+            try:
+                self.runner.detect(self.roi.crop(blank), self.config.conf)
+                if self.second_runner is not None and self.second_runner is not self.runner:
+                    crop = np.zeros((frame_height // 3, frame_height // 6, 3), dtype=np.uint8)
+                    self.second_runner.detect(crop, self.config.conf)
+            except Exception:
+                pass
+            return time.time() - started
         try:
             self.model.predict(
                 blank,
@@ -381,6 +629,8 @@ class Detector:
         tracked) still reach the OCR stage.
         """
         region = self.roi.crop(image)
+        if self.backend == "trt":
+            return self._track_direct(region)
         results = self.model.track(
             region,
             persist=True,
@@ -412,6 +662,34 @@ class Detector:
                     track_id=track_id,
                 )
             )
+        return detections
+
+    def _track_direct(self, region: np.ndarray) -> list[Detection]:
+        """The ``track()`` contract on the direct backend.
+
+        Mirrors ultralytics' tracker callback: when any track is alive the
+        frame's detections *are* the tracks (Kalman-smoothed boxes, ids);
+        when none is, the raw boxes are kept without ids, which is how bib
+        boxes below the tracker's thresholds still reach OCR.
+        """
+        dets = self.runner.detect(
+            region, self.config.conf,
+            classes=[self.config.person_class, self.config.bib_class],
+        )
+        tracks = self.tracker.update(dets, region)
+        detections: list[Detection] = []
+        if len(tracks):
+            for x1, y1, x2, y2, track_id, conf, cls, _ in tracks:
+                detections.append(Detection(
+                    xyxy=self.roi.to_full_frame((float(x1), float(y1), float(x2), float(y2))),
+                    conf=float(conf), cls=int(cls), track_id=int(track_id),
+                ))
+        else:
+            for x1, y1, x2, y2, conf, cls in dets:
+                detections.append(Detection(
+                    xyxy=self.roi.to_full_frame((float(x1), float(y1), float(x2), float(y2))),
+                    conf=float(conf), cls=int(cls), track_id=None,
+                ))
         return detections
 
     @staticmethod
@@ -457,6 +735,14 @@ class Detector:
         match. Anything iterating over independent images wants this instead.
         """
         region = self.roi.crop(image)
+        if self.backend == "trt":
+            return [
+                Detection(
+                    xyxy=self.roi.to_full_frame((float(x1), float(y1), float(x2), float(y2))),
+                    conf=float(conf), cls=int(cls), track_id=None,
+                )
+                for x1, y1, x2, y2, conf, cls in self.runner.detect(region, self.config.conf)
+            ]
         results = self.model.predict(
             region,
             conf=self.config.conf,
@@ -536,6 +822,21 @@ class Detector:
         # them sequentially regardless.
         model = self.second_stage or self.model
         found: list[Detection] = []
+        if self.backend == "trt":
+            runner = self.second_runner or self.runner
+            for crop, (ox, oy, cw, ch) in zip(crops, origins):
+                try:
+                    dets = runner.detect(crop, self.config.conf, classes=[self.config.bib_class])
+                except Exception as exc:
+                    self.two_stage_errors += 1
+                    self.two_stage_last_error = f"{type(exc).__name__}: {exc}"
+                    continue
+                for bx1, by1, bx2, by2, conf, _ in dets:
+                    found.append(Detection(
+                        xyxy=(float(bx1) + ox, float(by1) + oy, float(bx2) + ox, float(by2) + oy),
+                        conf=float(conf), cls=self.config.bib_class, track_id=None,
+                    ))
+            return found
         for crop, (ox, oy, cw, ch) in zip(crops, origins):
             try:
                 results = model.predict(

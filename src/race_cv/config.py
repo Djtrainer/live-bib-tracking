@@ -73,6 +73,20 @@ class ModelConfig:
     # 0 leaves ultralytics' choice alone, which is what the Mac runs.
     cv2_threads: int = 0
 
+    # How the model is executed.
+    #   "ultralytics" -- YOLO(...).track(): CoreML on the Mac, TensorRT on
+    #                    the Jetson through ultralytics' own predictor.
+    #   "trt"         -- the engine is run directly (detect.TrtRunner): the
+    #                    letterbox happens on the GPU, the engine must carry
+    #                    NMS (scripts/export_tensorrt.py --nms) so it returns
+    #                    final boxes, and ByteTrack is fed those boxes with
+    #                    the same tracker yaml. No ultralytics predictor, no
+    #                    per-call config validation, no Results objects.
+    # Why: on the Orin the model is 5 ms of a 15 ms frame; the other 10 ms
+    # are ultralytics' CPU-side glue around it (measured in JETSON_NOTES.md).
+    # "trt" is Jetson-only and off by default; the Mac path never sees it.
+    backend: str = "ultralytics"
+
     # Two-stage detection: find people on the full frame, then re-run the
     # detector on each person's crop to find their bib. A bib is a small object
     # -- median 46px wide in finish-line footage, which is 15px once a 1920px

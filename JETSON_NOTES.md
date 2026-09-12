@@ -427,3 +427,225 @@ parse, build and detect (the smoke and replay results are on them), but
 "opset version 10 is not supported". `scripts/export_tensorrt.py` now
 pins `--opset 17`. The engines the recommendation names are rebuilt at
 opset 17 below and re-benchmarked; earlier opset-10 rows are labelled.
+
+### Opset-17 rebuilds and the end2end NMS engine
+
+Same window, same conditions, after rebuilding the two candidate engines
+at opset 17 (`ONLY=1 scratchpad/run_matrix.sh ...`):
+
+| configuration | detector median / p90 | **loop median / p90 / mean** | fps at loop median | people / bib boxes |
+|---|---|---|---|---|
+| 928x512 FP16 (opset 17) | 15.2 / 16.8 | **15.3 / 16.9 / 15.6** | 65 | 79 / 53 (identical to opset 10) |
+| **928x512 FP16 + NMS in the engine** (`--nms`, opset 17) | 13.3 / 14.8 | **13.4 / 14.9 / 13.7** | **75** | 79 / 53 (identical) |
+| 1376x768 FP16 (opset 17) | 19.2 / 23.6 | **19.3 / 23.8 / 20.9** (max 133) | 52 | 161 / 94 (identical) |
+| 928x512 FP16 + two-stage (opset 17 first stage) | 15.2 / 16.8 | 15.3 / 29.4 / 17.1 | 65 | 79 / 82 |
+
+The opset-17 graphs are the same network and produce the same boxes;
+they run 0.6-1.7 ms faster. **The NMS-in-engine build is the one that
+clears 60 fps with margin at 928x512: p90 14.9 ms against a 16.7 ms
+frame.** It returns the same 79 person and 53 bib boxes on this window,
+so ultralytics' torch NMS was pure overhead here. Its conf 0.25 / IoU
+0.7 are frozen at export (`--conf`, `--iou`), matching `model.conf` and
+`model.iou` in the config; changing those in the config would no longer
+take effect for the first stage, which is the price of this engine and
+is written next to it in the Jetson config.
+
+Loop-time summary at 928x512 FP16, cv2 threads 4: **19.5 ms (Mac config
+as shipped) → 15.3 ms (threads) → 13.4 ms (NMS in engine)**, of which
+~5 ms is the model.
+
+## 5. Real-time 14-clip smoke runs
+
+`scratchpad/run_smoke.sh` -> `scripts/smoke_test.py --expected smoke_test.yaml
+--roster data/raw/roster_example.csv --realtime --config <cfg>`, one run at
+a time with nothing else on the board, MAXN_SUPER, DVFS. Each run is
+~26 min of wall clock (27 min of footage, paced). Results in
+`runs/jetson/smoke_<label>/{log.txt,results.json}`.
+
+### S1 -- baseline: `config/race_cv.jetson.yaml` (928x512 FP16, cv2 threads 4, OCR interval 0.12)
+
+```
+RECALL (found / expected)           96.2%   (25/26)
+bib exactly right                 23/25
+  of racers wearing a bib         16/18
+  of racers with no bib           7/7
+missed (never detected)                  1     No bib @ 22s  2025-10-03 17-45-02 (the expectation on the clip's final frame)
+ghosts (detected, not expected)          2     225 @ 20.0s and 131.5s in 14-42-58 (the two real crossings the file omits)
+median |time drift|                   0.3s
+worst |time drift|                    2.3s   (the No-bib @122s in 14-48-12, -2.3 s, as on the Mac)
+WRONG BIB: 531 -> No bib, 76 -> No bib   (2026-09-07 07-57-12: both off the three-bib example roster)
+```
+
+| clip | frames processed | source dropped | ocr reads / skipped / late |
+|---|---|---|---|
+| 2025-10-03 17-45-02 | 648 | 5 | 0 / 0 / 0 |
+| 2025-10-04 10-25-15 | 1514 | 3 | 3 / 0 / 0 |
+| 2025-10-04 14-42-58 | 6419 | 4 | 5 / 0 / 0 |
+| 2025-10-04 14-48-12 | 9335 | 3 | 9 / 0 / 0 |
+| 2025-10-04 15-07-11 | 4917 | 4 | 2 / 0 / 0 |
+| 2025-10-04 15-12-22 | 5288 | 4 | 6 / 0 / 0 |
+| 2025-10-04 15-16-23 | 3108 | 4 | 5 / 0 / 0 |
+| 2025-10-04 15-32-31 | 2995 | 4 | 1 / 0 / 0 |
+| 2025-10-04 15-35-06 | 2632 | 3 | 1 / 0 / 0 |
+| 2025-10-04 15-39-37 | 2660 | 4 | 4 / 0 / 0 |
+| 2025-10-19 11-03-25 | 890 | 4 | 0 / 0 / 0 |
+| 2025-10-19 11-04-32 | 905 | 3 | 0 / 0 / 0 |
+| 2025-10-19 11-05-07 | 1926 | 4 | 0 / 0 / 0 |
+| 2026-09-07 07-57-12 | 2433 | 2 | 18 / 0 / 0 |
+| **total** | **45670** | **51 (0.11%)** | **54 / 0 / 0**, 2 hand-offs |
+
+Against the Mac baseline (25/26, 0 genuine ghosts, 0.4 s, 22/25 bibs, 36
+dropped of 9338 on the longest clip = 0.4%): same recall, same two
+flagged crossings, the same miss, drift 0.3 s, one more bib right
+(23/25: the clipped 120 resolves through the roster snap here too), and
+a quarter of the drop rate. (Where in each clip the 3-5 drops fall is not
+recorded by the smoke test; the single-clip `race_cv.run` health lines
+earlier showed 5 by 10 s and 12 by 40 s on `10-25-15`, so some land near
+the crossing and some at the start.)
+
+### S2 -- OCR headroom used: `async_min_submit_interval_s: 0.05`, `async_max_inflight_per_track: 4` (else as S1)
+
+```
+RECALL 96.2% (25/26) | bib exactly right 23/25 (wearing 16/18, no-bib 7/7) | ghosts 2 | drift median 0.3 s, worst 2.3 s
+source dropped 54 / 45667 | ocr read 77, skipped 0, late 0        (S1: 54 reads at 0.12)
+```
+
+Per clip the reads rose everywhere a bib was legible (10-25-15: 3→4,
+14-42-58: 5→8, 14-48-12: 9→11, 15-39-37: 4→7, 07-57-12: 18→29) with no
+crop ever skipped and no finish resolved before its reads landed, so at
+0.05 the CUDA worker is nowhere near its ~36 reads/s. **Bib accuracy did
+not move**: the same 23/25, the same two wrong (531 and 76, which are not
+on the three-bib example roster and need two agreeing off-roster reads to
+win). The reads that decide a bib are bounded by the frames on which the
+detector finds the bib at ≥0.25, not by the OCR rate; on this footage
+that was already saturated at 0.12. 0.05 is still the right setting on
+the Jetson -- it costs nothing measurable here and buys a wider vote when
+a bib is only legible for a few frames -- but it is not an accuracy lever
+on this set. 0.03 with 6 in flight is run last in the chain to show where
+the worker gives out.
+
+### S3 -- two-stage: `two_stage: true`, `two_stage_model: trt_640x640_fp16.engine`, `two_stage_imgsz: 640` (else as S1)
+
+```
+RECALL 96.2% (25/26) | bib exactly right 23/25 (wearing 16/18, no-bib 7/7) | ghosts 2 | drift median 0.3 s, worst 2.3 s
+source dropped 426 / 45295 (0.9%)   <- S1: 51 (0.11%)
+ocr read 99, skipped 0, late 0       <- S1: 54
+```
+
+Bib boxes rose on every clip (14-48-12: 119→163, 07-57-12: 83→137,
+15-32-31: 22→49) and OCR read almost twice as often, and **not one bib
+changed**. What did change is the drop count: 8x, and it lands on the
+clips with several people in shot (11-05-07 with four finishers: 125
+drops in 64 s; 15-32-31: 52), because through ultralytics each crop is a
+full `predict()` -- ~14 ms of the same glue the first stage pays -- and a
+frame with three runners costs 40+ ms. Through the direct backend a crop
+should be ~5 ms; that is measured below before deciding. On the
+ultralytics path, two-stage is not worth its drops on this footage.
+
+### S4 -- native crop resolution: 1376x768 FP16 (else as S1)
+
+```
+RECALL 92.3% (24/26)   <- one racer LOST vs S1
+bib exactly right 22/24 (wearing 15/17, no-bib 7/7) | ghosts 2 | drift median 0.4 s, worst 2.3 s
+source dropped 67 / 45654 | ocr read 97, skipped 0, late 0
+MISSED: No bib @ 22s (17-45-02, as always)  and  120 @ 172s (14-48-12)
+```
+
+The new miss is the hand-off case: in S1 that crossing is recovered
+across a track break (`handoffs 1`); at 1376x768 the track fragments at
+the line and the newborn fails `min_observations`
+(`finishes_below_min_observations` 0→1 on that clip, and 0→1 on
+15-07-11 too, where the finisher was still found). The larger input finds
+more of everything -- person boxes 514→773 on 14-48-12, bib boxes
+119→175, OCR reads 54→97 across the set -- and every extra bib box bought
+nothing (the same 2 wrong: the off-roster pair), while the busier boxes
+near the camera cost a finisher. `RACE_DAY_ANALYSIS.md` predicted this
+("raising detector resolution ... fragments tracks more readily").
+**928x512 stays.** The tracker-side levers (`min_observations`,
+`handoff_window_s`) could be retuned for 1376x768, but there is no
+accuracy on the table to pay for it.
+
+### S5 -- NMS inside the engine: `trt_928x512_fp16_nms.engine` (else as S1)
+
+```
+RECALL 96.2% (25/26) | bib exactly right 23/25 (wearing 16/18, no-bib 7/7) | ghosts 2 | drift median 0.3 s, worst 2.3 s
+source dropped 55 / 45666 | ocr read 52, skipped 0, late 0
+```
+
+Per clip the person and bib box counts are identical to S1 on 13 of 14
+clips (514→513 and 234→236 on the other two), and **all 28 finisher rows
+are identical to S1 in bib and in time (within 0.2 s)**. The engine with
+NMS baked in is the same detector; the 2 ms it saves per frame is pure
+ultralytics overhead. It is the first stage of the recommended config.
+
+### S6 -- OCR at the floor: `async_min_submit_interval_s: 0.03`, `async_max_inflight_per_track: 6` (else as S1)
+
+```
+RECALL 96.2% (25/26) | bib exactly right 23/25 (wearing 16/18, no-bib 7/7) | ghosts 2 | drift median 0.3 s, worst 2.3 s
+source dropped 60 / 45661 | ocr read 116, skipped 0, late 0        (S1: 54 at 0.12, S2: 77 at 0.05)
+```
+
+Reads doubled again (14-48-12: 11→20, 07-57-12: 29→41) and the worker
+*still* never skipped a crop or resolved a finish late: on this footage
+there is rarely more than one runner at the line, so 33 offered reads/s
+sit under the ~36/s the CUDA worker sustains. Accuracy unchanged, drops
+unchanged within noise. The recommendation stays at **0.05 / 4**: it
+already collects every read that mattered and leaves capacity for two
+runners abreast (2 x 20/s), which 0.03 would not (2 x 33/s > 36/s) -- and
+that is the pack situation a race has and this footage does not.
+
+| OCR spacing | reads (14 clips) | skipped / late | bibs right |
+|---|---|---|---|
+| 0.12 s, 3 in flight (Mac value) | 54 | 0 / 0 | 23/25 |
+| 0.05 s, 4 in flight | 77 | 0 / 0 | 23/25 |
+| 0.03 s, 6 in flight | 116 | 0 / 0 | 23/25 |
+
+## The direct TensorRT backend (`model.backend: trt`)
+
+Motivation: at 928x512 the model is 5 ms of a 13-15 ms frame; the rest is
+ultralytics' CPU glue. `detect.TrtRunner` uploads the crop through a
+pinned buffer, letterboxes in torch on the GPU (geometry checked against
+ultralytics' `LetterBox`/`scale_boxes` in `tests/test_trt_backend.py`),
+runs the `--nms` engine with `execute_async_v3`, and hands the surviving
+rows to ultralytics' own `BYTETracker` built from the same yaml, updated
+on every frame like the predictor does. No `get_cfg`, no dataset object,
+no `Results`.
+
+**Equivalence** (`scratchpad/equivalence.py`, same NMS engine both ways,
+300 frames of the 14-48-12 crossing):
+
+```
+[detect] matched 395 boxes (IoU>=0.5), only-ultralytics 2, only-direct 6 | IoU median 0.999 p10 0.996 | |dconf| median 0.0010 max 0.015 | ms/frame ultralytics 12.2 direct 7.9
+[track]  matched 331 boxes,             only-ultralytics 2, only-direct 3 | IoU median 0.998 p10 0.996 | |dconf| median 0.0010 max 0.015 | ms/frame ultralytics 13.6 direct 8.7 | track-id mapping consistent on 132/132 tracked pairs
+```
+
+The residual differences are the GPU bilinear resize versus cv2's (sub-pixel
+sampling, conf within 0.015); the handful of unmatched boxes are at the 0.25
+conf edge.
+
+**Cost** (`bench_detector`, same window, cv2 threads 4):
+
+| configuration | loop median / p90 / mean | fps at median | e2e fps (with CPU decode) |
+|---|---|---|---|
+| NMS engine via ultralytics | 13.4 / 14.9 / 13.7 | 75 | 49.5 |
+| **NMS engine, direct backend** | **8.9 / 9.8 / 9.1** | **113** | 60.9 |
+| direct backend + two-stage (640 `--nms` engine, direct) | 8.8 / 16.5 / 10.0 | 114 | 58.8 |
+
+So the loop went **19.5 → 8.9 ms** across the session (2.2x), and the 60
+fps budget of 16.7 ms is now cleared with margin at 928x512 -- even the
+file replay with its 5.7 ms CPU decode on the loop thread runs at 60.9
+fps. Two-stage on this path costs +1 ms mean and +6.7 ms p90 (its 29
+extra bib boxes on the window are the same 29 as before).
+
+`trt_640x640_fp16_nms.engine` built in 303 s (peak RAM in the same band as
+the other builds).
+
+### Rejected: OCR without CRAFT
+
+EasyOCR's `readtext` runs CRAFT text localisation before recognition; the
+crop already is a bib, so `recognize` alone looked like a free 2x
+(12.3 ms vs 27.2 ms per read). It is not: on the pipeline's preprocessed
+crops it agreed with `readtext` on **0/166** (top answers '41', '4',
+'0'), and trimming the crop to its dark pixels first did no better
+(0/166). CRAFT is finding the digit line inside a crop that also holds
+shirt and background; the recogniser cannot do that itself. Left as is.

@@ -63,6 +63,13 @@ from the race Mac, or export from the trained weights:
 python scripts/export_coreml.py --size 512 928
 ```
 
+**On a Jetson Orin Nano** the model is a TensorRT engine built on the
+board and the environment is different enough to need its own recipe:
+[requirements-jetson.txt](requirements-jetson.txt) (read its header),
+`scripts/export_tensorrt.py`, and `config/race_cv.jetson.yaml` passed as
+`--config` everywhere. Every measurement behind that config is in
+[JETSON_NOTES.md](JETSON_NOTES.md). The Mac config and path are unchanged.
+
 The frontend builds once and the API serves it:
 
 ```bash
