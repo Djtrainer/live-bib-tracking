@@ -52,8 +52,12 @@ model:
   # clip, runner tracks drawn on 73% of their frames instead of 64%, gaps
   # halved -- and never creates a track by itself. The 14-clip real-time
   # smoke is identical to conf 0.25 (25/26, 23/25, same 28 finisher rows,
-  # same drops); what changes is that spectator tracks persist instead of
-  # flickering, which the course boundary gates as before. OCR still needs
+  # same drops); what changes is that other people ON the course -- marshals,
+  # walkers, far racers -- keep a track alive instead of flickering (person
+  # boxes per clip rose up to 14x, people_outside_boundary stayed 0). They
+  # produce no finishers because they never approach and cross the line;
+  # require_approach and min_observations are what stand between such a
+  # track and the leaderboard, so leave those alone. OCR still needs
   # a 0.25 bib box (ocr.min_bib_yolo_conf). On the direct backend this
   # value is frozen into the engine: export with --nms --conf 0.1.
   conf: 0.1

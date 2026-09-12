@@ -869,10 +869,15 @@ source dropped 48 / 45673 | ocr read 76, skipped 0, late 0 | loop 9.5 / 10.0 ms 
 ```
 
 All 28 finisher rows identical to S7. Person-box counts rise sharply on
-the busy 2025 clips (14-48-12: 513 → 7342, 14-42-58: 496 → 3882): a
-spectator who once scored ≥0.5 now keeps a track alive on 0.1-0.3 boxes
-instead of flickering in and out, exactly the mechanism that keeps the
-runner's track alive. No new ghosts, no change in hand-offs or
-min-observation rejections; the course boundary gates them as it always
-did. Adopted in the recommended config: the runner tracks on the 2026
-clip go from 64% to 73% drawn with half the gaps, at +0.6 ms per frame.
+the busy 2025 clips (14-48-12: 513 → 7342, 14-42-58: 496 → 3882), and
+`people_outside_boundary` stays at 0: these are people **on the course**
+-- marshals, walkers, far racers -- who once scored ≥0.5 and now keep a
+track alive on 0.1-0.3 boxes instead of flickering in and out, exactly
+the mechanism that keeps the runner's track alive. No new ghosts, no
+change in hand-offs or min-observation rejections: such tracks never
+approach and cross the line, and `require_approach` /
+`min_observations` are what stand between them and the leaderboard (the
+boundary is not involved). Adopted in the recommended config: the runner
+tracks on the 2026 clip go from 64% to 73% drawn with half the gaps, at
++0.6 ms per frame; watch the preview for more blue boxes on bystanders,
+which is the price.
