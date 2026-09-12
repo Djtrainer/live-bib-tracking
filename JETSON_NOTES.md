@@ -811,3 +811,13 @@ which ran the whole clip at 29.9 fps (14 of 2421 frames dropped), opened
 the GTK preview window, delivered 3 finishers to the API, and stopped the
 API on exit as preview mode does. The `Gtk-Message: Failed to load module
 "canberra-gtk-module"` line is harmless (a sound theme module).
+
+### `--preview` over SSH
+
+With no display, `cv2.imshow` raised "GTK backend is not available" on
+every frame the preview gate fired on, counted as frame errors (100+ per
+clip, tracebacks in the log) while timing carried on unaffected.
+`race_cv.run` now disables the window with one warning when
+`DISPLAY`/`WAYLAND_DISPLAY` is empty on Linux, and once at the first
+failed draw otherwise, pointing at the browser stream (`/video_feed`).
+Verified on the 60 fps clip: one warning, 0 frame errors, 59.7 fps.

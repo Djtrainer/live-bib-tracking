@@ -279,6 +279,21 @@ def main(argv: list[str] | None = None) -> int:
             config.stream.target_fps,
         )
 
+    if args.preview and sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        # No X/Wayland display (an SSH session, a headless boot). imshow would
+        # raise on every frame the preview gate fires on -- counted as frame
+        # errors, tracebacks in the log, nothing drawn. Timing is unaffected
+        # either way, so drop the window now and say where the picture is.
+        logger.warning(
+            "--preview requested but no display is set (DISPLAY/WAYLAND_DISPLAY "
+            "empty); running without the window. Watch the browser stream at "
+            "%s/video_feed, or reconnect with ssh -X.",
+            config.sink.api_url or "http://localhost:8001",
+        )
+        args.preview = False
+
     on_result = None
     if args.preview or streamer is not None:
         import cv2
@@ -314,7 +329,19 @@ def main(argv: list[str] | None = None) -> int:
             if publish:
                 streamer.submit(annotated)
             if show:
-                cv2.imshow("race_cv preview", downscale(annotated, args.preview_scale))
+                try:
+                    cv2.imshow("race_cv preview", downscale(annotated, args.preview_scale))
+                except cv2.error as exc:
+                    # A window that cannot be drawn is not a frame error. Give
+                    # up on it once and keep the frame loop clean.
+                    logger.warning(
+                        "Preview window unavailable (%s); continuing without it. "
+                        "Watch the browser stream at %s/video_feed instead.",
+                        str(exc).strip().splitlines()[-1],
+                        config.sink.api_url or "http://localhost:8001",
+                    )
+                    args.preview = False
+                    return
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     # This stops race timing. It once ended a full-clip run at
                     # 260s of 311s with a clean "all events delivered" and no
