@@ -881,3 +881,31 @@ boundary is not involved). Adopted in the recommended config: the runner
 tracks on the 2026 clip go from 64% to 73% drawn with half the gaps, at
 +0.6 ms per frame; watch the preview for more blue boxes on bystanders,
 which is the price.
+
+## Training data: what exists and what was mined (2026-09-12)
+
+`build_dataset.py --dry-run` on the board: **376 unique labelled images**,
+of which 203 finish-line camera frames (all 2025), 162 DSLR race photos
+(2022/2023) and 150 public bib photos. Every image under
+`data/processed/` already has a label; the 2025 race screenshots the user
+mentioned are not on this board.
+
+`scripts/mine_frames.py` on the three 2026 clips with the strongest
+teacher (1376x768, conf 0.1, ultralytics path), then
+`scripts/autolabel.py` (1376x768 engine + 640 second stage, conf 0.15,
+device cuda:0):
+
+| clip | frames mined | why (gap / lowconf / nobib / easy / empty) | auto_ok | needs_review | teacher found nothing |
+|---|---|---|---|---|---|
+| 2026-09-07 07-51-07 | 105 | 22 / 16 / 59 / 8 / 6 | 0 | 105 | 30 |
+| 2026-09-07 07-57-12 | 102 | 51 / 9 / 35 / 8 / 6 | 2 | 100 | 41 |
+| 2026-09-05 15-11-20 (60 fps) | 45 | 2 / 1 / 40 / 3 / 2 | 0 | 45 | 9 |
+| **total** | **252** | | 2 | 250 | 80 |
+
+The 80 "nothing detected" frames are gap frames where even the best
+detector here sees no runner: the hardest examples, and the ones a human
+must box from scratch. The 144 "person, no bib" frames are the case
+autolabel refuses to decide. `build_dataset.py` would already take 172 of
+the 252 (it skips empty labels) and route the 60 fps clip's frames into
+VAL by segment -- **review before building**, since a machine label that
+asserts "background" on a frame with a runner in it trains the miss in.
