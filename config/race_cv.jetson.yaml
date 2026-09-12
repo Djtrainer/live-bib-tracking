@@ -8,7 +8,7 @@
 # and one TensorRT version: model.imgsz must match the export by hand, and
 # the engine must be rebuilt after a JetPack upgrade. Build both engines
 # this config names with:
-#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 512 928 --nms
+#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 512 928 --nms --conf 0.1 --out models/exports/trt_928x512_fp16_nms_c010.engine
 #   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 640 640 --nms
 #
 # Validated on the board (JETSON_NOTES.md, section 6): 14 clips in real
@@ -41,10 +41,22 @@ model:
   #   928x512    @15fps   75% recall  2/3 bibs     26 frames dropped
   #   928x512    @30fps   75% recall  3/3 bibs     36 frames dropped (of 9338)
   # Tracking loop 20.2ms median / 26ms p90 against a 33ms budget at 30fps.
-  path: models/exports/trt_928x512_fp16_nms.engine
+  path: models/exports/trt_928x512_fp16_nms_c010.engine
   tracker: config/custom_tracker.yaml
   imgsz: [512, 928]    # [height, width] -- ultralytics' ordering. Must match the export.
-  conf: 0.25          # now actually reaches the model (it never used to)
+  # 0.1, not 0.25: this is the floor of what ByteTrack is allowed to see,
+  # not what counts as a runner. ByteTrack keeps an existing track alive on
+  # 0.1-0.3 boxes (its second association) and still needs 0.5 to start a
+  # new one (new_track_thresh), so the low band bridges the frames where
+  # the model's confidence on a runner dips -- measured on the 2026-09-07
+  # clip, runner tracks drawn on 73% of their frames instead of 64%, gaps
+  # halved -- and never creates a track by itself. The 14-clip real-time
+  # smoke is identical to conf 0.25 (25/26, 23/25, same 28 finisher rows,
+  # same drops); what changes is that spectator tracks persist instead of
+  # flickering, which the course boundary gates as before. OCR still needs
+  # a 0.25 bib box (ocr.min_bib_yolo_conf). On the direct backend this
+  # value is frozen into the engine: export with --nms --conf 0.1.
+  conf: 0.1
   iou: 0.7
   device: cuda:0      # the Orin's GPU; every engine, and EasyOCR, runs here
   half: true          # the engine is FP16 inside; its input binding is fp32 and that is what it is fed
@@ -231,7 +243,7 @@ pipeline:
   # the 14-48-12 clip it processed 9302 of 9338 frames and read 3/3 bibs.
   # If `source dropped` climbs in the health line, drop this to 15 before
   # anything else; it was 26 dropped at 15fps.
-  target_fps: 30.0         # 0 = process every frame (replay uses this)
+  target_fps: 60.0         # 0 = process every frame (replay uses this)
   log_every_n_frames: 300
 
 sink:

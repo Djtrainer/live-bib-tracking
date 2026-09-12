@@ -146,7 +146,21 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--model", default="models/gpu_runs/yolo11n_1280/weights/best.mlpackage"
     )
-    parser.add_argument("--imgsz", type=int, default=1280)
+    parser.add_argument(
+        "--imgsz", type=int, nargs="+", default=[1280],
+        help="Input size: one int for square, or HEIGHT WIDTH for a rectangular "
+             "export (ultralytics' ordering, as in the configs)")
+    parser.add_argument(
+        "--device", default="cpu",
+        help="Inference device: 'cpu' (CoreML on the Mac) or 'cuda:0' (Jetson)")
+    parser.add_argument(
+        "--backend", default="ultralytics", choices=["ultralytics", "trt"],
+        help="'trt' runs an --nms TensorRT engine directly (Jetson); see model.backend")
+    parser.add_argument(
+        "--two-stage-model", default=None,
+        help="A smaller export for the per-runner bib pass (e.g. a 640 engine). "
+             "Default: the main model at its own size, which is slow but works")
+    parser.add_argument("--two-stage-imgsz", type=int, default=640)
     parser.add_argument(
         "--conf", type=float, default=0.15,
         help="Low on purpose: a marginal box a human can delete beats a missed "
@@ -176,8 +190,8 @@ def main(argv=None) -> int:
 
     print(f"unlabelled images: {len(targets)}")
     print(f"  by domain: {dict(Counter(domain_of(p) for p in targets))}")
-    print(f"teacher: {args.model} @ {args.imgsz}px, conf={args.conf}, "
-          f"two_stage={args.two_stage}")
+    print(f"teacher: {args.model} @ {args.imgsz}px on {args.device}, conf={args.conf}, "
+          f"two_stage={args.two_stage}" + (f" via {args.two_stage_model}" if args.two_stage_model else ""))
     if args.dry_run:
         print("\n--dry-run: nothing written")
         return 0
@@ -205,10 +219,15 @@ def main(argv=None) -> int:
         # Detection itself is stateless here (see .detect below): these are
         # unrelated stills, not video.
         if detector is None or detector._frame_size != (width, height):
+            imgsz = args.imgsz[0] if len(args.imgsz) == 1 else list(args.imgsz[:2])
             detector = Detector(
-                ModelConfig(path=args.model, imgsz=args.imgsz, conf=args.conf,
-                            device="cpu", two_stage=args.two_stage,
-                            two_stage_imgsz=args.imgsz),
+                ModelConfig(path=args.model, imgsz=imgsz, conf=args.conf,
+                            device=args.device, backend=args.backend,
+                            two_stage=args.two_stage,
+                            two_stage_model=args.two_stage_model,
+                            two_stage_imgsz=(args.two_stage_imgsz if args.two_stage_model
+                                             else imgsz),
+                            cv2_threads=4 if args.device != "cpu" else 0),
                 RoiConfig(), width, height,
             )
             detector._frame_size = (width, height)

@@ -821,3 +821,58 @@ clip, tracebacks in the log) while timing carried on unaffected.
 `DISPLAY`/`WAYLAND_DISPLAY` is empty on Linux, and once at the first
 failed draw otherwise, pointing at the browser stream (`/video_feed`).
 Verified on the 60 fps clip: one warning, 0 frame errors, 59.7 fps.
+
+## Boxes popping in and out of the preview (2026-09-12)
+
+Reported on `2026-09-07 07-57-12` with the recommended config. Measured
+from replay traces (`scratchpad/continuity.py`: per track, the fraction
+of frames within its span on which it was drawn; a bib box "in" a
+runner means its centre lies inside the person box):
+
+| detector / conf fed to ByteTrack | runner tracks drawn (frames in span) | gaps | bib in runner (3 finishers) |
+|---|---|---|---|
+| 928x512, conf 0.25 (as recommended) | 66% / 61% / 61% | 33 | 38% / 2% / 2% |
+| **928x512, conf 0.1** (ultralytics path, plain engine) | 73% / 72% / 73% | 18 | 41% / 1% / 1% |
+| 928x512, conf 0.1, direct path (`--nms --conf 0.1` engine) | 73% / 72% / 73% | 18 | identical |
+| 1376x768, conf 0.25 | 63% / 58% / 57% | 35 | 54% / 13% / 2% |
+| 1376x768, conf 0.1 | 76% / 63% / 65% | 22 | 57% / 15% / 1% |
+
+Where the gaps are: the far half of the approach (runner 230-480 px tall,
+box bottom y 590-800); from ~600 px tall to the line presence is ~100%.
+The longest gap (16 frames) opens on a box at conf 0.11 and closes on one
+at 0.56 -- the detector's confidence on this 2026 footage swings across
+the threshold frame to frame. So: **not rendering** (the overlay draws
+exactly the tracker's output), and two causes:
+
+1. ByteTrack is starved. The config runs the detector at conf 0.25;
+   ByteTrack's second association exists to keep tracks alive on
+   0.1-0.3 boxes (ultralytics' own `track()` defaults conf to 0.1 for
+   this), and `new_track_thresh: 0.5` still gates new tracks, so the low
+   band never creates ghosts. Conf 0.1 halves the gaps. On the direct
+   backend the threshold is frozen in the engine, so a
+   `trt_928x512_fp16_nms_c010.engine` (`--nms --conf 0.1`) was built.
+2. The model is less sure on this footage than on the 2025 clips it was
+   trained on; ~27% of frames are still missing at conf 0.1. More input
+   resolution does not fix that (1376x768: 30% missing) though it sees
+   bibs earlier. The fix for this part is 2026 frames in the training
+   set (`scripts/autolabel.py`, `scripts/mine_errors.py`).
+
+The tracker keeps the same id across these gaps (track_buffer 4 s), so
+the finish logic is not what flickers; the finishers on this clip were
+found in every variant above.
+
+### S9 -- conf 0.1 fed to ByteTrack (`trt_928x512_fp16_nms_c010.engine`, direct backend, else as S7)
+
+```
+RECALL 96.2% (25/26) | bib exactly right 23/25 (wearing 16/18, no-bib 7/7) | ghosts 2 | drift median 0.3 s, worst 2.3 s
+source dropped 48 / 45673 | ocr read 76, skipped 0, late 0 | loop 9.5 / 10.0 ms (bench window)
+```
+
+All 28 finisher rows identical to S7. Person-box counts rise sharply on
+the busy 2025 clips (14-48-12: 513 → 7342, 14-42-58: 496 → 3882): a
+spectator who once scored ≥0.5 now keeps a track alive on 0.1-0.3 boxes
+instead of flickering in and out, exactly the mechanism that keeps the
+runner's track alive. No new ghosts, no change in hand-offs or
+min-observation rejections; the course boundary gates them as it always
+did. Adopted in the recommended config: the runner tracks on the 2026
+clip go from 64% to 73% drawn with half the gaps, at +0.6 ms per frame.
