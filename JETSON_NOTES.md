@@ -649,3 +649,144 @@ crops it agreed with `readtext` on **0/166** (top answers '41', '4',
 '0'), and trimming the crop to its dark pixels first did no better
 (0/166). CRAFT is finding the digit line inside a crop that also holds
 shirt and background; the recogniser cannot do that itself. Left as is.
+
+## 6. Report
+
+Every row: Jetson Orin Nano Developer Kit Super, JetPack 7.2.1, TensorRT
+10.16, **MAXN_SUPER under DVFS** (`jetson_clocks` not confirmable without
+sudo; GPU 1020 MHz and CPUs 1728 MHz read at idle and under load), desktop
+session resident (~3-4 GB), no swap. ms/frame and flat-out fps are the
+frame loop (`Pipeline.process`) on the 14-48-12 crossing window, opset-17
+engines, cv2 threads 4 unless noted. Recall / bibs / drift / dropped are
+the 14-clip real-time smoke run (26 finishers, three-bib example roster).
+Peak temperature is `tj` from tegrastats over that run.
+
+| configuration | power mode | ms/frame (median / p90) | fps flat out (loop) | recall | bibs right | drift (median) | source dropped | peak tj |
+|---|---|---|---|---|---|---|---|---|
+| Mac M2 baseline (CoreML 928x512, from the brief) | -- | ~20-24 | ~42-50 | 25/26 | 22/25 | 0.4 s | ~0.4% | -- |
+| 928x512 FP16, Mac config as shipped (cv2 threads 0) | MAXN_SUPER | 19.5 / 21.1 | 51 | -- | -- | -- | -- | -- |
+| S1 928x512 FP16, cv2 threads 4, OCR 0.12 | MAXN_SUPER | 15.3 / 16.9 | 65 | 25/26 | 23/25 | 0.3 s | 51 / 45670 (0.11%) | 56.5 C |
+| S2 + OCR 0.05 / 4 in flight | MAXN_SUPER | 15.3 / 16.9 | 65 | 25/26 | 23/25 | 0.3 s | 54 (0.12%) | 56.5 C |
+| S6 + OCR 0.03 / 6 in flight | MAXN_SUPER | 15.3 / 16.9 | 65 | 25/26 | 23/25 | 0.3 s | 60 (0.13%) | 54.2 C |
+| S3 + two-stage 640 (ultralytics path) | MAXN_SUPER | 15.3 / 29.4 (mean 17.1) | 65 | 25/26 | 23/25 | 0.3 s | **426 (0.9%)** | 55.3 C |
+| S4 1376x768 FP16 (native crop) | MAXN_SUPER | 19.3 / 23.8 | 52 | **24/26** | 22/24 | 0.4 s | 67 (0.15%) | 58.0 C |
+| 1280x736 FP16 (bench only) | MAXN_SUPER | 23.6 / 24.2 | 42 | -- | -- | -- | -- | -- |
+| 1920x1088 FP16 full frame, ROI off (bench only) | MAXN_SUPER | 30.4 / 34.8 | 33 | -- | -- | -- | -- | -- |
+| 928x512 FP32 (bench only) | MAXN_SUPER | 19.7 / 21.3 | 51 | -- | -- | -- | -- | -- |
+| S5 928x512 FP16 with NMS in the engine (ultralytics path) | MAXN_SUPER | 13.4 / 14.9 | 75 | 25/26 | 23/25 | 0.3 s | 55 (0.12%) | 55.2 C |
+| **RECOMMENDED: 928x512 FP16 NMS engine, direct backend, cv2 threads 4, OCR 0.05 / 4** | MAXN_SUPER | **8.9 / 9.8** | **113** | **25/26** | **23/25** | **0.3 s** | **48 / 45673 (0.11%)** | **55.2 C** |
+| recommended + two-stage 640 NMS engine, direct | MAXN_SUPER | 8.8 / 16.5 (mean 10.0) | 114 | 25/26 | 23/25 | 0.3 s | 45 (0.10%) | 55.5 C |
+
+### S7 -- confirmation of the recommended config (`config/race_cv.jetson.yaml` as committed)
+
+```
+RECALL 96.2% (25/26) | bib exactly right 23/25 (wearing 16/18, no-bib 7/7) | ghosts 2 | drift median 0.3 s, worst 2.3 s
+source dropped 48 / 45673 (0.11%) | ocr read 73, skipped 0, late 0
+tegrastats over the run: CPU 19% of 6 cores (S1: 24%), GR3D 17%, 8.6 W, tj max 55.2 C
+```
+
+All 28 finisher rows are identical to S1 in bib and time (within 0.2 s);
+per-clip person and bib box counts match S1 within a few boxes (the GPU
+resize's sub-pixel differences at the 0.25 conf edge). The direct backend
+changes the cost of the race, not its result.
+
+### S8 -- recommended config with `two_stage: true` (direct backend, 640 `--nms` engine)
+
+```
+RECALL 96.2% (25/26) | bib exactly right 23/25 (wearing 16/18, no-bib 7/7) | ghosts 2 | drift median 0.3 s, worst 2.3 s
+source dropped 45 / 45676 (0.10%)   <- S3 through ultralytics: 426 | ocr read 147, skipped 0, late 0   <- S7: 73
+```
+
+All 28 finisher rows identical to S7. Bib boxes +50-100% per clip
+(14-48-12: 119→174, 07-57-12: 84→153), OCR reads doubled, and the drop
+penalty that made S3 unusable is gone: on the direct backend a runner's
+640 crop is ~5 ms. Two-stage is now affordable; it is left off because on
+this footage it changes no verdict, and it is one line to enable.
+
+### 60 fps ingestion with the recommended config
+
+The 60 fps clip (`2026-09-05 15-11-20`, 920 frames) in real time with
+`target_fps: 60`, `confirm_frames: 16`, `min_observations: 10`,
+`track_buffer: 240`:
+
+```
+health | processed 894 (58.8 fps) | source dropped 26 | finishers 1
+```
+
+versus 45.9 fps / 222 dropped at 928x512 through ultralytics at the start
+of the session. The 26 drops are the file path's CPU HEVC decode (5.7 ms)
+sitting on the loop thread next to the 8.9 ms loop; a camera decodes on
+its own thread, so live the loop alone has to fit 16.7 ms and it does
+with p90 9.8 ms. What this footage cannot show is 60 fps *accuracy*
+(no expectations exist for it).
+
+### What improved over the Mac baseline
+
+- **Frame cost: 19.5 → 8.9 ms** (median, 928x512). The Mac's ~20 ms
+  reproduced exactly on the Jetson as shipped, then fell in three measured
+  steps: OpenCV threads back on (-4 ms), NMS inside the engine (-2 ms),
+  and the direct TensorRT backend (-4.5 ms). The 33 ms budget at 30 fps is
+  now used 27%; the 16.7 ms budget at 60 fps is cleared with margin
+  (p90 9.8 ms), which the Mac never could.
+- **Dropped frames: ~0.4% → ~0.1%** live, with the loop idle most of the time.
+- **OCR: 48 → 26.9 ms per real-crop read**, ~36 reads/s, and the 150-1000 ms
+  new-width stalls that forced `width_buckets_px` are 65 ms here. The
+  per-track spacing is 0.05 s instead of 0.12 s with zero skipped or late.
+- **Two-stage is affordable** (+1 ms mean, +6.7 ms p90 on the direct
+  backend) where the Mac could not run it at all.
+- **A 1080p60 USB camera is decodable**, on the JPEG engine
+  (`nvv4l2decoder mjpeg=1`, 93 fps) through the new GStreamer source; the
+  CPU path tops out at 43 fps.
+- Thermals and power are a non-issue: tj peaks 54-58 C, 8.5-10.5 W, over
+  26-minute real-time runs.
+
+### What did not improve
+
+- **Accuracy.** 25/26 found, 23/25 bibs, 0.3 s drift is where the Mac
+  already was (its 22/25 is 23/25 with the roster snap it now has). Every
+  extra read, bib box and second-stage crop this board affords changed no
+  verdict: the two wrong bibs are racers not on the example roster, the one
+  miss is an expectation on a clip's last frame. Bib accuracy is roster-
+  and footage-bound, not compute-bound.
+- **Resolution.** More detector pixels found more boxes and lost a
+  finisher (1376x768: 24/26 -- the track fragments at the line and the
+  hand-off fails). The full frame does not clear 30 fps. 928x512 stays.
+- **The board's memory.** 7.5 GB with no swap and a desktop holding 3-4 GB
+  of it; engine builds peaked at 6.8 GB. Build before race day, headless.
+
+### The next limit
+
+The loop is 8.9 ms of which the model is ~5; ByteTrack + Kalman + GMC
+are ~1.9 ms on the CPU and the GPU letterbox + one small D2H copy make up
+the rest. The next things that would matter, in order: (1) with a live
+camera the capture thread's BGRx→BGR `videoconvert` and the frame-loop's
+pinned copy could be replaced by uploading BGRx straight to the GPU; (2)
+the OCR worker shares the GIL with the loop and CRAFT is CPU-heavy, so at
+two runners abreast and 0.05 s spacing the worker (~36/s) is the first
+thing to saturate; (3) beyond that it is the tracker's Python, which is
+the same code the Mac runs. None of these is needed for 30 fps. For a
+60 fps camera the frame-counted levers in the config
+(`finish_line.confirm_frames`, `min_observations`, `track_buffer`) must
+be doubled, and the one 60 fps clip shows the loop keeps up; what is not
+yet shown is 60 fps *accuracy*, because there is no 60 fps footage with
+expectations.
+
+### Recommended `config/race_cv.jetson.yaml`
+
+Committed on `jetson-eval`. The deltas from the Mac config, all measured
+above:
+
+| key | Mac | Jetson | why |
+|---|---|---|---|
+| `model.path` | `rect_928x512.mlpackage` | `trt_928x512_fp16_nms.engine` | S5: same boxes, -2 ms; built by `export_tensorrt.py --size 512 928 --nms` |
+| `model.backend` | ultralytics | **trt** | direct path: 13.4 → 8.9 ms, same boxes (IoU 0.999) |
+| `model.device` / `half` | cpu / false | cuda:0 / true | |
+| `model.cv2_threads` | 0 | 4 | letterbox 5.5 → 1.8 ms |
+| `model.two_stage_model` | null | `trt_640x640_fp16_nms.engine` | ready; `two_stage` stays false (no accuracy change, S3) |
+| `ocr.async_min_submit_interval_s` / `async_max_inflight_per_track` | 0.12 / 3 | 0.05 / 4 | S2: reads 54 → 77, 0 skipped, 0 late |
+| everything else (geometry, thresholds, tracker yaml) | -- | unchanged | |
+
+Run it with `--config config/race_cv.jetson.yaml` (the launcher's `-v`/`-c`
+flags pass through), `PYTHONPATH=src` when calling `race_cv.run` directly,
+and `YOLO_AUTOINSTALL=false` in the environment so ultralytics never pip-
+installs into the venv mid-race.
