@@ -790,3 +790,24 @@ Run it with `--config config/race_cv.jetson.yaml` (the launcher's `-v`/`-c`
 flags pass through), `PYTHONPATH=src` when calling `race_cv.run` directly,
 and `YOLO_AUTOINSTALL=false` in the environment so ultralytics never pip-
 installs into the venv mid-race.
+
+## Launcher on the Jetson
+
+`./start-race-cv.sh` defaulted to `config/race_cv.yaml`, whose model is
+the Mac's `rect_928x512.mlpackage`, and failed the model preflight with a
+misleading "install coremltools" (CoreML cannot run on Linux at all). The
+launcher now picks `config/race_cv.jetson.yaml` by itself when
+`/etc/nv_tegra_release` exists (`--config` / `RACE_CV_CONFIG` still win),
+explains a `.mlpackage` on Linux as a wrong config rather than a missing
+package, reads memory from `/proc/meminfo` instead of `vm_stat`, prints
+the LAN address from `hostname -I`, and exports `YOLO_AUTOINSTALL=false`
+so ultralytics never pip-installs mid-race. Verified 2026-09-12 with
+
+```bash
+./start-race-cv.sh -v "data/raw/Camo Recording 2026-09-07 07-57-12.mov" -r data/results/test_starter_list_real.csv --preview --native-frontend
+```
+
+which ran the whole clip at 29.9 fps (14 of 2421 frames dropped), opened
+the GTK preview window, delivered 3 finishers to the API, and stopped the
+API on exit as preview mode does. The `Gtk-Message: Failed to load module
+"canberra-gtk-module"` line is harmless (a sound theme module).

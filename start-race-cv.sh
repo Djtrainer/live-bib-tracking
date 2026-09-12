@@ -29,7 +29,21 @@ NC='\033[0m' # No Color
 CAMERA_INDEX=${CAMERA_INDEX:-1}
 VIDEO_PATH=""
 PORT=${PORT:-8001}
-CONFIG=${RACE_CV_CONFIG:-"config/race_cv.yaml"}
+CONFIG=${RACE_CV_CONFIG:-}
+# On a Jetson the model is a TensorRT engine and the config that names it is
+# config/race_cv.jetson.yaml (JETSON_NOTES.md). The Mac config's CoreML
+# .mlpackage cannot run here at all, so defaulting to it only produces a
+# misleading "install coremltools" failure. --config / RACE_CV_CONFIG still win.
+if [[ -z "$CONFIG" ]]; then
+    if [[ -f /etc/nv_tegra_release && -f config/race_cv.jetson.yaml ]]; then
+        CONFIG="config/race_cv.jetson.yaml"
+    else
+        CONFIG="config/race_cv.yaml"
+    fi
+fi
+# Never let ultralytics pip-install a missing package into the race
+# interpreter mid-run; a race is not the moment for a surprise download.
+export YOLO_AUTOINSTALL=false
 MODEL_PATH=""
 ROSTER=""
 PREVIEW=0
@@ -252,6 +266,12 @@ print(os.environ.get('MODEL_PATH_OVERRIDE') or config.model.path)
         exit 1
     fi
 
+    if [[ "$effective_model" == *.mlpackage && "$(uname -s)" == "Linux" ]]; then
+        echo -e "${RED}❌ $effective_model is a CoreML export; CoreML does not run on Linux.${NC}"
+        echo -e "${BLUE}💡 Use the Jetson config, which names a TensorRT engine built on this board:${NC}"
+        echo -e "${BLUE}     $0 --config config/race_cv.jetson.yaml ...   (see JETSON_NOTES.md)${NC}"
+        exit 1
+    fi
     if [[ "$effective_model" == *.mlpackage ]]; then
         # ultralytics imports coremltools lazily, only when loading a .mlpackage,
         # so a missing install doesn't surface until race_cv is already running --
@@ -281,6 +301,20 @@ check_memory() {
     # full stack. Swapping during a crossing looks exactly like a slow model:
     # dropped frames at the line. Say so before the race, not after.
     echo -e "${YELLOW}🧠 Checking memory...${NC}"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        local avail_kb total_kb swap_kb avail_gb total_gb
+        avail_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+        total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+        swap_kb=$(awk '/SwapTotal/ {print $2}' /proc/meminfo)
+        avail_gb=$(awk -v k="$avail_kb" 'BEGIN {printf "%.1f", k/1048576}')
+        total_gb=$(awk -v k="$total_kb" 'BEGIN {printf "%.1f", k/1048576}')
+        echo -e "   ${total_gb} GB total, ~${avail_gb} GB available, swap $(( swap_kb / 1024 )) MB"
+        if awk -v f="$avail_gb" 'BEGIN {exit !(f < 1.5)}'; then
+            echo -e "${RED}⚠️  Under 1.5 GB available. On a Jetson the desktop session holds 3-4 GB;"
+            echo -e "   close editors and browsers, or boot to multi-user.target for the race.${NC}"
+        fi
+        return
+    fi
     local page_bytes free_pages total_bytes free_gb total_gb swap
     page_bytes=$(sysctl -n hw.pagesize 2>/dev/null || echo 16384)
     total_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
@@ -335,13 +369,18 @@ lan_urls() {
     # already up, and a missing LAN address or ngrok agent must not abort
     # the script (it did -- the management commands never printed and the
     # launcher exited 1 with everything running).
-    ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
-    host="$(scutil --get LocalHostName 2>/dev/null).local"
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+        host="$(hostname 2>/dev/null).local"
+    else
+        ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+        host="$(scutil --get LocalHostName 2>/dev/null).local"
+    fi
     echo -e "${YELLOW}📺 From other machines on the same network:${NC}"
     [[ -n "$ip" ]] && echo -e "   leaderboard (pavilion TV):   ${BLUE}http://$ip:$PORT/${NC}"
     [[ -n "$ip" ]] && echo -e "   Live Management (tablet):    ${BLUE}http://$ip:$PORT/admin${NC}"
     echo -e "   or by name:                  ${BLUE}http://$host:$PORT/${NC}  (mDNS; some hotspots block it -- use the IP)"
-    [[ -z "$ip" ]] && echo -e "${RED}   no LAN address on en0/en1 -- is the Mac on the hotspot?${NC}"
+    [[ -z "$ip" ]] && echo -e "${RED}   no LAN address -- is this machine on the hotspot?${NC}"
     # The pavilion reaches us through ngrok. If a tunnel is already running,
     # its public URL is on the agent's local API; print it so the operator
     # never has to hunt for it. See RACE_DAY_RUNBOOK.md, "Who opens what".
