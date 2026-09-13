@@ -120,6 +120,11 @@ class CrossingDetector:
         # test called it "not closing" and refused the hand-off.
         self._history: dict[int, list[tuple[float, float]]] = {}
         self._fired: set[int] = set()
+        # crossing_margin_px hysteresis: tracks that have been at least the
+        # margin on the approach side, and the interpolated instant of their
+        # latest zero crossing while they are inside the band past the line.
+        self._armed: set[int] = set()
+        self._pending_cross: dict[int, tuple[float, int]] = {}
         # Diagnostics: tracks first seen already past the line are suppressed
         # rather than fired, but they are counted so the suppression is visible
         # in the replay report instead of silently eating finishers.
@@ -211,6 +216,8 @@ class CrossingDetector:
 
         if previous is None:
             # First sighting of this track.
+            if distance <= -self.config.crossing_margin_px < 0.0:
+                self._armed.add(track_id)  # born well before the line: may finish
             if distance >= 0.0:
                 if self.config.require_approach:
                     predecessor = (
@@ -241,17 +248,43 @@ class CrossingDetector:
             return None
 
         previous_distance, previous_ts = previous
-        if previous_distance >= 0.0 or distance < 0.0:
+        margin = self.config.crossing_margin_px
+        if margin <= 0.0:
+            if previous_distance >= 0.0 or distance < 0.0:
+                return None
+            crossing_ts = self._zero_crossing(previous_distance, previous_ts, distance, capture_ts)
+            self._fired.add(track_id)
+            return Crossing(track_id, crossing_ts, frame_index, interpolated=True)
+
+        # Hysteresis. Arm well before the line; remember the zero crossing;
+        # fire only once the point is well past it. A retreat past the
+        # arming distance discards the pending crossing: that was jitter or
+        # someone turning back, not a finish.
+        if distance <= -margin:
+            self._armed.add(track_id)
+            self._pending_cross.pop(track_id, None)
             return None
+        if track_id not in self._armed:
+            return None
+        if previous_distance < 0.0 <= distance:
+            self._pending_cross[track_id] = (
+                self._zero_crossing(previous_distance, previous_ts, distance, capture_ts),
+                frame_index,
+            )
+        if distance >= margin and track_id in self._pending_cross:
+            crossing_ts, _ = self._pending_cross.pop(track_id)
+            self._armed.discard(track_id)
+            self._fired.add(track_id)
+            return Crossing(track_id, crossing_ts, frame_index, interpolated=True)
+        return None
 
-        # Sign change: interpolate the instant the reference point touched zero.
-        span = distance - previous_distance
-        fraction = (-previous_distance / span) if span > 1e-9 else 1.0
+    @staticmethod
+    def _zero_crossing(prev_distance: float, prev_ts: float, distance: float, ts: float) -> float:
+        """The instant the reference point touched the line, by linear interpolation."""
+        span = distance - prev_distance
+        fraction = (-prev_distance / span) if span > 1e-9 else 1.0
         fraction = min(max(fraction, 0.0), 1.0)
-        crossing_ts = previous_ts + fraction * (capture_ts - previous_ts)
-
-        self._fired.add(track_id)
-        return Crossing(track_id, crossing_ts, frame_index, interpolated=True)
+        return prev_ts + fraction * (ts - prev_ts)
 
     def has_finished(self, track_id: int) -> bool:
         return track_id in self._fired
@@ -259,3 +292,5 @@ class CrossingDetector:
     def forget(self, track_id: int) -> None:
         """Drop per-track state once a result has been delivered."""
         self._last.pop(track_id, None)
+        self._armed.discard(track_id)
+        self._pending_cross.pop(track_id, None)

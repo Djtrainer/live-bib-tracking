@@ -206,6 +206,20 @@ class FinishLineConfig:
     # had closed 60px in its final 0.6s.
     handoff_direction_window_s: float = 0.5
 
+    # Hysteresis on the crossing test, in pixels. With 0 (the exact-sign test)
+    # a reference point that jitters a few pixels either side of the line
+    # fires. Seen on 15-16-23 with a stronger detector: a person walking
+    # AWAY up the course with their feet out of frame -- so the "feet" are
+    # the frame's bottom edge, and the line runs within pixels of it there
+    # -- drifted +9 -> -7 -> +2 px as the box narrowed and was recorded as
+    # a finish. With a margin, a track must have been at least this far on
+    # the approach side since it was born (arming), and the finish fires
+    # once it is at least this far past the line; the crossing instant is
+    # still interpolated at the zero crossing, so times do not move. Tracks
+    # born inside the band never arm (they are fragments; the hand-off
+    # handles a track born past the line).
+    crossing_margin_px: float = 0.0
+
 
 @dataclass
 class OcrConfig:

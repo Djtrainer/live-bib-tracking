@@ -960,3 +960,45 @@ Model size is what moves presence, and mostly on the far approach:
 07-51-07 separates n (~16%), s (~30%), m (~60%) and l-960 (92%). The
 retrained nanos are no better than the current model. The l models find
 the bib on the fewest frames (their bib mAP was the lowest in training).
+
+### v2 real-time smoke (14 clips), and what the "ghosts" were
+
+`scratchpad/summarize_smoke.py`, scored first against `smoke_test.yaml`
+as it stood, then re-scored offline after correcting one expectation
+(below). Drops are of ~45,600 frames.
+
+| model | loop ms | recall (as filed) | ghosts | bibs | dropped | tj max | recall (17-45-02 corrected) | ghosts beyond the 2 known real crossings |
+|---|---|---|---|---|---|---|---|---|
+| current n v1 | 9.5 | 25/26 | 2 | 23/25 | 48 (0.1%) | – | 25/26 | 0 |
+| v2 n 960 | 11.9 | 24/26 | 6 | 22/24 | 62 | 55 C | 25/26 | 3 |
+| v2 n 1280 | 10.8 | 25/26 | 3 | 23/25 | 63 | 52 C | 25/26 | 1 (a 9-observation fragment) |
+| v2 s 960 | 13.5 | 24/26 | 4 | 22/24 | 67 | 62 C | 25/26 | 1 |
+| v2 s 1280 | 13.2 | 24/26 | 4 | 22/24 | 91 (0.2%) | 56 C | 25/26 | 1 |
+| v2 m 960 | 22.5 | 24/26 | 6 | 22/24 | 180 (0.4%) | 64 C | 25/26 | 3 |
+| **v2 m 1280** | 21.7 | 25/26 | 4 | 23/25 | 158 (0.35%) | 64 C | **26/26** | 1 |
+| v2 l 960 | 28.7 | 25/26 | 4 | 22/25 | **6393 (16%)** | 66 C | 26/26 | 1 |
+| v2 l 1280 | 26.5 | 24/26 | 5 | 21/24 | **2417 (5.6%)** | 66 C | 25/26 | 2 |
+
+Two crossings that 7 of 8 v2 models report and the current model does
+not were checked frame by frame (`runs/jetson/v2/ghost_*`):
+
+- **17-45-02 at 16.3 s is a real finisher.** The walker crosses the line
+  at ~16.3 s; `smoke_test.yaml` said 22 s, the clip's last frame. The
+  current model tracks him as two fragments split exactly at the line
+  (14.1-16.4 s and 17.1-18.2 s) with no hand-off and never fires -- the
+  "one miss" the README attributes to a last-frame expectation. m-1280
+  holds one track over 137 of 144 frames and fires at 16.33 s. The
+  expectation is now corrected to 16 s (commented in the file); the
+  right-hand columns above use it.
+- **15-16-23 at ~37.4 s is a person walking AWAY**, feet out of frame, so
+  the "feet" reference point is the frame's bottom edge, where the line
+  runs within pixels of it; as the box narrows the point drifts +9 -> -7
+  -> +2 px across the line and the exact-sign crossing test fires. The
+  current model only avoids it by losing the track. Fixed by
+  `finish_line.crossing_margin_px` (hysteresis: arm at -margin, fire at
+  +margin, time still interpolated at the zero crossing), 12 px in the
+  Jetson config, 0 on the Mac; validated in the two runs below.
+
+The one finisher the s/m-960/l-1280 models lose is the 14-48-12 @172 s
+hand-off case: their track fragments at the line and the newborn fails
+`min_observations`. The l models drop frames at 30 fps and are out.

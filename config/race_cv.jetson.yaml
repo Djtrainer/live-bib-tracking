@@ -180,6 +180,13 @@ finish_line:
   # ghosts from 10 to 4 at 1280 with no recall loss; real racers were observed
   # 10+ times, fragments 6 or fewer.
   min_observations: 5
+  # Jetson: 12 px of hysteresis on the crossing test. A stronger detector
+  # kept tracking a person walking AWAY up the course on 15-16-23 with
+  # their feet out of frame; the reference point (the frame's bottom edge
+  # there) drifted +9 -> -7 -> +2 px across the line and fired a finish.
+  # The Mac's model lost that track and never saw it. Crossing times are
+  # unchanged (still interpolated at the zero crossing).
+  crossing_margin_px: 12
 
 ocr:
   enabled: true

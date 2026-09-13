@@ -144,3 +144,51 @@ class TestCrossingDetector:
         det.update(1, (450.0, 200.0, 550.0, 480.0), capture_ts=0.0, frame_index=0)
         # Arms fly out: the box widens a lot but the feet have not reached the line.
         assert det.update(1, (100.0, 200.0, 900.0, 495.0), 1.0, 1) is None
+
+
+class TestCrossingMargin:
+    """crossing_margin_px: jitter across the line is not a finish."""
+
+    def test_zero_margin_keeps_the_exact_sign_test(self):
+        line, cfg = horizontal_line(crossing_margin_px=0.0)
+        det = CrossingDetector(line, cfg)
+        det.update(1, box_at(497), capture_ts=0.0, frame_index=0)
+        assert det.update(1, box_at(503), capture_ts=1.0, frame_index=1) is not None
+
+    def test_jitter_inside_the_band_does_not_fire(self):
+        """The 15-16-23 case: feet pinned at the frame edge, +9 -> -7 -> +2 px."""
+        line, cfg = horizontal_line(crossing_margin_px=12.0)
+        det = CrossingDetector(line, cfg)
+        det.update(1, box_at(450), capture_ts=0.0, frame_index=0)      # armed: 50 px before
+        for i, cy in enumerate((497, 503, 496, 505, 502), start=1):    # -3, +3, -4, +5, +2
+            assert det.update(1, box_at(cy), capture_ts=float(i), frame_index=i) is None
+        assert not det.has_finished(1)
+
+    def test_fires_once_past_the_margin_with_the_zero_crossing_time(self):
+        line, cfg = horizontal_line(crossing_margin_px=12.0)
+        det = CrossingDetector(line, cfg)
+        det.update(1, box_at(450), capture_ts=0.0, frame_index=0)
+        det.update(1, box_at(496), capture_ts=1.0, frame_index=1)      # -4
+        assert det.update(1, box_at(504), capture_ts=2.0, frame_index=2) is None   # +4: crossed, not yet confirmed
+        crossing = det.update(1, box_at(520), capture_ts=3.0, frame_index=3)       # +20: confirmed
+        assert crossing is not None and crossing.interpolated
+        assert crossing.capture_ts == pytest.approx(1.5)                # 496 -> 504 touched 500 halfway
+        assert det.update(1, box_at(600), capture_ts=4.0, frame_index=4) is None
+
+    def test_a_retreat_discards_the_pending_crossing(self):
+        line, cfg = horizontal_line(crossing_margin_px=12.0)
+        det = CrossingDetector(line, cfg)
+        det.update(1, box_at(450), capture_ts=0.0, frame_index=0)
+        det.update(1, box_at(505), capture_ts=1.0, frame_index=1)      # +5, pending
+        det.update(1, box_at(470), capture_ts=2.0, frame_index=2)      # back to -30: turned around
+        assert det.update(1, box_at(505), capture_ts=3.0, frame_index=3) is None
+        crossing = det.update(1, box_at(530), capture_ts=4.0, frame_index=4)
+        assert crossing is not None
+        assert crossing.capture_ts == pytest.approx(3.0 - (5.0 / 35.0) + 0.0, abs=0.2)  # from the second approach, not the first
+
+    def test_a_track_born_inside_the_band_never_arms(self):
+        line, cfg = horizontal_line(crossing_margin_px=12.0)
+        det = CrossingDetector(line, cfg)
+        det.update(1, box_at(495), capture_ts=0.0, frame_index=0)      # born 5 px before the line
+        assert det.update(1, box_at(530), capture_ts=1.0, frame_index=1) is None
+        assert not det.has_finished(1)
