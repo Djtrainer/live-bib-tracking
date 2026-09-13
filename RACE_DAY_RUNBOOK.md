@@ -197,9 +197,17 @@ Watch `source dropped`, `pending`, and `handed off` — see *What to watch in
 the health line* below.
 
 ```bash
-curl -s http://127.0.0.1:4040/api/tunnels | python3 -c "import json,sys; [print(t['public_url'], '->', t['config']['addr']) for t in json.load(sys.stdin)['tunnels']]"
+./broadcast.sh status
 ```
-Confirms the tunnel is up and where it points.
+Confirms the tunnel is up and which of the three sites it points at.
+
+```bash
+./broadcast.sh thank-you
+```
+**If the leaderboard must not be seen** — a crash, a bad restore, results
+that need fixing — this puts the thank-you page on the public URL within
+seconds; timing at the line is unaffected. `./broadcast.sh leaderboard`
+brings the results back.
 
 ```bash
 ipconfig getifaddr en0
