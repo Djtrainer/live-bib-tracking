@@ -53,3 +53,6 @@ src/frontend/dist/
 
 # macOS zip artefacts
 __MACOSX/
+
+# broadcast.sh state (pids, ngrok and page logs)
+.broadcast/

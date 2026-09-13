@@ -96,8 +96,29 @@ reachable from the other. The free plan's one assigned dev domain is
 permanent, so the pavilion kiosk can be set up in advance.
 
 ```bash
-ngrok http 8001 --url https://bonanza-overbite-sprawl.ngrok-free.dev --traffic-policy-file config/ngrok-policy.yml
+./broadcast.sh leaderboard
 ```
+
+which runs `ngrok http 8001 --url https://bonanza-overbite-sprawl.ngrok-free.dev
+--traffic-policy-file config/ngrok-policy.local.yml` in the background
+(`.broadcast/ngrok.log`). The same script points the **same URL** at one
+of two holding pages instead of the leaderboard, so spectators never meet
+an empty or broken site:
+
+| command | what the public URL shows |
+|---|---|
+| `./broadcast.sh pre-race --time "8:30 am"` | "The race hasn't started yet! Check back around 8:30 am" (port 8002) |
+| `./broadcast.sh leaderboard` | the live leaderboard (port 8001); refuses if nothing answers there |
+| `./broadcast.sh thank-you` | "Thank you for coming", plus the sponsors in `config/sponsors.txt` if that file exists (port 8003) |
+| `./broadcast.sh status` | which of the three the tunnel points at, and which servers are up |
+| `./broadcast.sh stop` | stop ngrok and the page servers |
+
+A switch is a restart of the ngrok agent against another local port and
+takes a few seconds; the holding pages reload themselves (every 60 s /
+120 s), so tabs left open on the pavilion TV follow the switch on their
+own. The pages are in `src/static_pages/` and are self-contained (no
+external assets to fail through the tunnel); they answer on every path, so
+a bookmarked `/admin` shows the holding page too.
 
 - First visit per browser session shows ngrok's interstitial — click through
   before the first finisher.
@@ -150,13 +171,19 @@ cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then edit the passw
    ./start-race-cv.sh -c 0 -r roster.csv
    ```
    It prints the local addresses. Note the IP.
-3. Start the tunnel in a second terminal and leave it open:
+3. Put the holding page on the public URL (first thing, before the
+   pavilion opens its browser):
    ```bash
-   ngrok http 8001 --url https://bonanza-overbite-sprawl.ngrok-free.dev --traffic-policy-file config/ngrok-policy.local.yml
+   ./broadcast.sh pre-race --time "8:30 am"
    ```
 4. Tablet: `http://<mac-ip>:8001/admin`. Pavilion: the tunnel URL, click
-   through the interstitial, full screen.
-5. Start the clock at the gun — the button on Live Management, or:
+   through the interstitial, full screen — it shows the holding page and
+   switches by itself later.
+5. When results should be public:
+   ```bash
+   ./broadcast.sh leaderboard
+   ```
+6. Start the clock at the gun — the button on Live Management, or:
    ```bash
    curl -X POST http://localhost:8001/api/clock/start
    ```
@@ -184,7 +211,8 @@ The Mac's current address, if the tablet needs it again.
 ```bash
 ./stop-race-cv.sh
 ```
-Then Ctrl-C the ngrok terminal.
+Then `./broadcast.sh thank-you` if the pavilion should keep showing
+something, or `./broadcast.sh stop` to take the URL down.
 
 **After the race**
 
@@ -449,11 +477,11 @@ the course boundary no longer matches the camera; recalibrate or set
 count at startup). Without it, a confident misread can lock.
 
 **Pavilion TV not updating** — results at the line are unaffected; this is
-display only. In order: is the ngrok terminal still open and showing the
-tunnel (`curl -s http://127.0.0.1:4040/api/tunnels`)? Does the Mac's hotspot
+display only. In order: is the tunnel up and pointing at the leaderboard
+(`./broadcast.sh status`)? Does the Mac's hotspot
 have signal? Reload the page on the pavilion machine — it reconnects on its
 own after a blip, but a reload is the fastest confirmation. If ngrok itself
-died, restart the command from the sheet; the page recovers by itself.
+died, `./broadcast.sh leaderboard` restarts it; the page recovers by itself.
 
 **Tablet can't reach `/admin`** — it must be on the *Mac's* hotspot, and the
 address is the Mac's IP on that hotspot (`ipconfig getifaddr en0` on the
