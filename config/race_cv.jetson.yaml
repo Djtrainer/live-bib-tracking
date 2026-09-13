@@ -6,14 +6,27 @@
 # The model is a TensorRT engine built ON THIS BOARD by
 # scripts/export_tensorrt.py. An engine is fixed to one input size, one GPU
 # and one TensorRT version: model.imgsz must match the export by hand, and
-# the engine must be rebuilt after a JetPack upgrade. Build both engines
-# this config names with:
-#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 512 928 --nms --conf 0.1 --out models/exports/trt_928x512_fp16_nms_c010.engine
-#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 640 640 --nms
+# the engine must be rebuilt after a JetPack upgrade. Engines live in
+# models/jetson/ -- a directory the Mac's models/ tree does not have, so
+# copying models/ over from the Mac cannot delete them (it did once).
+# Build the two this config names with:
+#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py \
+#       --weights models/gpu_runs_v2/yolo11m_1280/weights/best.pt --size 512 928 --nms --conf 0.1 \
+#       --out models/jetson/trt_v2_yolo11m_1280_928x512_fp16_nms_c010.engine
+#   YOLO_AUTOINSTALL=false .venv/bin/python scripts/export_tensorrt.py --size 640 640 --nms \
+#       --out models/jetson/trt_640x640_fp16_nms.engine
 #
-# Validated on the board (JETSON_NOTES.md, section 6): 14 clips in real
-# time, 25/26 found, 23/25 bibs, median drift 0.3 s, ~0.1% frames dropped,
-# frame loop 8.9 ms median at 30 fps, MAXN_SUPER.
+# The model is the 2026-09-13 yolo11m trained at 1280 (models/gpu_runs_v2).
+# Against the 2025 n model on this board (JETSON_NOTES.md, "v2 models"):
+# 26/26 finishers vs 25/26 on the 14-clip real-time smoke, 24/26 bibs vs
+# 23/25, the runner drawn on 75% vs 53% of approach frames on the 2026
+# clips, at 21.7 ms/frame vs 9.5 (46 fps flat out: 30 fps with margin, not
+# 60). For a 60 fps camera, put the n engine back:
+#   path: models/jetson/trt_928x512_fp16_nms_c010.engine   (9.5 ms, 25/26)
+#
+# Validated on the board (JETSON_NOTES.md): 14 clips in real time, 26/26
+# found, 24/26 bibs, median drift 0.3 s, 0.32% frames dropped, loop 21.7 ms
+# median, tj 65 C, MAXN_SUPER.
 #
 # Race CV pipeline configuration.
 #
@@ -41,7 +54,7 @@ model:
   #   928x512    @15fps   75% recall  2/3 bibs     26 frames dropped
   #   928x512    @30fps   75% recall  3/3 bibs     36 frames dropped (of 9338)
   # Tracking loop 20.2ms median / 26ms p90 against a 33ms budget at 30fps.
-  path: models/exports/trt_928x512_fp16_nms_c010.engine
+  path: models/jetson/trt_v2_yolo11m_1280_928x512_fp16_nms_c010.engine
   tracker: config/custom_tracker.yaml
   imgsz: [512, 928]    # [height, width] -- ultralytics' ordering. Must match the export.
   # 0.1, not 0.25: this is the floor of what ByteTrack is allowed to see,
@@ -107,7 +120,7 @@ model:
   # this footage; one line to enable if a roster or camera position shows
   # bibs being missed at distance.
   two_stage: false
-  two_stage_model: models/exports/trt_640x640_fp16_nms.engine   # an --nms 640 export; the direct backend needs one
+  two_stage_model: models/jetson/trt_640x640_fp16_nms.engine   # an --nms 640 export (from the 2025 n weights); the direct backend needs one
   two_stage_imgsz: 640
   two_stage_padding: 0.15
   two_stage_max_crops: 6   # largest boxes win: nearest the camera, nearest the line

@@ -1002,3 +1002,29 @@ not were checked frame by frame (`runs/jetson/v2/ghost_*`):
 The one finisher the s/m-960/l-1280 models lose is the 14-48-12 @172 s
 hand-off case: their track fragments at the line and the newborn fails
 `min_observations`. The l models drop frames at 30 fps and are out.
+
+### Validation with the crossing margin, and the decision
+
+| run (14 clips, real time, margin 12 px, corrected expectations) | recall | bibs | ghosts | dropped | drift | tj max |
+|---|---|---|---|---|---|---|
+| current n v1 (9.5 ms) | 25/26 | 23/25 | 2 (the known real crossings) | 48 (0.1%) | 0.3 s | – |
+| **v2 m 1280 (21.7 ms)** | **26/26** | **24/26** | 2 (the known real crossings) | 148 (0.32%) | 0.3 s | 64.6 C |
+
+The margin costs the current model nothing and removes the walking-away
+false finish from m-1280, which then finds every finisher on the set
+including the 17-45-02 walker the 2025 model never fires on, reads one
+more bib, and draws the runner on 75% of the 2026 approach frames against
+53%. Its cost: 2.3x the frame time (46 fps flat out -- 30 fps with
+margin, no 60 fps), 3x the drops (still a third of a percent), and ~10 C
+hotter under load. The retrained nanos gain nothing over the 2025 nano;
+the s models lose the hand-off finisher; the l models drop frames.
+
+**`config/race_cv.jetson.yaml` now names the m-1280 engine.** For a 60 fps
+camera the n engine (`trt_928x512_fp16_nms_c010.engine`, 9.5 ms) is one
+line away, and the config says so. Engines moved to `models/jetson/`
+(the Mac's `models/` tree has no such directory, so copying it over cannot
+delete them again); `scripts/export_tensorrt.py` writes there by default.
+
+Not done: a second-stage engine from the m-1280 weights (two-stage stays
+off; the 640 engine is from the 2025 n weights), and a 60 fps accuracy
+measurement (no 60 fps footage with expectations exists).

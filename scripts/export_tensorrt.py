@@ -21,7 +21,7 @@ weights are copied to a scratch directory first and only the finished
 engine is moved to its destination.
 
     .venv/bin/python scripts/export_tensorrt.py --size 512 928
-    .venv/bin/python scripts/export_tensorrt.py --size 640 640 --out models/exports/trt_640x640_fp16.engine
+    .venv/bin/python scripts/export_tensorrt.py --size 640 640 --out models/jetson/trt_640x640_fp16.engine
     .venv/bin/python scripts/export_tensorrt.py --size 512 928 --fp32
 
 ``--size`` is HEIGHT then WIDTH, ultralytics' ordering, the same one
@@ -81,7 +81,9 @@ def main(argv=None) -> int:
              "Each must be a multiple of 32.")
     parser.add_argument(
         "--out", default=None,
-        help="Destination .engine (default: models/exports/trt_<W>x<H>_<fp16|fp32>.engine)")
+        help="Destination .engine (default: models/jetson/trt_<W>x<H>_<fp16|fp32>[_nms].engine; "
+             "models/jetson/ is kept apart from models/exports/ so a models/ copied over "
+             "from the Mac cannot replace the engines built here)")
     parser.add_argument(
         "--fp32", action="store_true",
         help="Build without FP16. The default is FP16, which is what the Orin's "
@@ -119,7 +121,7 @@ def main(argv=None) -> int:
         return 1
     precision = "fp32" if args.fp32 else "fp16"
     suffix = "_nms" if args.nms else ""
-    out = Path(args.out or f"models/exports/trt_{width}x{height}_{precision}{suffix}.engine")
+    out = Path(args.out or f"models/jetson/trt_{width}x{height}_{precision}{suffix}.engine")
     if out.exists() and not args.force:
         print(f"{out} exists; pass --force to replace it", file=sys.stderr)
         return 1
