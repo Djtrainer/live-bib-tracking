@@ -909,3 +909,54 @@ autolabel refuses to decide. `build_dataset.py` would already take 172 of
 the 252 (it skips empty labels) and route the 60 fps clip's frames into
 VAL by segment -- **review before building**, since a machine label that
 asserts "background" on a frame with a runner in it trains the miss in.
+
+## v2 models (n/s/m/l × 960/1280, `models/gpu_runs_v2`, 2026-09-13)
+
+Eight retrained weights, each built into a 928x512 FP16 engine with NMS
+inside at conf 0.1 and run through the direct backend -- the recommended
+pipeline, so the only variable is the model. Loop cost on the 14-48-12
+crossing window (`bench_detector`, cv2 threads 4, MAXN_SUPER):
+
+| model | train imgsz | loop median / p90 / mean ms | fps at median | e2e fps (with CPU decode) | 30 fps budget (33 ms) | 60 fps budget (16.7 ms) |
+|---|---|---|---|---|---|---|
+| current n v1 | 1280 | 9.5 / 10.0 / 9.6 | 105 | 58 | yes | yes |
+| v2 n | 960 | 11.9 / 14.7 / 12.4 | 84 | 48 | yes | yes |
+| v2 n | 1280 | 10.8 / 12.9 / 11.3 | 93 | 52 | yes | yes |
+| v2 s | 960 | 13.5 / 14.6 / 13.8 | 74 | 46 | yes | yes (p90 14.6) |
+| v2 s | 1280 | 13.2 / 14.8 / 13.8 | 76 | 47 | yes | yes (p90 14.8) |
+| v2 m | 960 | 22.5 / 24.6 / 23.2 | 44 | 31 | yes, with margin | no |
+| v2 m | 1280 | 21.7 / 23.5 / 22.2 | 46 | 33 | yes, with margin | no |
+| v2 l | 960 | 28.7 / 30.8 / 29.4 | 35 | 27 | marginal (p90 30.8) | no |
+| v2 l | 1280 | 26.5 / 28.2 / 27.0 | 38 | 28 | marginal (p90 28.2) | no |
+
+Engine builds: n 6 min, s 6.5 min, m 8 min, l 8.5-8.7 min, none needing
+the 1 GiB-workspace retry (4.7-5.7 GB available at each start). The
+960-trained models run at 1.34x their training scale on the crop; the
+1280-trained ones at 1.0x.
+
+Note: unzipping a `models/` folder copied from the Mac replaced
+`models/exports/` and deleted every engine built on this board; the two
+the recommended config names were rebuilt from the intact weights.
+
+### v2 presence on the 2026 clips (union approach windows, direct backend, conf 0.1)
+
+`scratchpad/presence.py`: for each finisher, the window runs from the
+earliest frame *any* model saw the runner's track to the crossing, and
+presence is the share of those frames on which the model drew the track.
+
+| model | loop ms | 07-51-07 @28 / @65 | 07-57-12 @31 / @50 / @68 | 15-11-20 @7 | mean of 6 | bib inside runner (07-57-12) |
+|---|---|---|---|---|---|---|
+| current n v1 (1280) | 9.5 | 62 / 36 | 58 / 52 / 60 | 52 | 53% | 9% |
+| v2 n 960 | 11.9 | 5 / 30 | 68 / 52 / 67 | 72 | 49% | 3% |
+| v2 n 1280 | 10.8 | 15 / 18 | 63 / 33 / 34 | 66 | 38% | 1% |
+| v2 s 960 | 13.5 | 30 / 24 | 79 / 48 / 50 | 64 | 49% | 13% |
+| v2 s 1280 | 13.2 | 32 / 36 | 100 / 90 / 91 | 79 | 71% | 21% |
+| v2 m 960 | 22.5 | 70 / **no finish event** | 90 / 85 / 85 | 91 | 84% of 5 | 11% |
+| v2 m 1280 | 21.7 | 69 / 48 | 91 / 62 / 82 | 97 | 75% | 10% |
+| v2 l 960 | 28.7 | 95 / 90 | 94 / 94 / 89 | 95 | 93% | 6% |
+| v2 l 1280 | 26.5 | 71 / 55 | 85 / 91 / 94 | 80 | 79% | 0% |
+
+Model size is what moves presence, and mostly on the far approach:
+07-51-07 separates n (~16%), s (~30%), m (~60%) and l-960 (92%). The
+retrained nanos are no better than the current model. The l models find
+the bib on the fewest frames (their bib mAP was the lowest in training).
