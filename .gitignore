@@ -50,3 +50,6 @@ src/frontend/dist/
 
 # Jetson venv (see JETSON_NOTES.md)
 .venv/
+
+# macOS zip artefacts
+__MACOSX/
