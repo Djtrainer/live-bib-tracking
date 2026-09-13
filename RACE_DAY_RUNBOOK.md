@@ -111,7 +111,8 @@ an empty or broken site:
 | `./broadcast.sh leaderboard` | the live leaderboard (port 8001); refuses if nothing answers there |
 | `./broadcast.sh thank-you` | "Thank you for coming", plus the sponsors in `config/sponsors.txt` if that file exists (port 8003) |
 | `./broadcast.sh status` | which of the three the tunnel points at, and which servers are up |
-| `./broadcast.sh stop` | stop ngrok and the page servers |
+| `./broadcast.sh offline` | nothing: the URL goes dark, exactly as Ctrl-C in the ngrok window did; the leaderboard and page servers keep running locally |
+| `./broadcast.sh stop` | offline, plus stop the two page servers |
 
 A switch is a restart of the ngrok agent against another local port and
 takes a few seconds; the holding pages reload themselves (every 60 s /
@@ -220,7 +221,7 @@ The Mac's current address, if the tablet needs it again.
 ./stop-race-cv.sh
 ```
 Then `./broadcast.sh thank-you` if the pavilion should keep showing
-something, or `./broadcast.sh stop` to take the URL down.
+something, or `./broadcast.sh offline` to take the URL down.
 
 **After the race**
 

@@ -15,7 +15,9 @@
 #   ./broadcast.sh leaderboard                   when results should be public
 #   ./broadcast.sh thank-you                     if something goes wrong
 #   ./broadcast.sh status                        what the URL points at now
-#   ./broadcast.sh stop                          stop ngrok and the page servers
+#   ./broadcast.sh offline                       take the URL down (= Ctrl-C in the ngrok window);
+#                                                the leaderboard and page servers keep running locally
+#   ./broadcast.sh stop                          offline, plus stop the page servers
 #
 # The page servers keep running once started (they are tiny), so the switch
 # only ever touches ngrok. Nothing here touches race_cv or the API.
@@ -154,8 +156,18 @@ case "$cmd" in
         fi
         point_tunnel "$PORT_LEADERBOARD" ;;
     status) status ;;
+    offline|down)
+        # Exactly what Ctrl-C in the ngrok terminal did: the public URL stops
+        # resolving to anything of ours; nothing local is touched.
+        if pgrep -x ngrok >/dev/null; then
+            pkill -x ngrok && echo -e "${GREEN}✅ ngrok stopped; $URL is offline${NC}"
+        else
+            echo "   ngrok was not running; $URL is already offline"
+        fi
+        rm -f "$RUN_DIR/ngrok.pid"
+        echo "   leaderboard, pre-race and thank-you servers are untouched (./broadcast.sh status)" ;;
     stop)
-        if [[ -f "$RUN_DIR/ngrok.pid" ]] || pgrep -x ngrok >/dev/null; then pkill -x ngrok && echo "   stopped ngrok"; fi
+        if pgrep -x ngrok >/dev/null; then pkill -x ngrok && echo "   stopped ngrok"; fi
         rm -f "$RUN_DIR/ngrok.pid"
         stop_pages ;;
     *)
