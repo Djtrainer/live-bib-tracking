@@ -47,3 +47,7 @@ config/ngrok-policy.local.yml
 
 # Frontend build output; the launcher builds it and the API serves it
 src/frontend/dist/
+
+# Rebuilt YOLO datasets (build_dataset.py --out ...) and dataset archives
+data/dataset*/
+*.zip
