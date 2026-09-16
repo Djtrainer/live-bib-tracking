@@ -1117,3 +1117,21 @@ Race-day command for this camera (30 fps, the recommended config):
 ```bash
 ./start-race-cv.sh -r roster.csv --fresh -c 'v4l2src device=/dev/video0 ! video/x-raw,format=YUY2,width=1920,height=1080,framerate=30/1 ! appsink drop=true max-buffers=1'
 ```
+
+### The lens (B0497) shipped out of focus
+
+The datasheet says "Manual Focus, M12*P0.5, default focus range 3m-∞", and
+the barrel is held by a dab of factory thread-lock. As delivered, every
+distance from 1 m to 20 m was uniformly soft (centre Laplacian score
+~200-250 at 1080p); the barrel sat several threads out, i.e. focused far
+too close. Breaking the glue and screwing the lens **in** while watching
+`scripts/focus.py` (which can read the stack's own `/video_feed` so the
+race stack need not stop) brought the far end of a room and the yard to
+crisp. Re-secure with a dab of nail polish on the barrel/holder seam.
+`scripts/focus.py --source http://localhost:8001/video_feed` is the tool;
+the score is only comparable against itself on one scene, so judge by
+distant edges, not near subjects (anything under ~3 m stays soft by
+design). Two false leads on the way: a window screen in front of the lens
+diffuses everything regardless of focus, and the fetch summariser had
+described the lens as "fixed, do not turn" -- the datasheet text says the
+opposite.
