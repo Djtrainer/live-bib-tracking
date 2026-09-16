@@ -11,6 +11,7 @@ about -- for a finish line, the line itself from where the camera will stand
     python scripts/focus.py --source 0
     python scripts/focus.py --source 'v4l2src device=/dev/video0 ! video/x-raw,format=YUY2,width=1920,height=1080,framerate=30/1 ! appsink drop=true max-buffers=1'
     python scripts/focus.py --source 0 --save focus_check.jpg   # writes the last frame on exit
+    python scripts/focus.py --source http://localhost:8001/video_feed   # while the race stack holds the camera
 """
 
 from __future__ import annotations
@@ -36,6 +37,49 @@ def sharpness(image, fraction: float) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def mjpeg_frames(url: str):
+    """Frames from an MJPEG stream, e.g. the API's /video_feed while race_cv runs."""
+    import urllib.request
+
+    import numpy as np
+
+    from race_cv.capture import Frame
+
+    stream = urllib.request.urlopen(url, timeout=10)
+    buf = b""
+    index = 0
+    while True:
+        chunk = stream.read(65536)
+        if not chunk:
+            return
+        buf += chunk
+        while True:
+            start = buf.find(b"\xff\xd8")
+            end = buf.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+            if start < 0 or end < 0:
+                buf = buf[-2:] if start < 0 else buf[start:]
+                break
+            image = cv2.imdecode(np.frombuffer(buf[start : end + 2], np.uint8), cv2.IMREAD_COLOR)
+            buf = buf[end + 2 :]
+            if image is not None:
+                yield Frame(image=image, capture_ts=time.time(), index=index)
+                index += 1
+
+
+class _Stream:
+    def __init__(self, url):
+        self.url = url
+        self.frame_width = self.frame_height = 0
+
+    def frames(self):
+        for frame in mjpeg_frames(self.url):
+            self.frame_height, self.frame_width = frame.image.shape[:2]
+            yield frame
+
+    def release(self):
+        pass
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Live focus score for a camera")
     parser.add_argument("--source", required=True, help="camera index or GStreamer launch string")
@@ -45,8 +89,8 @@ def main(argv=None) -> int:
     parser.add_argument("--save", default=None, help="write the last frame here on exit")
     args = parser.parse_args(argv)
 
-    source = open_source(args.source)
-    print(f"{source.frame_width}x{source.frame_height}; measuring the centre "
+    source = _Stream(args.source) if args.source.startswith("http") else open_source(args.source)
+    print(f"{args.source}; measuring the centre "
           f"{int(args.region * 100)}%; Ctrl-C to stop. Turn the lens slowly; stop at the peak.")
     best = 0.0
     last = 0.0
