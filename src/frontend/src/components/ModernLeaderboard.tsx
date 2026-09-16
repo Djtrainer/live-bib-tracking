@@ -453,7 +453,7 @@ const ModernLeaderboard = ({
             <div className="flex-1">
               <h1 className="text-4xl md:text-5xl font-black mb-2 text-left">
                 <span style={{ color: '#4F3F52' }}>
-                  2025 Slay Sarcoma Race Results
+                  2026 Slay Sarcoma Race Results
                 </span>
               </h1>
               <p className="text-left text-muted-foreground text-lg">
