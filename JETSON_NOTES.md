@@ -1028,3 +1028,31 @@ delete them again); `scripts/export_tensorrt.py` writes there by default.
 Not done: a second-stage engine from the m-1280 weights (two-stage stays
 off; the 640 engine is from the 2025 n weights), and a 60 fps accuracy
 measurement (no 60 fps footage with expectations exists).
+
+## Mac to Jetson over USB-C (no network needed)
+
+The dev kit's USB-C port runs in USB device mode by default
+(`nv-l4t-usb-device-mode`): the Jetson is `192.168.55.1` and hands the
+host `192.168.55.100` by DHCP. Out of the box on JetPack 7.2 the gadget is
+RNDIS + NCM in one configuration with RNDIS first and the Microsoft OS
+descriptor on, and **macOS never brings the NCM link up** (the Mac shows
+"Linux for Tegra: Not connected", `usb1` stays DOWN, no lease). Fix, once,
+on the board (needs sudo):
+
+```bash
+sudo sed -i 's/^enable_rndis=1/enable_rndis=0/' /opt/nvidia/l4t-usb-device-mode/nv-l4t-usb-device-mode-config.sh
+sudo systemctl restart nv-l4t-usb-device-mode nv-l4t-usb-device-mode-runtime
+```
+
+Verified 2026-09-16: the Mac's "Linux for Tegra" service goes green with
+192.168.55.100, `ping` from the Jetson answers in ~1 ms, and the USB
+route sits at metric 32766 against the Wi-Fi's 600, so the hotspot keeps
+carrying ngrok. From the Mac, with no Wi-Fi at all:
+
+```bash
+ssh dantrainer@192.168.55.1
+```
+
+and the leaderboard / stream / admin at `http://192.168.55.1:8001/` once
+the launcher is up. The tablet at the line still needs the hotspot (the
+Jetson joins it like the Mac did); the cable is for the operator's laptop.
