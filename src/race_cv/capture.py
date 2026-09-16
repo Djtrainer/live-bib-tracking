@@ -20,6 +20,7 @@ Two sources:
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -208,6 +209,13 @@ class CameraSource:
         """
         if isinstance(self._index, str):
             cap = cv2.VideoCapture(self._index, cv2.CAP_GSTREAMER)
+        elif sys.platform.startswith("linux") and hasattr(cv2, "CAP_V4L2"):
+            # On JetPack's OpenCV a bare index lands on the GStreamer backend,
+            # which opens the camera in whatever mode it last used (the
+            # Arducam came up at 1280x720 @ 90) and ignores every property
+            # request. V4L2 honours width/height/fps. The Mac keeps its
+            # default backend: AVFoundation there, and the branch never runs.
+            cap = cv2.VideoCapture(self._index, cv2.CAP_V4L2)
         else:
             cap = cv2.VideoCapture(self._index)
         if not cap.isOpened():
@@ -277,6 +285,14 @@ class CameraSource:
                     continue
                 time.sleep(0.005)
                 continue
+            if image.ndim == 3 and image.shape[2] == 2:
+                # Raw YUY2 straight from the sensor: a GStreamer pipeline that
+                # ends in appsink without a colour conversion hands it over
+                # like this. Converting here, on the capture thread, costs
+                # 3.4 ms per 1080p frame on the Orin; asking GStreamer's
+                # videoconvert to do it capped the Arducam at 46 fps and took
+                # a core and a half. The frame loop only ever sees BGR.
+                image = cv2.cvtColor(image, cv2.COLOR_YUV2BGR_YUY2)
             if self.read_failures:
                 log.info("Camera %s delivering again after %d failed reads",
                          self._index, self.read_failures)

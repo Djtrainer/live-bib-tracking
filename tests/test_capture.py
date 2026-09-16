@@ -174,7 +174,7 @@ class TestCameraSpecs:
         monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
         source = open_source("1")
         cap = FakeCapture.instances[-1]
-        assert cap.spec == 1 and cap.backend is None
+        assert cap.spec == 1 and cap.backend in (None, cv2.CAP_V4L2)   # V4L2 on Linux, default elsewhere
         assert cv2.CAP_PROP_FPS not in cap.props      # the Mac path: no rate request
         assert cap.props[cv2.CAP_PROP_BUFFERSIZE] == 1
         assert source.is_live
@@ -204,6 +204,20 @@ class TestCameraSpecs:
         assert source.reopens == 1
         source.release()
 
+    def test_an_index_opens_through_v4l2_on_linux(self, monkeypatch):
+        monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+        monkeypatch.setattr(sys, "platform", "linux")
+        source = open_source("0")
+        assert FakeCapture.instances[-1].backend == cv2.CAP_V4L2
+        source.release()
+
+    def test_an_index_keeps_the_default_backend_off_linux(self, monkeypatch):
+        monkeypatch.setattr(cv2, "VideoCapture", FakeCapture)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        source = open_source("0")
+        assert FakeCapture.instances[-1].backend is None
+        source.release()
+
     def test_a_path_with_a_bang_in_it_is_still_a_file(self):
         assert not is_gstreamer_pipeline("data/raw/race!take2.mov")
         assert is_gstreamer_pipeline("videotestsrc ! video/x-raw ! appsink drop=true")
@@ -223,5 +237,35 @@ def test_a_real_gstreamer_pipeline_delivers_live_frames():
         first = next(frames)
         assert first.image.shape == (240, 320, 3)
         assert source.is_live and source.frame_width == 320
+    finally:
+        source.release()
+
+
+class YuyvCapture(FakeCapture):
+    """A camera handing over raw YUY2 (2-channel) frames, as a bare appsink does."""
+
+    def __init__(self, spec, backend=None):
+        super().__init__(spec, backend)
+        self.frames = 3
+
+    def read(self):
+        if self.frames <= 0:
+            return False, None
+        self.frames -= 1
+        import numpy as np
+        yuyv = np.zeros((4, 6, 2), dtype=np.uint8)
+        yuyv[..., 0] = 200      # Y
+        yuyv[..., 1] = 128      # U/V at neutral: a grey frame
+        return True, yuyv
+
+
+def test_raw_yuyv_frames_reach_the_loop_as_bgr(monkeypatch):
+    monkeypatch.setattr(cv2, "VideoCapture", YuyvCapture)
+    source = open_source("videotestsrc ! video/x-raw,format=YUY2 ! appsink")
+    try:
+        frame = next(source.frames())
+        assert frame.image.shape == (4, 6, 3)
+        assert frame.image.dtype.name == "uint8"
+        assert abs(int(frame.image[0, 0].mean()) - 200) < 20   # grey stays grey
     finally:
         source.release()

@@ -57,7 +57,8 @@ print_usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  -c, --camera     Camera index (0=built-in, 1=external/iPhone)"
+    echo "  -c, --camera     Camera index (0=built-in, 1=external/iPhone), or a GStreamer"
+    echo "                   launch string ending in appsink (Jetson: see JETSON_NOTES.md)"
     echo "  -v, --video      Path to video file for testing (overrides camera)"
     echo "  -p, --port       Backend port (default: 8001)"
     echo "  -m, --model      Override model path from $CONFIG"
@@ -144,6 +145,11 @@ done
 SOURCE="$CAMERA_INDEX"
 if [[ -n "$VIDEO_PATH" ]]; then
     SOURCE="$VIDEO_PATH"
+fi
+# A GStreamer launch string is a live camera, not a file: never pace it.
+if [[ "$SOURCE" == *"!"* && "$SOURCE" == *appsink* ]]; then
+    VIDEO_PATH=""
+    CAMERA_INDEX="$SOURCE"
 fi
 
 echo -e "${BLUE}🚀 Live Bib Tracking - race_cv Development Setup${NC}"

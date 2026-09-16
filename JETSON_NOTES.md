@@ -1056,3 +1056,64 @@ ssh dantrainer@192.168.55.1
 and the leaderboard / stream / admin at `http://192.168.55.1:8001/` once
 the launcher is up. The tablet at the line still needs the hotspot (the
 Jetson joins it like the Mac did); the cable is for the operator's laptop.
+
+## The Arducam (2026-09-16)
+
+`v4l2-ctl --list-devices`: **Arducam B0497 (USB3 8.3MP)**, Cypress FX3
+UVC 1.10 bridge (04b4:0497), enumerated at SuperSpeed (5000M) on the
+USB 3 hub, `/dev/video0` (capture) + `/dev/video1` (metadata). Manual-focus
+lens: the first frames were badly out of focus; twist the lens. Controls:
+auto exposure (5-10000), gain 100-20000, white balance auto, brightness /
+contrast / saturation; no focus or zoom controls.
+
+**Formats: uncompressed YUYV only, no MJPEG**, so the JPEG-decode question
+from the earlier session does not arise; the cost is the YUY2→BGR
+conversion:
+
+| mode | frame rates offered |
+|---|---|
+| 3840x2160 | 15, 10, 5, 1 |
+| 1920x1080 | **60**, 30, 15, 1 |
+| 1280x720 | 90, 60, 30, 15, 1 |
+
+1080p60 YUYV is ~250 MB/s, fine over USB 3.
+
+**How to open it -- measured at 1920x1080 @ 60 (delivered fps, process CPU):**
+
+| path | delivered | CPU |
+|---|---|---|
+| `cv2.VideoCapture(0)` as capture.py did (lands on OpenCV's *GStreamer* backend here) | camera's last mode, 1280x720 @ 90; property requests ignored | – |
+| V4L2 backend, props 1920x1080 @ 60, converting to BGR, 1 buffer | **28.9 fps** | 45% |
+| V4L2 backend, same, 4 buffers | 56.8 | 84% |
+| V4L2 backend, raw YUYV + `cv2.cvtColor` (4 threads) | 59.0 | 89% (cvtColor 3.4 ms) |
+| GStreamer `v4l2src` → `videoconvert` → BGR → appsink | 44.9-46.0 | 79-169% |
+| GStreamer `v4l2src` → `nvvidconv` (VIC) → BGRx → `videoconvert` → BGR | 47.4 | 75% |
+| **GStreamer `v4l2src` YUY2 → appsink raw, `cv2.cvtColor` in the capture thread** | **60.0** | **23% + 3.4 ms/frame** |
+| GStreamer 3840x2160 @ 15 → BGR | 14.8 | 90% |
+
+So: hand OpenCV the raw YUY2 and convert on the capture thread.
+`capture.py` now does the conversion whenever a frame arrives with two
+channels, and on Linux opens a bare index through `CAP_V4L2` so
+width/height/`--camera-fps` requests take effect (the Mac path is
+untouched). The launcher accepts the pipeline string through `-c`.
+
+**Live through `race_cv.run`** (`--no-api`, roster loaded, camera pointed
+down a hallway so no finishers; the numbers are ingestion):
+
+| config | source | health line (steady state) | CPU / GR3D / tj |
+|---|---|---|---|
+| recommended (m-1280), target 30 | `v4l2src ... framerate=30/1 ... appsink` | `processed 1203 (30.0 fps) \| paced out 0 \| source dropped 1` over 40 s | 20% of 6 cores / 57% / 58 C |
+| n engine, target 60, thresholds doubled | `... framerate=60/1 ...` | `processed 1983 (49.6 fps) \| paced out 198 \| source dropped 5` over 40 s | 30% / 38% / 55 C |
+
+1080p30 with the recommended model is clean. 1080p60 with the nano
+processes ~50 of the camera's 60: the capture thread's read + conversion
+delivers ~55 fps and the loop takes ~50 of those; the rest are paced out,
+almost none dropped. A clean 60 would need the YUY2 conversion off the
+CPU (upload the raw frame and convert in the direct backend's GPU
+preprocess), which is the next capture-side step if 60 fps is ever wanted.
+
+Race-day command for this camera (30 fps, the recommended config):
+
+```bash
+./start-race-cv.sh -r roster.csv --fresh -c 'v4l2src device=/dev/video0 ! video/x-raw,format=YUY2,width=1920,height=1080,framerate=30/1 ! appsink drop=true max-buffers=1'
+```
