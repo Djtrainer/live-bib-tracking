@@ -91,7 +91,7 @@ def main(argv=None) -> int:
 
     source = _Stream(args.source) if args.source.startswith("http") else open_source(args.source)
     print(f"{args.source}; measuring the centre "
-          f"{int(args.region * 100)}%; Ctrl-C to stop. Turn the lens slowly; stop at the peak.")
+          f"{int(args.region * 100)}%; Ctrl-C to stop. Turn the lens slowly; stop at the peak.", flush=True)
     best = 0.0
     last = 0.0
     frame = None
