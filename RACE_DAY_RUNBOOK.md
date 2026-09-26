@@ -183,7 +183,12 @@ prompts for a password: `ssh-copy-id dantrainer@192.168.55.1`.
    ```
    It prints the tablet and pavilion addresses and the line the Jetson
    needs: `--api-url http://192.168.55.100:8001`.
-2. The Jetson's clock. The board has no RTC battery and no NTP without
+2. The Jetson's code, if the Mac has newer commits (the Jetson has no
+   other route to them; this pushes over the cable and fast-forwards):
+   ```bash
+   git push dantrainer@192.168.55.1:live-bib-tracking jetson-eval:refs/heads/from-mac && ssh dantrainer@192.168.55.1 'cd ~/live-bib-tracking && git merge --ff-only from-mac && git branch -D from-mac'
+   ```
+   Then the Jetson's clock. The board has no RTC battery and no NTP without
    Wi-Fi; at the first split rehearsal it was 9.5 days behind. The Jetson
    launcher measures the skew against the console's `/api/time` to the
    millisecond, refuses to start over 2 s, and prints this command. It
@@ -302,13 +307,28 @@ cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then edit the passw
 **At the booth**
 
 1. Mac on your phone's hotspot; tablet on the same hotspot. Plug the Mac in.
-2. Start the stack. One machine:
+2. Start the stack. **One machine** (the Mac on the camera):
    ```bash
    ./start-race-cv.sh -c 0 -r roster.csv
    ```
-   With the Jetson on the camera, this is `--api-only --fresh` here and the
-   detector on the Jetson -- see "Two machines" above.
-   It prints the local addresses. Note the IP.
+   **Two machines** (the Jetson on the camera), in this order, all from
+   the Mac's terminal -- details in "Two machines" above:
+   ```bash
+   ./start-race-cv.sh --api-only --fresh
+   ```
+   ```bash
+   ssh -t dantrainer@192.168.55.1 "sudo date -u -s @$(python3 -c 'import time;print(round(time.time(),3))')"
+   ```
+   ```bash
+   ssh dantrainer@192.168.55.1 'cd ~/live-bib-tracking && ./start-race-cv.sh --api-url http://192.168.55.100:8001 -r data/results/roster_2026.csv --fresh'
+   ```
+   ```bash
+   ssh dantrainer@192.168.55.1 tail -f live-bib-tracking/race_cv.log
+   ```
+   (console; the Jetson's clock, sudo password, no detector running yet;
+   the detector, which the launcher checks against the API and the clock
+   before starting; the health line, in a terminal you keep open.)
+   Either way it prints the local addresses. Note the IP.
 3. Put the holding page on the public URL (first thing, before the
    pavilion opens its browser):
    ```bash
@@ -377,6 +397,16 @@ live ones.
 
 ## Stopping
 
+```bash
+./stop-race-cv.sh
+```
+
+With the Jetson on the camera, stop it **first** so it can drain against a
+live API, then the Mac:
+
+```bash
+ssh dantrainer@192.168.55.1 'cd ~/live-bib-tracking && ./stop-race-cv.sh'
+```
 ```bash
 ./stop-race-cv.sh
 ```
