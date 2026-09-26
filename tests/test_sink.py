@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from race_cv.config import SinkConfig
-from race_cv.sink import FinishEvent, ResultSink, make_event_id
+from race_cv.sink import FinishEvent, ResultSink, make_event_id, measure_clock_offset
 
 
 class FakeResponse:
@@ -291,3 +291,51 @@ class TestRecoverPendingFromAPreviousRun:
         assert sink.recover_pending() == 2
         queued = {sink._queue.get_nowait().bib_number for _ in range(2)}
         assert queued == {"20", "30"}
+
+
+class FakeGetSession:
+    """GET /api/time from a server whose clock runs `ahead` seconds ahead."""
+
+    def __init__(self, ahead=5.0, status=200, raise_exc=None):
+        self.ahead, self.status, self.raise_exc = ahead, status, raise_exc
+
+    def get(self, url, timeout=None):
+        if self.raise_exc:
+            raise self.raise_exc
+        assert url.endswith("/api/time")
+        return FakeResponse({"success": True, "epoch": time.time() + self.ahead}, status_code=self.status)
+
+
+class TestClockOffset:
+    """The Jetson's clock was 824,351 s behind the Mac at the first split
+    rehearsal; the API converts finishes against its own clock, so an
+    offset shifts every result. The detector measures it and corrects."""
+
+    def test_payload_shifts_capture_time_but_not_the_event_id(self):
+        e = event(ts=1000.0)
+        p = e.to_payload(clock_offset_s=2.5)
+        assert p["captureTime"] == 1002.5 and p["wallClockTime"] == 1002.5
+        assert p["eventId"] == e.event_id
+        assert e.to_payload()["captureTime"] == 1000.0      # default: unchanged
+
+    def test_sink_applies_its_offset_on_delivery(self, tmp_path):
+        session = FakeSession([FakeResponse({"success": True})])
+        sink = sink_for(tmp_path, session)
+        sink.clock_offset_s = -3.0
+        sink.start()
+        sink.submit(event(ts=1000.0))
+        time.sleep(0.3)
+        try:
+            assert session.posts[-1]["captureTime"] == 997.0
+        finally:
+            sink.stop(drain_timeout=0.2)
+
+    def test_measure_finds_the_offset(self):
+        sync = measure_clock_offset("http://api", session=FakeGetSession(ahead=5.0), samples=3)
+        assert sync is not None
+        assert abs(sync.offset_s - 5.0) < 0.05
+        assert sync.rtt_s < 0.05
+
+    def test_measure_is_none_without_the_endpoint_or_the_api(self):
+        assert measure_clock_offset("http://api", session=FakeGetSession(status=404)) is None
+        assert measure_clock_offset("http://api", session=FakeGetSession(raise_exc=OSError("down"))) is None

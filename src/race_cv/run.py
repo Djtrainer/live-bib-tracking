@@ -29,7 +29,7 @@ from .ocr import BibReader
 from .pipeline import Pipeline
 from .preview import RateGate, downscale
 from .resilience import ErrorBudget, StallWatchdog
-from .sink import FinishEvent, ResultSink
+from .sink import FinishEvent, ResultSink, measure_clock_offset
 from .stream import FrameStreamer
 
 logger = logging.getLogger("race_cv")
@@ -191,6 +191,30 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     sink = ResultSink(config.sink)
+    if config.sink.api_url:
+        sync = measure_clock_offset(config.sink.api_url)
+        if sync is None:
+            logger.warning(
+                "Could not measure this machine's clock against %s (unreachable, "
+                "or no /api/time). Finish timestamps are sent as this clock reads "
+                "them; if the API runs on another machine, make sure the clocks agree.",
+                config.sink.api_url,
+            )
+        else:
+            sink.clock_offset_s = sync.offset_s
+            report = logger.warning if abs(sync.offset_s) > 0.25 else logger.info
+            report(
+                "Clock offset vs the API: %+.3f s (round trip %.1f ms). Finish "
+                "timestamps are corrected by that amount.",
+                sync.offset_s, sync.rtt_s * 1000.0,
+            )
+            if abs(sync.offset_s) > 60:
+                logger.error(
+                    "This machine's clock is %+.0f s from the API's. Results are "
+                    "corrected, but this log, the event log and the 12 h "
+                    "recovery cut-off all run on the wrong time -- set the clock.",
+                    sync.offset_s,
+                )
     sink.start()
     pipeline = build_pipeline(
         config, source, run_id, roster=load_roster(args.roster), emit=sink.submit

@@ -52,12 +52,18 @@ class FinishEvent:
     interpolated: bool = False
     track_observations: int = 0
 
-    def to_payload(self) -> dict[str, Any]:
+    def to_payload(self, clock_offset_s: float = 0.0) -> dict[str, Any]:
         """The request body for ``POST /api/results``.
 
         ``wallClockTime`` is kept for compatibility with the current server,
         which converts it against the race clock. ``captureTime`` and ``eventId``
         are the fields the hardened server should prefer.
+
+        ``clock_offset_s`` is added to the capture timestamp: it is the API
+        machine's clock minus this machine's, as measured by
+        :func:`measure_clock_offset`, so a detector whose clock is wrong
+        still reports finishes in the API's time. The event id is not
+        shifted -- it identifies the event, it is not a timestamp.
 
         ``racerName`` is omitted rather than sent as ``None``: the server
         resolves a display name with
@@ -66,11 +72,12 @@ class FinishEvent:
         overrides the roster lookup and the "Racer #{bib}" fallback with a
         literal null. Omitting the key lets the server's own fallback apply.
         """
+        capture = self.capture_ts + clock_offset_s
         payload: dict[str, Any] = {
             "eventId": self.event_id,
             "bibNumber": self.bib_number or f"Unknown-{self.track_id}",
-            "captureTime": self.capture_ts,
-            "wallClockTime": self.capture_ts,
+            "captureTime": capture,
+            "wallClockTime": capture,
             "source": "race_cv",
         }
         return payload
@@ -95,6 +102,58 @@ class SinkStats:
         return self.submitted - self.delivered
 
 
+@dataclass
+class ClockOffset:
+    """Result of measure_clock_offset: API clock minus local clock."""
+
+    offset_s: float
+    rtt_s: float          # round trip of the sample the offset came from
+    samples: int
+
+
+def measure_clock_offset(api_url: str, session=None, samples: int = 5,
+                         timeout: float = 2.0, clock=time.time) -> ClockOffset | None:
+    """Measure the API machine's clock against this one, NTP-style.
+
+    Each sample notes the local time before and after ``GET /api/time`` and
+    takes the server's clock as of the midpoint; the sample with the
+    shortest round trip has the least uncertainty and wins. Over the USB
+    link the round trip is a few milliseconds, so the offset is good to
+    that. Returns None if the API is unreachable or has no ``/api/time``
+    (an older server): the caller then sends timestamps uncorrected and
+    says so.
+
+    Why this exists: the Jetson has no RTC battery and, with its Wi-Fi
+    off, no NTP. At the first split rehearsal it was 824,351 s behind the
+    Mac. The launcher refuses to start over a 2 s skew, but its check
+    reads the Date header in whole seconds; a 1.5 s offset passes it and
+    shifts every finish by 1.5 s. This is the precision half of the fix.
+    """
+    if session is None:
+        import requests
+
+        session = requests.Session()
+    url = api_url.rstrip("/") + "/api/time"
+    best: ClockOffset | None = None
+    for i in range(max(1, samples)):
+        try:
+            t0 = clock()
+            response = session.get(url, timeout=timeout)
+            t3 = clock()
+            if response.status_code != 200:
+                return None
+            server = float(response.json()["epoch"])
+        except Exception:
+            if i == 0:
+                return None
+            continue
+        rtt = t3 - t0
+        offset = server - (t0 + t3) / 2.0
+        if best is None or rtt < best.rtt_s:
+            best = ClockOffset(offset_s=offset, rtt_s=rtt, samples=samples)
+    return best
+
+
 class ResultSink:
     """Append-then-deliver sink with an unbounded retry worker."""
 
@@ -112,6 +171,11 @@ class ResultSink:
         self._thread: threading.Thread | None = None
         self._session = session
         self._delivered: set[str] = set()
+
+        # API clock minus this machine's clock, in seconds; see
+        # measure_clock_offset(). Applied to every payload, including events
+        # recovered from a previous run's log.
+        self.clock_offset_s: float = 0.0
 
         self.event_log = Path(config.event_log)
         self.event_log.parent.mkdir(parents=True, exist_ok=True)
@@ -244,7 +308,7 @@ class ResultSink:
             self._stats.attempts += 1
         try:
             response = self._ensure_session().post(
-                url, json=event.to_payload(), timeout=self.config.timeout_seconds
+                url, json=event.to_payload(self.clock_offset_s), timeout=self.config.timeout_seconds
             )
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"

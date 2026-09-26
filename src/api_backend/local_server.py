@@ -1125,6 +1125,19 @@ async def get_clock_status() -> Dict[str, Any]:
     return {"success": True, "data": race_clock_state}
 
 
+@app.get("/api/time")
+async def get_server_time() -> Dict[str, Any]:
+    """This machine's wall clock, with sub-millisecond precision.
+
+    A detector on another machine (the Jetson) measures its clock offset
+    against this at startup and corrects every finish timestamp by it: the
+    API converts finishes against ITS clock, so an offset between the two
+    machines shifts every result by that amount. The HTTP Date header is
+    whole seconds, which cannot catch the 1.5 s that matters in a race.
+    """
+    return {"success": True, "epoch": time.time()}
+
+
 @app.post("/api/clock/start")
 async def start_race_clock() -> Dict[str, Any]:
     """Start the official race clock and broadcast the update.

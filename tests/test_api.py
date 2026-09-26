@@ -179,3 +179,9 @@ class TestSiteServing:
     def test_no_path_traversal_through_the_catch_all(self, client):
         r = client.get("/../../pyproject.toml")
         assert "[project]" not in r.text
+
+
+def test_time_endpoint_reports_the_server_clock(client):
+    body = client.get("/api/time").json()
+    assert body["success"]
+    assert abs(body["epoch"] - time.time()) < 2.0
