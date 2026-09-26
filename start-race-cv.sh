@@ -96,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -c|--camera)
             CAMERA_INDEX="$2"
+            CAMERA_GIVEN=1
             shift 2
             ;;
         -v|--video)
@@ -159,6 +160,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# On a Jetson the USB camera is /dev/video0 (video1 is its metadata node, and
+# the Mac default of index 1 fails to open), and a bare index negotiates
+# 1280x720 because nothing asks for a size. The raw-YUY2 appsink string is
+# what JETSON_NOTES.md measured live: 1080p30 at 30.0 fps with one dropped
+# frame in 40 s. -c still overrides (a 60 fps camera wants framerate=60/1
+# and the doubled frame-counted levers in the config).
+if [[ -z "$VIDEO_PATH" && "${CAMERA_GIVEN:-0}" != "1" && -f /etc/nv_tegra_release && -e /dev/video0 ]]; then
+    CAMERA_INDEX='v4l2src device=/dev/video0 ! video/x-raw,format=YUY2,width=1920,height=1080,framerate=30/1 ! appsink drop=true max-buffers=1'
+fi
 SOURCE="$CAMERA_INDEX"
 if [[ -n "$VIDEO_PATH" ]]; then
     SOURCE="$VIDEO_PATH"
@@ -492,20 +502,59 @@ check_remote_api() {
     # machine with a different idea of the time shifts every result by the
     # difference. The API's Date header is whole seconds, which is enough to
     # catch the case that matters: a board that booted with no internet.
-    local remote_epoch local_epoch skew
-    remote_epoch=$(curl -s -m 4 -I "$API_URL/api/clock/status" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
-    if [[ -n "$remote_epoch" ]]; then
-        remote_epoch=$(date -u -d "$remote_epoch" +%s 2>/dev/null || date -u -j -f "%a, %d %b %Y %T %Z" "$remote_epoch" +%s 2>/dev/null || true)
-        local_epoch=$(date -u +%s)
+    # GET /api/time gives the console's clock to the millisecond; five
+    # samples, the one with the shortest round trip wins (the same
+    # measurement race_cv repeats at startup to correct its timestamps).
+    # An older console without /api/time falls back to the Date header of
+    # a GET (whole seconds; a HEAD is answered 405 by FastAPI).
+    local skew
+    skew=$(python3 - "$API_URL" <<'PY' 2>/dev/null
+import json, sys, time, urllib.request
+url = sys.argv[1] + "/api/time"
+best = None
+for _ in range(5):
+    t0 = time.time()
+    try:
+        epoch = float(json.load(urllib.request.urlopen(url, timeout=4))["epoch"])
+    except Exception:
+        break
+    t3 = time.time()
+    rtt = t3 - t0
+    if best is None or rtt < best[1]:
+        best = ((t0 + t3) / 2 - epoch, rtt)
+print(f"{best[0]:+.3f}" if best else "")
+PY
+)
+    if [[ -z "$skew" ]]; then
+        local remote_epoch local_epoch
+        remote_epoch=$(curl -s -m 4 -D - -o /dev/null "$API_URL/api/clock/status" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
         if [[ -n "$remote_epoch" ]]; then
-            skew=$((local_epoch - remote_epoch))
-            if (( skew > 2 || skew < -2 )); then
-                echo -e "${RED}❌ This machine's clock is ${skew}s from the console's. Every finish time would be off by that.${NC}"
-                echo -e "${BLUE}💡 From the console:  ssh $(whoami)@<this-machine> \"sudo date -u -s '\$(date -u '+%Y-%m-%d %H:%M:%S')'\"${NC}"
-                exit 1
-            fi
-            echo -e "${GREEN}✅ Clock within ${skew#-}s of the console${NC}"
+            remote_epoch=$(date -u -d "$remote_epoch" +%s 2>/dev/null || date -u -j -f "%a, %d %b %Y %T %Z" "$remote_epoch" +%s 2>/dev/null || true)
+            local_epoch=$(date -u +%s)
+            [[ -n "$remote_epoch" ]] && skew=$(printf '%+d' $((local_epoch - remote_epoch)))
         fi
+    fi
+    if [[ -z "$skew" ]]; then
+        echo -e "${YELLOW}⚠️  Could not compare clocks with the console; make sure they agree before racing${NC}"
+        return 0
+    fi
+    if python3 -c "import sys; sys.exit(0 if abs(float('$skew')) > 2.0 else 1)"; then
+        echo -e "${RED}❌ This machine's clock is ${skew}s from the console's. Every finish time would be off by that.${NC}"
+        echo -e "${BLUE}💡 From the console, with no detector running here:${NC}"
+        echo -e "${BLUE}     ssh -t $(whoami)@<this-machine> \"sudo date -u -s @\$(python3 -c 'import time;print(round(time.time(),3))')\"${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Clock ${skew}s from the console; the detector corrects finish times by the measured offset${NC}"
+}
+
+# macOS sleeps a laptop on battery after a minute idle, which drops the USB
+# link and the API mid-race. Hold it awake for as long as the given process
+# lives. (Nothing prevents lid-close sleep: keep the lid open.)
+hold_awake() {
+    local pid="$1" what="$2"
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v caffeinate >/dev/null 2>&1; then
+        nohup caffeinate -dimsu -w "$pid" >/dev/null 2>&1 &
+        echo -e "${GREEN}☕ caffeinate holds this Mac awake while $what runs; keep the lid open${NC}"
     fi
 }
 
@@ -585,6 +634,7 @@ fi
 echo ""
 
 if [[ $API_ONLY -eq 1 ]]; then
+    hold_awake "$API_PID" "the API"
     echo -e "${GREEN}🎉 Results API and site are running (--api-only; no detector here).${NC}"
     echo ""
     echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:$PORT (served by the API)"
@@ -621,6 +671,7 @@ if [[ $PREVIEW -eq 1 ]]; then
 fi
 
 start_race_cv_background
+hold_awake "$RACE_CV_PID" "the detector"
 
 echo ""
 echo -e "${GREEN}🎉 All services are running!${NC}"
