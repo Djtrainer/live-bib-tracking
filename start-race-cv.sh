@@ -199,7 +199,7 @@ check_ports() {
     # Anchored to the interpreter or the supervisor wrapper: a plain
     # "race_cv.run" matched an ssh session or a grep that mentioned the
     # module and refused to start (and the stop script killed them).
-    running=$(pgrep -f '^[^ ]*python[0-9.]* -m race_cv\\.run( |$)|^[^ ]*bash -c .* race_cv_supervisor ' 2>/dev/null | tr '\n' ' ')
+    running=$(pgrep -f '^[^ ]*python[0-9.]* -m race_cv\.run( |$)|^[^ ]*bash -c .* race_cv_supervisor ' 2>/dev/null | tr '\n' ' ')
     if [[ -n "$running" ]]; then
         echo -e "${RED}❌ race_cv is already running (PID $running).${NC}"
         echo -e "${BLUE}   Two detectors would report every finisher twice.${NC}"
