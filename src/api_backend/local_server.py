@@ -1389,6 +1389,12 @@ def main() -> None:
 
     logger.info("Starting results API on http://%s:%s", args.host, args.port)
     try:
+        # The preview publisher posts a frame every 125 ms; at 8 fps that is
+        # ~29,000 access-log lines an hour, which buries the lines an operator
+        # tails this file for (clock, results, roster). Timing is unaffected.
+        logging.getLogger("uvicorn.access").addFilter(
+            lambda record: "/api/frame" not in record.getMessage()
+        )
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     except OSError as exc:
         if "address already in use" in str(exc).lower() or getattr(exc, "errno", None) == 48:

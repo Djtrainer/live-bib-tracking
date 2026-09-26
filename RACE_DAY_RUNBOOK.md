@@ -148,6 +148,141 @@ tunnel carries kilobytes where Meet carried video.
 another laptop on a second phone's hotspot, both URLs. If it works there it
 works in the park; the only variable is signal, and last year proved that.
 
+## Two machines: the Jetson times, the Mac is the console
+
+The race-day shape once the Jetson exists. The Jetson owns the camera and
+runs nothing but the detector on its GPU; the Mac at the finish line runs
+the results API, the leaderboard and Live Management, the journal and the
+ngrok tunnel, and is what you look at and type into. A dead Mac loses no
+finish (the Jetson keeps timing and logging to its own disk); a dead
+Jetson loses no result (the Mac restores the race from its journal and the
+Jetson re-queues whatever was never confirmed when it comes back).
+
+```
+ USB-C cable (L4T device mode)          phone hotspot            cellular
+ Jetson 192.168.55.1  ◄────────►  Mac 192.168.55.100 / <hotspot-ip>  ────►  pavilion
+   camera, race_cv                 API :8001, site, journal, ngrok           (tunnel URL)
+   posts finishes + preview        tablet: http://<hotspot-ip>:8001/admin
+```
+
+The cable is the only path the timing depends on. The Jetson has no Wi-Fi
+and no internet in this arrangement and needs neither. The Mac's hotspot
+carries the tablet and the tunnel exactly as in the one-machine setup.
+
+**Once, on a new board:** JetPack 7.2 ships the USB gadget with RNDIS
+first and macOS never brings it up -- see `JETSON_NOTES.md`, "Mac to
+Jetson over USB-C" for the one-line fix. Install your key so nothing
+prompts for a password: `ssh-copy-id dantrainer@192.168.55.1`.
+
+**In order, from the Mac's terminal:**
+
+1. The console. `-r` is not needed here; racer names come from the roster
+   upload in Live Management.
+   ```bash
+   ./start-race-cv.sh --api-only --fresh
+   ```
+   It prints the tablet and pavilion addresses and the line the Jetson
+   needs: `--api-url http://192.168.55.100:8001`.
+2. The Jetson's clock. The board has no RTC battery and no NTP without
+   Wi-Fi; at the first split rehearsal it was 9.5 days behind. The Jetson
+   launcher measures the skew against the console's `/api/time` to the
+   millisecond, refuses to start over 2 s, and prints this command. It
+   needs the Jetson's sudo password, and it must run while **no detector
+   is running** (a clock jump under a running detector corrupts its
+   timestamps):
+   ```bash
+   ssh -t dantrainer@192.168.55.1 "sudo date -u -s @$(python3 -c 'import time;print(round(time.time(),3))')"
+   ```
+   Below 2 s the detector measures the residual offset against
+   `/api/time` at startup and corrects every finish timestamp by it (the
+   log line `Clock offset vs the API`), so the sub-second part is
+   handled without sudo. If the clock ever has to be corrected mid-race:
+   stop the detector, set the date, start it again **without** `--fresh`
+   (so nothing is archived) -- its unconfirmed events are re-queued.
+3. The detector, on the Jetson. On the board the launcher picks
+   `config/race_cv.jetson.yaml` (the yolo11m-1280 TensorRT engine) and
+   the camera source by itself: the raw-YUY2 GStreamer string for
+   `/dev/video0` at 1080p30, measured live at 30.0 fps. Do **not** pass
+   `-c 0`: a bare index negotiates 1280x720, and `-c 1` is the camera's
+   metadata node and fails to open. No `--preview` (headless -- the
+   browser stream is the preview). `--api-url` starts nothing but the
+   supervised detector, after checking that the API answers and the
+   clock agrees.
+   ```bash
+   ssh dantrainer@192.168.55.1 'cd ~/live-bib-tracking && ./start-race-cv.sh --api-url http://192.168.55.100:8001 -r data/results/roster_2026.csv --fresh'
+   ```
+   The real start list goes to the Jetson beforehand (the detector's
+   `-r` needs a `Bib` column) and into Live Management on the Mac (names):
+   ```bash
+   scp roster_2026.csv dantrainer@192.168.55.1:live-bib-tracking/data/results/
+   ```
+   The launcher exits once the detector is up; the detector keeps running
+   under its supervisor after the ssh session ends.
+4. The holding page, the tablet, the pavilion and the clock: steps 3-6 of
+   the command sheet below, unchanged.
+
+**Watching it.** The health line is in the Jetson's `race_cv.log`, not on
+the Mac:
+```bash
+ssh dantrainer@192.168.55.1 tail -f live-bib-tracking/race_cv.log
+```
+The camera, with boxes, is `http://localhost:8001/video_feed` on the Mac
+(the Jetson posts annotated frames to the API at 8 fps; those requests
+are kept out of `api_server.log`, which would otherwise grow by 29,000
+lines an hour). `finishers`, `delivered` and `pending` mean the same as
+ever; `pending` climbing with `last error` naming the API means the cable
+or the Mac, not the camera. A `SUPERVISOR ... RESTART` line means the
+detector died and came back; look at the traceback above it.
+
+**Before the camera is bolted down** (once, at setup): the finish line in
+`config/race_cv.jetson.yaml` is a camera position, and the Jetson has no
+screen for `calibrate.py`. Grab a still on the Jetson with no detector
+running, calibrate on the Mac, copy the config back:
+```bash
+ssh dantrainer@192.168.55.1 "cd ~/live-bib-tracking && PYTHONPATH=src .venv/bin/python scripts/focus.py --source 'v4l2src device=/dev/video0 ! video/x-raw,format=YUY2,width=1920,height=1080,framerate=30/1 ! appsink drop=true max-buffers=1' --save still.jpg"
+```
+(`focus.py` also prints a sharpness score -- twist the lens until distant
+edges peak; the B0497 shipped out of focus. Ctrl-C writes the still.)
+```bash
+scp dantrainer@192.168.55.1:live-bib-tracking/still.jpg /tmp/still.jpg && python scripts/calibrate.py --source /tmp/still.jpg --config config/race_cv.jetson.yaml && scp config/race_cv.jetson.yaml dantrainer@192.168.55.1:live-bib-tracking/config/
+```
+Geometry is stored normalised, so a still calibrated on the Mac is the
+Jetson's geometry. Focus can be re-checked with the stack running:
+`python scripts/focus.py --source http://localhost:8001/video_feed`.
+
+**Stopping**, in this order so the Jetson can drain against a live API:
+```bash
+ssh dantrainer@192.168.55.1 'cd ~/live-bib-tracking && ./stop-race-cv.sh'
+```
+```bash
+./stop-race-cv.sh
+```
+
+**What can go wrong that the one-machine setup could not:**
+
+- *The Mac launcher run without `--api-only` while the Jetson is timing*
+  starts a second detector on the Mac's camera; every finisher would be
+  reported twice. The single-instance guard only sees its own machine.
+  On race day the Mac's command is `--api-only`, nothing else; if in
+  doubt, `pgrep -fa 'python -m race_cv.run'` on the Mac must print
+  nothing.
+- *The Mac falls asleep.* On battery macOS sleeps after one idle minute,
+  which drops the USB link and the API. The launcher now holds the Mac
+  awake with `caffeinate` for as long as the API runs, but nothing stops
+  lid-close sleep: lid open, and on power.
+- *The cable drops.* The Jetson keeps timing; finishes retry with backoff
+  (up to 30 s) and sit in its `data/results/events.jsonl` until the link
+  is back, then land. Preview frames are simply dropped meanwhile.
+- *The Mac's API restarts.* It restores the race from the journal; the
+  Jetson's retries land on the new process (`eventId` makes them
+  idempotent).
+- *The Jetson reboots.* Its clock may be wrong again (step 2); the
+  supervisor is not a boot service yet, so start the detector again by
+  hand (step 3). Unconfirmed events from before the reboot are re-queued
+  on start.
+- *Recovery after the race* needs both machines' files: the Mac's
+  `data/results/` (journal) and the Jetson's `data/results/events.jsonl`.
+
 ## Race-day command sheet
 
 Everything in order, from the race Mac's terminal unless stated.
@@ -167,10 +302,12 @@ cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then edit the passw
 **At the booth**
 
 1. Mac on your phone's hotspot; tablet on the same hotspot. Plug the Mac in.
-2. Start the stack:
+2. Start the stack. One machine:
    ```bash
    ./start-race-cv.sh -c 0 -r roster.csv
    ```
+   With the Jetson on the camera, this is `--api-only --fresh` here and the
+   detector on the Jetson -- see "Two machines" above.
    It prints the local addresses. Note the IP.
 3. Put the holding page on the public URL (first thing, before the
    pavilion opens its browser):
