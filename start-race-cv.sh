@@ -47,6 +47,8 @@ export YOLO_AUTOINSTALL=false
 MODEL_PATH=""
 ROSTER=""
 PREVIEW=0
+API_ONLY=0
+API_URL=""        # set by --api-url: the results API runs on another machine
 # A video file is a rehearsal for a live camera, so pace it like one by
 # default. --fast opts out when you just want the answer quickly.
 REALTIME=1
@@ -71,6 +73,13 @@ print_usage() {
     echo "  --fresh         Start a NEW race: archive the saved results and clock"
     echo "                   instead of restoring them. Without it, a restart puts"
     echo "                   the previous race back (right mid-race, wrong next event)."
+    echo "  --api-url URL    The results API runs on ANOTHER machine (the console): do"
+    echo "                   not start an API or the site here, point the detector at"
+    echo "                   URL and refuse to start until it answers. This is the"
+    echo "                   Jetson side of a split run; the Mac runs --api-only."
+    echo "  --api-only       Start only the results API and the site: this machine is"
+    echo "                   the console, the detector runs elsewhere (the Jetson) and"
+    echo "                   is pointed here with --api-url. Prints that URL."
     echo "  -h, --help       Show this help message"
     echo ""
     echo "Environment variables:"
@@ -122,6 +131,14 @@ while [[ $# -gt 0 ]]; do
             # them. The default -- restore -- is right for a mid-race restart
             # and wrong for the next event.
             FRESH=1
+            shift
+            ;;
+        --api-url)
+            API_URL="${2%/}"
+            shift 2
+            ;;
+        --api-only)
+            API_ONLY=1
             shift
             ;;
         --native-frontend)
@@ -188,6 +205,10 @@ check_ports() {
     fi
     # The API port is the only one that has to be free: the site is served
     # from it too, and race_cv is a client, not a listener.
+    if [[ -n "$API_URL" ]]; then
+        echo -e "${GREEN}✅ API is remote ($API_URL); no local port needed${NC}"
+        return 0
+    fi
     if lsof -Pi :"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
         echo -e "${RED}❌ Port $PORT is already in use${NC}"
         echo -e "${BLUE}💡 If this is a previous session, stop it with ./stop-race-cv.sh,${NC}"
@@ -434,7 +455,7 @@ start_api_server() {
 }
 
 build_race_cv_args() {
-    RACE_CV_ARGS=(--source "$SOURCE" --config "$CONFIG" --api-url "http://localhost:$PORT")
+    RACE_CV_ARGS=(--source "$SOURCE" --config "$CONFIG" --api-url "${API_URL:-http://localhost:$PORT}")
     if [[ -n "$MODEL_PATH" ]]; then
         RACE_CV_ARGS+=(--model "$MODEL_PATH")
     fi
@@ -447,6 +468,41 @@ build_race_cv_args() {
     # Only meaningful for a file; a camera is already real time.
     if [[ $REALTIME -eq 1 && -n "$VIDEO_PATH" ]]; then
         RACE_CV_ARGS+=(--realtime)
+    fi
+}
+
+# --api-url: the API lives on the console machine. Refuse to start a detector
+# that has nowhere to deliver; a finish logged only to the event log is a
+# recovery job, not a result.
+check_remote_api() {
+    echo -e "${YELLOW}🛰  Checking the results API at $API_URL...${NC}"
+    local code
+    code=$(curl -s -o /dev/null -m 4 -w '%{http_code}' "$API_URL/api/clock/status" 2>/dev/null || true)
+    if [[ "$code" != "200" ]]; then
+        echo -e "${RED}❌ No results API at $API_URL (HTTP ${code:-none}).${NC}"
+        echo -e "${BLUE}💡 On the console machine run:  ./start-race-cv.sh --api-only --fresh -r roster.csv${NC}"
+        echo -e "${BLUE}   and use the --api-url it prints (USB link: http://192.168.55.100:$PORT).${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✅ API answers at $API_URL${NC}"
+    # The API converts every finish against ITS clock; a detector on another
+    # machine with a different idea of the time shifts every result by the
+    # difference. The API's Date header is whole seconds, which is enough to
+    # catch the case that matters: a board that booted with no internet.
+    local remote_epoch local_epoch skew
+    remote_epoch=$(curl -s -m 4 -I "$API_URL/api/clock/status" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
+    if [[ -n "$remote_epoch" ]]; then
+        remote_epoch=$(date -u -d "$remote_epoch" +%s 2>/dev/null || date -u -j -f "%a, %d %b %Y %T %Z" "$remote_epoch" +%s 2>/dev/null || true)
+        local_epoch=$(date -u +%s)
+        if [[ -n "$remote_epoch" ]]; then
+            skew=$((local_epoch - remote_epoch))
+            if (( skew > 2 || skew < -2 )); then
+                echo -e "${RED}❌ This machine's clock is ${skew}s from the console's. Every finish time would be off by that.${NC}"
+                echo -e "${BLUE}💡 From the console:  ssh $(whoami)@<this-machine> \"sudo date -u -s '\$(date -u '+%Y-%m-%d %H:%M:%S')'\"${NC}"
+                exit 1
+            fi
+            echo -e "${GREEN}✅ Clock within ${skew#-}s of the console${NC}"
+        fi
     fi
 }
 
@@ -509,13 +565,42 @@ check_python_env
 echo ""
 check_config
 echo ""
-check_model_backend
+if [[ $API_ONLY -eq 1 ]]; then
+    echo -e "${BLUE}🛰  --api-only: the detector runs on another machine; skipping the model check${NC}"
+else
+    check_model_backend
+fi
 echo ""
 
-start_frontend
+if [[ -n "$API_URL" ]]; then
+    check_remote_api
+else
+    start_frontend
+    echo ""
+    start_api_server
+fi
 echo ""
-start_api_server
-echo ""
+
+if [[ $API_ONLY -eq 1 ]]; then
+    echo -e "${GREEN}🎉 Results API and site are running (--api-only; no detector here).${NC}"
+    echo ""
+    echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:$PORT (served by the API)"
+    echo -e "${BLUE}🔧 API/WS:${NC}    http://localhost:$PORT (native, PID: $API_PID)"
+    echo ""
+    lan_urls
+    echo ""
+    echo -e "${YELLOW}📹 The detector on the Jetson posts to this machine. Start it there with:${NC}"
+    usb_link=$(ifconfig 2>/dev/null | awk '/inet 192\.168\.55\./{print $2; exit}' || true)
+    lan_ip=$(ipconfig getifaddr en0 2>/dev/null || true)
+    [[ -n "$usb_link" ]] && echo -e "   over the USB link:   ${BLUE}--api-url http://$usb_link:$PORT${NC}   (L4T device mode; the Jetson is 192.168.55.1)"
+    [[ -n "$lan_ip" ]]   && echo -e "   over the hotspot:    ${BLUE}--api-url http://$lan_ip:$PORT${NC}"
+    [[ -z "$usb_link" && -z "$lan_ip" ]] && echo -e "${RED}   no USB-link or LAN address found on this machine${NC}"
+    echo ""
+    echo -e "${YELLOW}📋 Management Commands:${NC}"
+    echo -e "${BLUE}  Tail API logs:${NC}   tail -f api_server.log"
+    echo -e "${BLUE}  Stop:${NC}            ./stop-race-cv.sh   (stop the detector on the Jetson first, so it can drain)"
+    exit 0
+fi
 
 if [[ $PREVIEW -eq 1 ]]; then
     # A preview window wants to be interactive: run race_cv in the foreground so
@@ -524,7 +609,9 @@ if [[ $PREVIEW -eq 1 ]]; then
     echo -e "${BLUE}Press 'q' in the preview window or Ctrl+C here to stop.${NC}"
     echo ""
     build_race_cv_args
-    trap 'echo -e "\n${YELLOW}Stopping API server (PID: $API_PID)...${NC}"; kill "$API_PID" 2>/dev/null || true' EXIT
+    if [[ -n "$API_PID" ]]; then
+        trap 'echo -e "\n${YELLOW}Stopping API server (PID: $API_PID)...${NC}"; kill "$API_PID" 2>/dev/null || true' EXIT
+    fi
     PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}" \
         "$RACE_CV_PYTHON" -m race_cv.run "${RACE_CV_ARGS[@]}"
     exit 0
@@ -535,11 +622,18 @@ start_race_cv_background
 echo ""
 echo -e "${GREEN}🎉 All services are running!${NC}"
 echo ""
-echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:$PORT (served by the API)"
-echo -e "${BLUE}🔧 API/WS:${NC}    http://localhost:$PORT (native, PID: $API_PID)"
-echo -e "${BLUE}📹 race_cv:${NC}   native, PID: $RACE_CV_PID"
-echo ""
-lan_urls
+if [[ -n "$API_URL" ]]; then
+    echo -e "${BLUE}🔧 API/WS:${NC}    $API_URL (on the console machine; the site is there too)"
+    echo -e "${BLUE}📹 race_cv:${NC}   native, PID: $RACE_CV_PID (supervised)"
+    echo ""
+    echo -e "${YELLOW}👀 Watch it from the console:${NC}  ssh $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}') tail -f $(pwd)/race_cv.log"
+else
+    echo -e "${BLUE}📱 Frontend:${NC}  http://localhost:$PORT (served by the API)"
+    echo -e "${BLUE}🔧 API/WS:${NC}    http://localhost:$PORT (native, PID: $API_PID)"
+    echo -e "${BLUE}📹 race_cv:${NC}   native, PID: $RACE_CV_PID"
+    echo ""
+    lan_urls
+fi
 echo ""
 echo -e "${YELLOW}📋 Management Commands:${NC}"
 echo -e "${BLUE}  Tail API logs:${NC}         tail -f api_server.log"
