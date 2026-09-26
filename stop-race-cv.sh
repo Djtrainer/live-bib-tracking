@@ -129,7 +129,9 @@ stop_pids() {
 
 # --- 1. race_cv first, so it can drain against a still-live API ---
 echo -e "${YELLOW}📹 Stopping race_cv...${NC}"
-find_pids RACE_CV_PIDS "race_cv[/.]run"
+# The interpreter running the detector, or its supervisor wrapper -- not an
+# ssh/grep/tail whose command line merely mentions the module.
+find_pids RACE_CV_PIDS '^[^ ]*python[0-9.]* -m race_cv\\.run( |$)|^[^ ]*bash -c .* race_cv_supervisor '
 stop_pids "race_cv" "${RACE_CV_PIDS[@]}"
 echo ""
 
