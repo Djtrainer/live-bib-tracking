@@ -18,9 +18,17 @@
 #   ./broadcast.sh offline                       take the URL down (= Ctrl-C in the ngrok window);
 #                                                the leaderboard and page servers keep running locally
 #   ./broadcast.sh stop                          offline, plus stop the page servers
+#   ./broadcast.sh cloud-on                      hand the URL to the free VM (deploy/broadcast-vm):
+#                                                the pre-race page, with this laptop off
+#   ./broadcast.sh cloud-off                     take it back from the VM (pre-race/leaderboard/
+#                                                thank-you do this by themselves first)
 #
 # The page servers keep running once started (they are tiny), so the switch
 # only ever touches ngrok. Nothing here touches race_cv or the API.
+#
+# One agent can hold the URL at a time. Between races the VM's agent holds
+# it; on race day every local mode releases the VM's agent (and disables it,
+# so a VM reboot cannot snatch the URL back) before claiming the URL here.
 
 set -u
 cd "$(dirname "$0")"
@@ -38,6 +46,8 @@ PORT_PRE_RACE=8002
 PORT_THANK_YOU=8003
 RUN_DIR=.broadcast
 mkdir -p "$RUN_DIR"
+VM=${BROADCAST_VM:-race-broadcast}
+VM_ZONE=${BROADCAST_ZONE:-us-central1-a}
 
 PY=${RACE_CV_PYTHON:-}
 if [[ -z "$PY" ]]; then
@@ -85,6 +95,89 @@ for t in ts:
     print(t.get('public_url'), '->', t.get('config', {}).get('addr'))" 2>/dev/null
 }
 
+# --- the free VM (deploy/broadcast-vm) --------------------------------------
+vm_state() {  # RUNNING / TERMINATED / ABSENT / UNREACHABLE / NOGCLOUD
+    command -v gcloud >/dev/null 2>&1 || { echo NOGCLOUD; return; }
+    local out
+    if out=$(gcloud compute instances describe "$VM" --zone="$VM_ZONE" --format="value(status)" 2>&1); then
+        echo "$out"
+    elif [[ "$out" == *"was not found"* ]]; then
+        echo ABSENT
+    else
+        # Not logged in, no internet yet, wrong project: NOT the same as "no VM".
+        echo "$out" >> "$RUN_DIR/gcloud.log"
+        echo UNREACHABLE
+    fi
+}
+vm_ssh() { gcloud compute ssh "$VM" --zone="$VM_ZONE" --quiet --ssh-flag=-oConnectTimeout=10 --command "$1" 2>>"$RUN_DIR/gcloud.log"; }
+vm_agent() {  # active / activating / inactive / failed / unknown
+    local out
+    out=$(vm_ssh "systemctl is-active race-ngrok.service" || true)
+    echo "${out:-unknown}"
+}
+RELEASED_MARK="$RUN_DIR/vm-released"
+cloud_release() {  # the VM lets go of the URL, and will not take it back on a reboot
+    # Once released, later switches (leaderboard, an emergency thank-you) must
+    # not pay two gcloud round trips each or hang on a dead hotspot: the marker
+    # says the VM is already out of the picture. cloud-on removes it.
+    [[ -f "$RELEASED_MARK" ]] && return 0
+    if [[ "${BROADCAST_SKIP_VM:-0}" == "1" ]]; then
+        echo -e "${YELLOW}⚠️  BROADCAST_SKIP_VM=1: not checking the VM; if it still holds $URL this agent will fail with ERR_NGROK_334${NC}"
+        return 0
+    fi
+    local state
+    state=$(vm_state)
+    case "$state" in
+        ABSENT|NOGCLOUD) return 0 ;;
+        UNREACHABLE)
+            echo -e "${RED}❌ cannot check the VM ($VM): gcloud failed (not logged in? no internet yet?). See $RUN_DIR/gcloud.log.${NC}"
+            echo -e "${BLUE}   Fix gcloud (gcloud auth login), or if you KNOW the VM is not holding the URL: BROADCAST_SKIP_VM=1 $0 ...${NC}"
+            return 1 ;;
+        RUNNING) ;;
+        *) echo -e "   VM $VM is $state; nothing to release"; touch "$RELEASED_MARK"; return 0 ;;
+    esac
+    local was
+    was=$(vm_agent)
+    echo -e "${YELLOW}☁️  releasing $URL from the VM ($VM; agent was $was)...${NC}"
+    # Unconditional: "activating" (retry loop) and "inactive but enabled" both
+    # come back after a reboot; disable --now on a stopped unit is a no-op.
+    if ! vm_ssh "sudo systemctl disable --now race-ngrok.service"; then
+        echo -e "${RED}❌ could not stop the VM's agent; the URL may still be held there. See $RUN_DIR/gcloud.log.${NC}"
+        return 1
+    fi
+    touch "$RELEASED_MARK"
+    sleep 2
+    echo -e "${GREEN}✅ VM agent stopped and disabled${NC}"
+}
+cloud_claim() {  # the VM takes the URL; local ngrok goes offline first
+    local state
+    state=$(vm_state)
+    if [[ "$state" != "RUNNING" ]]; then
+        echo -e "${RED}❌ VM $VM is $state; create it with deploy/broadcast-vm/deploy.sh create${NC}"
+        return 1
+    fi
+    if pgrep -x ngrok >/dev/null; then
+        pkill -x ngrok && echo "   local ngrok stopped"
+        rm -f "$RUN_DIR/ngrok.pid"
+        sleep 1
+    fi
+    echo -e "${YELLOW}☁️  handing $URL to the VM ($VM)...${NC}"
+    vm_ssh "sudo systemctl enable --now race-ngrok.service && sudo systemctl restart race-ngrok.service" || { echo -e "${RED}❌ could not start the VM's agent; see $RUN_DIR/gcloud.log${NC}"; return 1; }
+    rm -f "$RELEASED_MARK"
+    local body=""
+    for _ in $(seq 1 12); do
+        sleep 2
+        body=$(curl -s -m 8 -H 'ngrok-skip-browser-warning: 1' "$URL/" || true)
+        [[ "$body" == *"Check back around"* ]] && break
+    done
+    if [[ "$body" == *"Check back around"* ]]; then
+        echo -e "${GREEN}✅ $URL shows the holding page from the VM; this laptop can go to sleep${NC}"
+    else
+        echo -e "${RED}❌ $URL is not showing the holding page yet; check: deploy/broadcast-vm/deploy.sh status${NC}"
+        return 1
+    fi
+}
+
 point_tunnel() {  # $1 local port
     local port=$1
     if ! command -v ngrok >/dev/null 2>&1; then
@@ -105,6 +198,7 @@ point_tunnel() {  # $1 local port
         echo -e "${GREEN}✅ tunnel already points at port $port${NC}"
         return 0
     fi
+    cloud_release || return 1
     pkill -x ngrok 2>/dev/null && sleep 1
     nohup ngrok http "$port" --url "$URL" --traffic-policy-file "$POLICY" --log stdout \
         > "$RUN_DIR/ngrok.log" 2>&1 &
@@ -112,10 +206,15 @@ point_tunnel() {  # $1 local port
     for _ in $(seq 1 40); do
         now=$(current_tunnel)
         [[ "$now" == *"-> http://localhost:$port"* ]] && break
+        kill -0 "$(cat "$RUN_DIR/ngrok.pid")" 2>/dev/null || break   # it died; do not wait 20 s
         sleep 0.5
     done
     if [[ "$now" == *"-> http://localhost:$port"* ]]; then
         echo -e "${GREEN}✅ $now${NC}"
+    elif grep -q "ERR_NGROK_334" "$RUN_DIR/ngrok.log" 2>/dev/null; then
+        echo -e "${RED}❌ another agent already holds $URL (the VM?). Release it: ./broadcast.sh cloud-off${NC}"
+        echo -e "${BLUE}   or: deploy/broadcast-vm/deploy.sh ssh  ->  sudo systemctl disable --now race-ngrok.service${NC}"
+        return 1
     else
         echo -e "${RED}❌ ngrok did not report a tunnel to port $port; see $RUN_DIR/ngrok.log${NC}"
         tail -5 "$RUN_DIR/ngrok.log"
@@ -140,6 +239,15 @@ status() {
     port_open "$PORT_LEADERBOARD" && echo "   leaderboard API: up on $PORT_LEADERBOARD" || echo "   leaderboard API: not answering on $PORT_LEADERBOARD"
     port_open "$PORT_PRE_RACE" && echo "   pre-race page:   up on $PORT_PRE_RACE" || echo "   pre-race page:   not running"
     port_open "$PORT_THANK_YOU" && echo "   thank-you page:  up on $PORT_THANK_YOU" || echo "   thank-you page:  not running"
+    local state agent
+    state=$(vm_state)
+    case "$state" in
+        NOGCLOUD) ;;
+        ABSENT)   echo "   free VM:         none (deploy/broadcast-vm/deploy.sh create)";;
+        RUNNING)  agent=$(vm_agent)
+                  echo "   free VM:         $VM running, agent $agent$( [[ "$agent" == active ]] && echo '   (VM HOLDS THE URL)')$( [[ -f "$RELEASED_MARK" ]] && echo '   [released for this race; cloud-on hands it back]')";;
+        *)        echo "   free VM:         $VM $state";;
+    esac
 }
 
 cmd=${1:-status}; shift || true
@@ -156,6 +264,8 @@ case "$cmd" in
         fi
         point_tunnel "$PORT_LEADERBOARD" ;;
     status) status ;;
+    cloud-on)  cloud_claim ;;
+    cloud-off) cloud_release ;;
     offline|down)
         # Exactly what Ctrl-C in the ngrok terminal did: the public URL stops
         # resolving to anything of ours; nothing local is touched.
@@ -165,11 +275,14 @@ case "$cmd" in
             echo "   ngrok was not running; $URL is already offline"
         fi
         rm -f "$RUN_DIR/ngrok.pid"
-        echo "   leaderboard, pre-race and thank-you servers are untouched (./broadcast.sh status)" ;;
+        echo "   leaderboard, pre-race and thank-you servers are untouched (./broadcast.sh status)"
+        [[ -f "$RELEASED_MARK" ]] && echo "   packing up? ./broadcast.sh cloud-on hands $URL back to the VM" ;;
     stop)
         if pgrep -x ngrok >/dev/null; then pkill -x ngrok && echo "   stopped ngrok"; fi
         rm -f "$RUN_DIR/ngrok.pid"
-        stop_pages ;;
+        stop_pages
+        [[ -f "$RELEASED_MARK" ]] && echo "   packing up? ./broadcast.sh cloud-on hands $URL back to the VM" ;;
     *)
-        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+        # The usage is the header comment, up to its first blank line.
+        awk 'NR>1 && !/^#/ {exit} NR>1 {sub(/^# ?/, ""); print}' "$0"; exit 1 ;;
 esac

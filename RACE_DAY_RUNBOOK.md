@@ -138,6 +138,34 @@ a bookmarked `/admin` shows the holding page too.
   (it re-fetches everything it missed). The Mac never depended on the tunnel
   for timing in the first place.
 
+**Between races the URL comes from a free VM, not the laptop.** The same
+holding page and the same ngrok agent run on Google's always-free
+`e2-micro` (`deploy/broadcast-vm/`), so the bonanza URL shows "Check back
+around October 24" from now until race day with every laptop closed. One
+agent can hold the URL at a time, so race day is a hand-off, and the
+race-day commands do it for you:
+
+| when | command | what happens |
+|---|---|---|
+| once | `deploy/broadcast-vm/deploy.sh create` | creates the VM, pushes the page, sponsors and agent config, starts both services, checks the URL |
+| sponsors or page changed | `deploy/broadcast-vm/deploy.sh sync` | pushes `config/sponsors.txt` and the pages again |
+| race morning | `./broadcast.sh pre-race` (or `leaderboard`) | stops **and disables** the VM's agent first, then claims the URL here -- a VM reboot mid-race cannot take it back |
+| packing up | `./broadcast.sh cloud-on` | stops the local agent, re-enables the VM's, confirms the URL answers |
+| any time | `./broadcast.sh status` / `deploy/broadcast-vm/deploy.sh status` | who holds the URL; VM and service state |
+
+What it costs: the VM, its 10 GB disk and the page's traffic are inside the
+free tier; the external IPv4 address is not, at $0.005 an hour, about $3.72
+a month. Visitors on the free plan click through ngrok's interstitial once
+per browser session, as they do for the leaderboard. The
+page lists sponsors when `config/sponsors.txt` exists (one name per
+line, gitignored) and omits the section when it does not; add the file and
+run `sync`. The VM needs the Mac's `gcloud` login for the hand-off, so the
+race-morning command needs internet on the Mac (the hotspot) before it can
+release the VM; if gcloud cannot reach it, it says so and stops rather than
+fight the VM for the URL (`BROADCAST_SKIP_VM=1 ./broadcast.sh pre-race`
+overrides that when you know the VM is not holding it). Once released, the
+later switches that morning skip the VM check entirely.
+
 **Do not screen-share from the race Mac.** A Google Meet share is a browser
 tab encoding the screen at 30 fps — a large slice of a core and hundreds of
 MB on an 8 GB machine that already pages under the pipeline — for a
