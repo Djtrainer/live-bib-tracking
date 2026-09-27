@@ -14,7 +14,7 @@ import holding_page  # noqa: E402
 
 @pytest.fixture
 def server():
-    httpd = holding_page.serve("pre-race", 0, "8:30 am", host="127.0.0.1")
+    httpd = holding_page.serve("pre-race", 0, "around 8:30 am", host="127.0.0.1")
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"

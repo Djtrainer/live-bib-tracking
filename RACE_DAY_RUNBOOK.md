@@ -107,7 +107,7 @@ an empty or broken site:
 
 | command | what the public URL shows |
 |---|---|
-| `./broadcast.sh pre-race --time "8:30 am"` | "The race hasn't started yet! Check back around 8:30 am" (port 8002) |
+| `./broadcast.sh pre-race --time "around 8:30 am"` | "The race hasn't started yet! Check back around 8:30 am" (port 8002) |
 | `./broadcast.sh leaderboard` | the live leaderboard (port 8001); refuses if nothing answers there |
 | `./broadcast.sh thank-you` | "Thank you for coming", plus the sponsors in `config/sponsors.txt` if that file exists (port 8003) |
 | `./broadcast.sh status` | which of the three the tunnel points at, and which servers are up |
@@ -140,8 +140,8 @@ a bookmarked `/admin` shows the holding page too.
 
 **Between races the URL comes from a free VM, not the laptop.** The same
 holding page and the same ngrok agent run on Google's always-free
-`e2-micro` (`deploy/broadcast-vm/`), so the bonanza URL shows "Check back
-around October 24" from now until race day with every laptop closed. One
+`e2-micro` (`deploy/broadcast-vm/`), so the public URL shows "Check back on
+October 24th" from now until race day with every laptop closed. One
 agent can hold the URL at a time, so race day is a hand-off, and the
 race-day commands do it for you:
 

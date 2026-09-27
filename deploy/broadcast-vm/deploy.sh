@@ -84,8 +84,14 @@ sync_vm() {
 
 check_url() {
     # The free plan's interstitial answers browsers first; the header skips it.
+    # Right after a restart the agent needs a few seconds to re-register
+    # the URL; ngrok answers 404 ERR_NGROK_3200 until then.
     local code
-    code=$(curl -s -o /dev/null -m 10 -H 'ngrok-skip-browser-warning: 1' -w '%{http_code}' "$URL/" || true)
+    for _ in 1 2 3 4 5 6; do
+        code=$(curl -s -o /dev/null -m 10 -H 'ngrok-skip-browser-warning: 1' -w '%{http_code}' "$URL/" || true)
+        [[ "$code" == "200" ]] && break
+        sleep 4
+    done
     local text
     text=$(curl -s -m 10 -H 'ngrok-skip-browser-warning: 1' "$URL/" | sed -E 's/<[^>]+>/ /g' | tr -s ' \n' ' ' | grep -oE "Check back [^.]{0,28}|Thank you for coming|ERR_NGROK_[0-9]+" | head -1 || true)
     echo -e "   $URL/  ->  HTTP ${code:-none}  ${text:+\"$text\"}"
