@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import html
+from urllib.parse import urlparse
 import logging
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +32,7 @@ PAGES_DIR = REPO_ROOT / "src" / "static_pages"
 SPONSORS_FILE = REPO_ROOT / "config" / "sponsors.txt"
 PAGES = {"pre-race": "pre-race.html", "thank-you": "thank-you.html"}
 DEFAULT_PORTS = {"pre-race": 8002, "thank-you": 8003}
+DEFAULT_LEARN_MORE = "https://slaysarcoma.com/"
 
 
 def sponsors_section(path: Path = SPONSORS_FILE) -> str:
@@ -49,22 +51,33 @@ def sponsors_section(path: Path = SPONSORS_FILE) -> str:
     return f'<section class="sponsors"><h2>Thank you to our sponsors</h2><ul>{items}</ul></section>'
 
 
+def learn_more_section(url: str = DEFAULT_LEARN_MORE) -> str:
+    """"Learn more at slaysarcoma.com", linked, or nothing for an empty URL."""
+    if not url:
+        return ""
+    host = urlparse(url).netloc or url
+    if host.startswith("www."):
+        host = host[4:]
+    return f'<p class="learn-more">Learn more at <a href="{html.escape(url, quote=True)}">{html.escape(host)}</a></p>'
+
+
 def render(page: str, time_text: str = "8:30 am", year: int | None = None,
-           sponsors_path: Path = SPONSORS_FILE) -> str:
+           sponsors_path: Path = SPONSORS_FILE, learn_more: str = DEFAULT_LEARN_MORE) -> str:
     template = (PAGES_DIR / PAGES[page]).read_text(encoding="utf-8")
     return (
         template.replace("{{TIME}}", html.escape(time_text))
         .replace("{{YEAR}}", str(year or _dt.date.today().year))
         .replace("{{SPONSORS}}", sponsors_section(sponsors_path))
+        .replace("{{LEARN_MORE}}", learn_more_section(learn_more))
     )
 
 
-def make_handler(page: str, time_text: str):
+def make_handler(page: str, time_text: str, learn_more: str = DEFAULT_LEARN_MORE):
     class Handler(BaseHTTPRequestHandler):
         server_version = "holding-page/1"
 
         def _send(self, with_body: bool) -> None:
-            body = render(page, time_text).encode("utf-8")
+            body = render(page, time_text, learn_more=learn_more).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -85,8 +98,9 @@ def make_handler(page: str, time_text: str):
     return Handler
 
 
-def serve(page: str, port: int, time_text: str, host: str = "0.0.0.0") -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(page, time_text))
+def serve(page: str, port: int, time_text: str, host: str = "0.0.0.0",
+          learn_more: str = DEFAULT_LEARN_MORE) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(page, time_text, learn_more))
 
 
 def main(argv=None) -> int:
@@ -95,11 +109,13 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=None, help="default: 8002 pre-race, 8003 thank-you")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--time", default="8:30 am", help="fills {{TIME}} on the pre-race page")
+    parser.add_argument("--learn-more", default=DEFAULT_LEARN_MORE, metavar="URL",
+                        help="'Learn more at <site>' link under the page; '' to omit")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", stream=sys.stderr)
     port = args.port or DEFAULT_PORTS[args.page]
-    render(args.page, args.time)  # fail now, not on the first visitor, if the template is broken
-    httpd = serve(args.page, port, args.time, args.host)
+    render(args.page, args.time, learn_more=args.learn_more)  # fail now, not on the first visitor
+    httpd = serve(args.page, port, args.time, args.host, args.learn_more)
     logging.getLogger("holding_page").info("serving %s on http://%s:%d/ (every path)", args.page, args.host, port)
     try:
         httpd.serve_forever()

@@ -27,6 +27,8 @@
     .sponsors ul { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: .6em 1.6em;
                    justify-content: center; font-size: clamp(16px, 2.2vw, 30px); font-weight: 600; }
     footer { position: fixed; bottom: 2vh; left: 0; right: 0; color: var(--muted); font-size: clamp(12px, 1.3vw, 16px); }
+    .learn-more { margin-top: 3vh; font-size: clamp(15px, 1.8vw, 22px); color: var(--muted); }
+    .learn-more a { color: var(--purple); text-decoration: underline; text-underline-offset: 3px; }
 </style>
 </head>
 <body>
@@ -36,6 +38,7 @@
   <h1>Thank you for coming!</h1>
   <p class="lead">Every step today supports sarcoma research. Official results will be shared after the race.</p>
   {{SPONSORS}}
+  {{LEARN_MORE}}
 </main>
 <footer>Slay Sarcoma Research Initiative</footer>
 </body>

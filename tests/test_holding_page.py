@@ -65,3 +65,24 @@ class TestRendering:
             text = (holding_page.PAGES_DIR / name).read_text()
             assert "http://" not in text and "https://" not in text  # no external assets to fail through the tunnel
             assert 'src="data:image/png;base64,' in text
+
+
+class TestLearnMore:
+    def test_link_shows_the_host_and_points_at_the_url(self, tmp_path):
+        out = holding_page.render("pre-race", sponsors_path=tmp_path / "none.txt")
+        assert 'href="https://slaysarcoma.com/"' in out
+        assert "Learn more at" in out and ">slaysarcoma.com<" in out
+
+    def test_link_is_escaped_and_can_be_omitted(self, tmp_path):
+        out = holding_page.render("thank-you", sponsors_path=tmp_path / "none.txt",
+                                  learn_more='https://x.test/?a=1&b="2"')
+        assert "&amp;b=&quot;2&quot;" in out and 'b="2"' not in out
+        out = holding_page.render("thank-you", sponsors_path=tmp_path / "none.txt", learn_more="")
+        assert "Learn more" not in out and "{{" not in out
+
+    def test_pre_race_page_lists_sponsors_too(self, tmp_path):
+        # The pre-race page had the sponsors CSS but no placeholder, so a
+        # sponsors.txt never showed on the page the VM serves for a month.
+        f = tmp_path / "sponsors.txt"; f.write_text("Acme Running\nRiver Bakery\n")
+        out = holding_page.render("pre-race", sponsors_path=f)
+        assert "Thank you to our sponsors" in out and "Acme Running" in out and "River Bakery" in out
