@@ -11,7 +11,7 @@
 # (the URL, the traffic policy and the interstitial are unchanged); it takes
 # a few seconds, and the holding pages reload themselves so open tabs follow.
 #
-#   ./broadcast.sh pre-race [--time "8:30 am"]   before the stack is up
+#   ./broadcast.sh pre-race [--time "around 8:30 am"]   before the stack is up
 #   ./broadcast.sh leaderboard                   when results should be public
 #   ./broadcast.sh thank-you                     if something goes wrong
 #   ./broadcast.sh status                        what the URL points at now
@@ -168,9 +168,9 @@ cloud_claim() {  # the VM takes the URL; local ngrok goes offline first
     for _ in $(seq 1 12); do
         sleep 2
         body=$(curl -s -m 8 -H 'ngrok-skip-browser-warning: 1' "$URL/" || true)
-        [[ "$body" == *"Check back around"* ]] && break
+        [[ "$body" == *"Check back "* ]] && break
     done
-    if [[ "$body" == *"Check back around"* ]]; then
+    if [[ "$body" == *"Check back "* ]]; then
         echo -e "${GREEN}✅ $URL shows the holding page from the VM; this laptop can go to sleep${NC}"
     else
         echo -e "${RED}❌ $URL is not showing the holding page yet; check: deploy/broadcast-vm/deploy.sh status${NC}"

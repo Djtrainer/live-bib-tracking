@@ -61,7 +61,7 @@ def learn_more_section(url: str = DEFAULT_LEARN_MORE) -> str:
     return f'<p class="learn-more">Learn more at <a href="{html.escape(url, quote=True)}">{html.escape(host)}</a></p>'
 
 
-def render(page: str, time_text: str = "8:30 am", year: int | None = None,
+def render(page: str, time_text: str = "around 8:30 am", year: int | None = None,
            sponsors_path: Path = SPONSORS_FILE, learn_more: str = DEFAULT_LEARN_MORE) -> str:
     template = (PAGES_DIR / PAGES[page]).read_text(encoding="utf-8")
     return (
@@ -108,7 +108,8 @@ def main(argv=None) -> int:
     parser.add_argument("page", choices=sorted(PAGES))
     parser.add_argument("--port", type=int, default=None, help="default: 8002 pre-race, 8003 thank-you")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--time", default="8:30 am", help="fills {{TIME}} on the pre-race page")
+    parser.add_argument("--time", default="around 8:30 am",
+                        help="fills 'Check back {{TIME}}' on the pre-race page, e.g. 'around 8:30 am' or 'on October 24th'")
     parser.add_argument("--learn-more", default=DEFAULT_LEARN_MORE, metavar="URL",
                         help="'Learn more at <site>' link under the page; '' to omit")
     args = parser.parse_args(argv)

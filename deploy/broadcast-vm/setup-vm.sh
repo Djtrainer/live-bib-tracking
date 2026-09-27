@@ -9,7 +9,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8   # quiet apt on a headless ssh
 URL="${1:?public ngrok URL}"
 PAGE="${2:-pre-race}"
-TIME_TEXT="${3:-October 24}"
+TIME_TEXT="${3:-on October 24th}"
 APP=/opt/race-broadcast
 PORT=8002
 

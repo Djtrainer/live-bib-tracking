@@ -23,7 +23,7 @@ VM=${BROADCAST_VM:-race-broadcast}
 ZONE=${BROADCAST_ZONE:-us-central1-a}
 URL=${NGROK_URL:-https://slaysarcoma.ngrok.app}
 PAGE=${BROADCAST_PAGE:-pre-race}
-TIME_TEXT=${BROADCAST_TIME:-October 24}
+TIME_TEXT=${BROADCAST_TIME:-on October 24th}
 NGROK_CFG=${NGROK_CONFIG:-"$HOME/Library/Application Support/ngrok/ngrok.yml"}
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -87,7 +87,7 @@ check_url() {
     local code
     code=$(curl -s -o /dev/null -m 10 -H 'ngrok-skip-browser-warning: 1' -w '%{http_code}' "$URL/" || true)
     local text
-    text=$(curl -s -m 10 -H 'ngrok-skip-browser-warning: 1' "$URL/" | sed -E 's/<[^>]+>/ /g' | tr -s ' \n' ' ' | grep -oE "Check back around [^.]{0,24}|Thank you for coming|ERR_NGROK_[0-9]+" | head -1 || true)
+    text=$(curl -s -m 10 -H 'ngrok-skip-browser-warning: 1' "$URL/" | sed -E 's/<[^>]+>/ /g' | tr -s ' \n' ' ' | grep -oE "Check back [^.]{0,28}|Thank you for coming|ERR_NGROK_[0-9]+" | head -1 || true)
     echo -e "   $URL/  ->  HTTP ${code:-none}  ${text:+\"$text\"}"
 }
 
