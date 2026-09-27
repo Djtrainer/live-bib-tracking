@@ -21,7 +21,7 @@ cd "$(dirname "$0")/../.."
 
 VM=${BROADCAST_VM:-race-broadcast}
 ZONE=${BROADCAST_ZONE:-us-central1-a}
-URL=${NGROK_URL:-https://bonanza-overbite-sprawl.ngrok-free.dev}
+URL=${NGROK_URL:-https://slaysarcoma.ngrok.app}
 PAGE=${BROADCAST_PAGE:-pre-race}
 TIME_TEXT=${BROADCAST_TIME:-October 24}
 NGROK_CFG=${NGROK_CONFIG:-"$HOME/Library/Application Support/ngrok/ngrok.yml"}

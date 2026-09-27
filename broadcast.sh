@@ -33,7 +33,7 @@
 set -u
 cd "$(dirname "$0")"
 
-URL=${NGROK_URL:-https://bonanza-overbite-sprawl.ngrok-free.dev}
+URL=${NGROK_URL:-https://slaysarcoma.ngrok.app}
 POLICY=${NGROK_POLICY:-}
 if [[ -z "$POLICY" ]]; then
     # The committed policy carries the placeholder password; the gitignored

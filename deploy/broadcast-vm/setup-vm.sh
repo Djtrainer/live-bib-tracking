@@ -37,11 +37,12 @@ sudo mkdir -p "$APP/scripts" "$APP/src/static_pages" "$APP/config"
 sudo cp ~/bundle/holding_page.py "$APP/scripts/holding_page.py"
 sudo cp ~/bundle/static_pages/*.html "$APP/src/static_pages/"
 # The pages reload themselves every 60 s so pavilion tabs follow a switch
-# on race day. Served from here for a month that is a problem: ngrok's free
-# plan caps HTTP requests at 20,000 a month, and one tab left open on a 60 s
-# refresh makes 43,000. Fifteen minutes is plenty between races.
-sudo sed -i -E 's/(http-equiv="refresh" content=")60"/\1900"/' "$APP"/src/static_pages/*.html
-grep -c 'content="900"' "$APP/src/static_pages/pre-race.html" | sed 's/^/refresh set to 900 s in pre-race.html: /'
+# on race day. Served from here for a month that adds up: one tab left open
+# on a 60 s refresh makes 43,000 requests a month against the Hobbyist
+# plan's 100,000 (the free plan's 20,000 would have gone dark mid-month).
+# Five minutes between races keeps a forgotten tab under 9,000.
+sudo sed -i -E 's/(http-equiv="refresh" content=")60"/\1300"/' "$APP"/src/static_pages/*.html
+grep -c 'content="300"' "$APP/src/static_pages/pre-race.html" | sed 's/^/refresh set to 300 s in pre-race.html: /'
 if [[ -f ~/bundle/sponsors.txt ]]; then
     sudo cp ~/bundle/sponsors.txt "$APP/config/sponsors.txt"
     echo "sponsors: $(wc -l < ~/bundle/sponsors.txt) names"

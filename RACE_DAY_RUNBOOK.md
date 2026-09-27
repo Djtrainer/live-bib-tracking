@@ -99,7 +99,7 @@ permanent, so the pavilion kiosk can be set up in advance.
 ./broadcast.sh leaderboard
 ```
 
-which runs `ngrok http 8001 --url https://bonanza-overbite-sprawl.ngrok-free.dev
+which runs `ngrok http 8001 --url https://slaysarcoma.ngrok.app
 --traffic-policy-file config/ngrok-policy.local.yml` in the background
 (`.broadcast/ngrok.log`). The same script points the **same URL** at one
 of two holding pages instead of the leaderboard, so spectators never meet
