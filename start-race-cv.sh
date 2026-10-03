@@ -484,6 +484,43 @@ build_race_cv_args() {
     fi
 }
 
+# A roster path that does not exist used to cost one WARNING line in the log
+# and a whole race without bib snapping. Refuse instead, and say what is there.
+check_roster() {
+    [[ $API_ONLY -eq 1 ]] && return 0      # the console does not read it; names come from the roster upload
+    if [[ -z "$ROSTER" ]]; then
+        echo -e "${YELLOW}⚠️  No roster (-r): bib reads will not be checked against the start list${NC}"
+        return 0
+    fi
+    if [[ ! -f "$ROSTER" ]]; then
+        echo -e "${RED}❌ Roster not found: $ROSTER${NC}"
+        local found
+        found=$(ls data/results/*.csv data/raw/*.csv 2>/dev/null | head -8)
+        [[ -n "$found" ]] && echo -e "${BLUE}   CSV files here:${NC}" && echo "$found" | sed 's/^/     /'
+        exit 1
+    fi
+    echo -e "${GREEN}✅ Roster $ROSTER ($(($(wc -l < "$ROSTER") - 1)) rows)${NC}"
+}
+
+measure_skew() {  # this machine's clock minus the console's, seconds (+ = ahead); empty if no /api/time
+    python3 - "$API_URL" <<'PY' 2>/dev/null
+import json, sys, time, urllib.request
+url = sys.argv[1] + "/api/time"
+best = None
+for _ in range(5):
+    t0 = time.time()
+    try:
+        epoch = float(json.load(urllib.request.urlopen(url, timeout=4))["epoch"])
+    except Exception:
+        break
+    t3 = time.time()
+    rtt = t3 - t0
+    if best is None or rtt < best[1]:
+        best = ((t0 + t3) / 2 - epoch, rtt)
+print(f"{best[0]:+.3f}" if best else "")
+PY
+}
+
 # --api-url: the API lives on the console machine. Refuse to start a detector
 # that has nowhere to deliver; a finish logged only to the event log is a
 # recovery job, not a result.
@@ -508,23 +545,7 @@ check_remote_api() {
     # An older console without /api/time falls back to the Date header of
     # a GET (whole seconds; a HEAD is answered 405 by FastAPI).
     local skew
-    skew=$(python3 - "$API_URL" <<'PY' 2>/dev/null
-import json, sys, time, urllib.request
-url = sys.argv[1] + "/api/time"
-best = None
-for _ in range(5):
-    t0 = time.time()
-    try:
-        epoch = float(json.load(urllib.request.urlopen(url, timeout=4))["epoch"])
-    except Exception:
-        break
-    t3 = time.time()
-    rtt = t3 - t0
-    if best is None or rtt < best[1]:
-        best = ((t0 + t3) / 2 - epoch, rtt)
-print(f"{best[0]:+.3f}" if best else "")
-PY
-)
+    skew=$(measure_skew)
     if [[ -z "$skew" ]]; then
         local remote_epoch local_epoch
         remote_epoch=$(curl -s -m 4 -D - -o /dev/null "$API_URL/api/clock/status" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
@@ -538,13 +559,34 @@ PY
         echo -e "${YELLOW}⚠️  Could not compare clocks with the console; make sure they agree before racing${NC}"
         return 0
     fi
-    if python3 -c "import sys; sys.exit(0 if abs(float('$skew')) > 2.0 else 1)"; then
-        echo -e "${RED}❌ This machine's clock is ${skew}s from the console's. Every finish time would be off by that.${NC}"
-        echo -e "${BLUE}💡 From the console, with no detector running here:${NC}"
-        echo -e "${BLUE}     ssh -t $(whoami)@<this-machine> \"sudo date -u -s @\$(python3 -c 'import time;print(round(time.time(),3))')\"${NC}"
-        exit 1
+    # What the skew costs. race_cv measures this same offset at startup and
+    # corrects every finish time by it, so a few seconds is harmless. Over
+    # a minute the detector's log, its event log and the 12 h recovery
+    # cut-off all run on the wrong time, and that is refused.
+    skew_over() { python3 -c "import sys; sys.exit(0 if abs(float('$1')) > $2 else 1)"; }
+    local me set_cmd
+    me=$(ip -4 route get "$(echo "$API_URL" | sed -E 's#^[a-z]+://##; s#[:/].*##')" 2>/dev/null | sed -nE 's/.* src ([0-9.]+).*/\1/p' | head -1)
+    [[ -z "$me" ]] && me=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [[ -z "$me" ]] && me=$(ipconfig getifaddr en0 2>/dev/null || true)
+    set_cmd="ssh -t $(whoami)@${me:-JETSON_ADDRESS} $(pwd)/scripts/set_clock_from_console.sh $API_URL"
+    if skew_over "$skew" 2.0 && sudo -n "$(command -v date)" -u >/dev/null 2>&1 && [[ -x scripts/set_clock_from_console.sh ]]; then
+        # sudoers lets this user run date without a password: fix it here.
+        echo -e "${YELLOW}⏱  Clock is ${skew}s from the console's; setting it...${NC}"
+        scripts/set_clock_from_console.sh "$API_URL" 2>&1 | sed 's/^/   /' || true
+        skew=$(measure_skew)
     fi
-    echo -e "${GREEN}✅ Clock ${skew}s from the console; the detector corrects finish times by the measured offset${NC}"
+    if skew_over "$skew" 60; then
+        echo -e "${RED}❌ This machine's clock is ${skew}s from the console's. Results would still be corrected, but the${NC}"
+        echo -e "${RED}   detector's log, its event log and the recovery cut-off would all run on the wrong time.${NC}"
+        echo -e "${BLUE}💡 From the console, with no detector running here (asks for this machine's sudo password):${NC}"
+        echo -e "${BLUE}     $set_cmd${NC}"
+        exit 1
+    elif skew_over "$skew" 0.25; then
+        echo -e "${YELLOW}⚠️  Clock is ${skew}s from the console's. The detector measures this at startup and corrects every${NC}"
+        echo -e "${YELLOW}   finish time by it, so results are right. To set the clock itself:  $set_cmd${NC}"
+    else
+        echo -e "${GREEN}✅ Clock ${skew}s from the console${NC}"
+    fi
 }
 
 # macOS sleeps a laptop on battery after a minute idle, which drops the USB
@@ -624,6 +666,8 @@ else
 fi
 echo ""
 
+check_roster
+echo ""
 if [[ -n "$API_URL" ]]; then
     check_remote_api
 else

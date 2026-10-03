@@ -219,17 +219,25 @@ prompts for a password: `ssh-copy-id dantrainer@192.168.55.1`.
    Then the Jetson's clock. The board has no RTC battery and no NTP without
    Wi-Fi; at the first split rehearsal it was 9.5 days behind. The Jetson
    launcher measures the skew against the console's `/api/time` to the
-   millisecond, refuses to start over 2 s, and prints this command. It
-   needs the Jetson's sudo password, and it must run while **no detector
-   is running** (a clock jump under a running detector corrupts its
-   timestamps):
+   millisecond. A few seconds only earns a warning, because the detector
+   corrects every finish time by the measured offset; over a minute it
+   refuses to start and prints this command. It needs the Jetson's sudo
+   password, and it must run while **no detector is running** (a clock
+   jump under a running detector corrupts its timestamps). The script
+   authenticates sudo first and reads the console's time afterwards; an
+   earlier one-liner computed the time before the password prompt and left
+   the board behind by however long the typing took:
    ```bash
-   ssh -t dantrainer@192.168.55.1 "sudo date -u -s @$(python3 -c 'import time;print(round(time.time(),3))')"
+   ssh -t dantrainer@192.168.55.1 live-bib-tracking/scripts/set_clock_from_console.sh
    ```
-   Below 2 s the detector measures the residual offset against
-   `/api/time` at startup and corrects every finish timestamp by it (the
-   log line `Clock offset vs the API`), so the sub-second part is
-   handled without sudo. If the clock ever has to be corrected mid-race:
+   Whatever is left, the detector measures against `/api/time` at startup
+   and corrects every finish timestamp by it (the log line `Clock offset
+   vs the API`). To never type the password: once, on the board, allow
+   `date` without one, and the launcher sets the clock by itself whenever
+   it is more than 2 s off:
+   ```bash
+   ssh -t dantrainer@192.168.55.1 "echo 'dantrainer ALL=(root) NOPASSWD: /usr/bin/date' | sudo tee /etc/sudoers.d/race-clock && sudo chmod 440 /etc/sudoers.d/race-clock"
+   ``` If the clock ever has to be corrected mid-race:
    stop the detector, set the date, start it again **without** `--fresh`
    (so nothing is archived) -- its unconfirmed events are re-queued.
 3. The detector, on the Jetson. On the board the launcher picks
@@ -245,7 +253,9 @@ prompts for a password: `ssh-copy-id dantrainer@192.168.55.1`.
    ssh dantrainer@192.168.55.1 'cd ~/live-bib-tracking && ./start-race-cv.sh --api-url http://192.168.55.100:8001 -r data/results/roster_2026.csv --fresh'
    ```
    The real start list goes to the Jetson beforehand (the detector's
-   `-r` needs a `Bib` column) and into Live Management on the Mac (names):
+   `-r` needs a `Bib` column; the launcher refuses to start if the file is
+   not there and lists the CSVs that are) and into Live Management on the
+   Mac (names):
    ```bash
    scp roster_2026.csv dantrainer@192.168.55.1:live-bib-tracking/data/results/
    ```
@@ -345,7 +355,7 @@ cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then edit the passw
    ./start-race-cv.sh --api-only --fresh
    ```
    ```bash
-   ssh -t dantrainer@192.168.55.1 "sudo date -u -s @$(python3 -c 'import time;print(round(time.time(),3))')"
+   ssh -t dantrainer@192.168.55.1 live-bib-tracking/scripts/set_clock_from_console.sh
    ```
    ```bash
    ssh dantrainer@192.168.55.1 'cd ~/live-bib-tracking && ./start-race-cv.sh --api-url http://192.168.55.100:8001 -r data/results/roster_2026.csv --fresh'
