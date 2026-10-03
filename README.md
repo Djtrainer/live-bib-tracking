@@ -5,6 +5,8 @@ finds runners and their bibs, ByteTrack follows each runner to the line, an
 OCR pass reads the bib number, and every finish is posted to a results API
 that drives a live leaderboard and a Live Management page for corrections.
 
+> **Race morning?** The commands, in order: **[RACE_MORNING.md](RACE_MORNING.md)**.
+>
 > **Running a race?** Everything operational — start/stop commands, the
 > two-hotspot network setup for the pavilion TV, what the health line means,
 > the config levers, and how to recover from a crash — is in

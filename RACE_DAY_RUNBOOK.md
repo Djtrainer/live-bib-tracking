@@ -1,5 +1,7 @@
 # Race day runbook
 
+**On the morning itself, run [RACE_MORNING.md](RACE_MORNING.md):** the commands in order, nothing else.
+
 Operational reference. For *why* the system is shaped this way, see
 [RACE_DAY_ANALYSIS.md](RACE_DAY_ANALYSIS.md).
 
