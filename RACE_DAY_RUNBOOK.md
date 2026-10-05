@@ -30,12 +30,11 @@ RACE_CV_PYTHON=~/miniconda3/envs/bib_env/bin/python ./start-race-cv.sh -c 0 -r r
 
 ## Before anything else
 
-```bash
-# Start the race clock BEFORE racers arrive.
-# A finisher detected while the clock is stopped is retried, not lost -- but it
-# lands with a negative elapsed time, which someone then has to reconcile.
-curl -X POST http://localhost:8001/api/clock/start
-```
+Start the race clock **before** racers arrive: the Start Race button in Live
+Management, signed in. A finisher detected while the clock is stopped is
+retried, not lost -- but it lands with a negative elapsed time, which someone
+then has to reconcile. (Starting the clock is an operator action; a bare
+`curl -X POST .../api/clock/start` is answered 401 once a login is set.)
 
 Always pass `--roster`. It is not a nicety any more: it is what takes bib
 accuracy from 11/13 to 13/13, by refusing to lock a read like "20" that is not
@@ -79,13 +78,13 @@ the screen share:
  ┌───────────────────────────────────┐          ┌──────────────────────────┐
  │ race Mac: race_cv + API :8001     │  ngrok   │ any computer, wired to   │
  │ tablet:  http://<mac-ip>:8001/admin│ ───────► │ the TV, full screen:     │
- │          (local Wi-Fi, no password)│ cellular │ https://<dev-domain>/    │
+ │          (local Wi-Fi, admin login)│ cellular │ https://<dev-domain>/    │
  └───────────────────────────────────┘          └──────────────────────────┘
 ```
 
 **At the line** everything is local. The tablet joins the Mac's hotspot and
-opens `http://<mac-ip>:8001/admin` — ten metres of Wi-Fi, no cellular, no
-password. Manual adds, bib corrections and the clock all live there. The
+opens `http://<mac-ip>:8001/admin` — ten metres of Wi-Fi, no cellular. It asks
+for the admin login (below). Manual adds, bib corrections and the clock all live there. The
 Mac's address on the hotspot is *not* its home-Wi-Fi address; read it off the
 launcher's startup output or run `ipconfig getifaddr en0`. The `.local` name
 usually does not resolve on a hotspot — use the IP.
@@ -130,12 +129,36 @@ a bookmarked `/admin` shows the holding page too.
 - **`/admin` and every non-GET API call require a password** (the policy
   file). Gating only the page would leave the endpoints it calls open;
   gating the writes is what protects the results. The admin browser is
-  challenged once — starting the clock is the first write, so expect it
-  there — and re-sends credentials to every later call.
+  challenged once — on opening `/admin`, before the app's own login
+  appears — and re-sends credentials to every later call.
 - **Set a real password.** `config/ngrok-policy.yml` is committed with
   `race:change-me`. Copy it to `config/ngrok-policy.local.yml` (gitignored),
   put the real password there, and pass that file instead. The policy is
   read when ngrok starts; restart it after changing the file.
+- **Live Management has its own login, checked by the API.** The tunnel
+  password is the outer door and only exists on the public URL; on the
+  hotspot there was no door at all, and the old login page compared the
+  password in the browser (and `/admin/dashboard` skipped it). Now the
+  credentials live in `config/admin.local.yml` on the Mac
+  (`cp config/admin.example.yml config/admin.local.yml`, set the password;
+  gitignored), the API checks them, and the clock, edits, deletes, roster
+  upload and manual adds are refused without a signed-in session. The
+  detector's finishes and preview frames need no login when they arrive
+  from where a detector can be: this Mac itself or the USB link to the
+  Jetson (192.168.55.x), and never through the tunnel. So nothing changes
+  on the Jetson over the cable. If it ever posts over the hotspot instead,
+  list its hotspot address under `detector_addresses` in the same file, or
+  its finishes are refused: the Jetson's health line shows `pending`
+  climbing with a 401, and `api_server.log` names the refused address. A session lasts 18 hours from its last use (it is renewed
+  while the dashboard is open, so it does not end under you; 72 hours after
+  the sign-in it ends regardless) and survives an
+  API restart. Sessions are per address: the tablet on the hotspot, the
+  Mac on localhost and the public URL each sign in once. Sign Out only
+  drops the cookie in that browser; to end every session, change the
+  password and restart the API. The username is not case-sensitive, the
+  password is; keep both in quotes in the file. With no such file the API
+  runs open and the launcher says so in red; with the placeholder still in
+  the file the API refuses to start.
 - ngrok reconnects on its own after a cellular blip, and so does the page
   (it re-fetches everything it missed). The Mac never depended on the tunnel
   for timing in the first place.
@@ -381,10 +404,7 @@ cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then edit the passw
    ```bash
    ./broadcast.sh leaderboard
    ```
-6. Start the clock at the gun — the button on Live Management, or:
-   ```bash
-   curl -X POST http://localhost:8001/api/clock/start
-   ```
+6. Start the clock at the gun: the Start Race button in Live Management (signed in).
 
 **During the race**
 

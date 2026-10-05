@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/adminApi';
 import { 
   Play, 
   Square, 
@@ -122,7 +123,7 @@ export default function RaceClock({ className = '', showControls = false }: Race
   // Clock control functions (only used if showControls is true)
   const handleStart = async () => {
     try {
-      const response = await fetch('/api/clock/start', { method: 'POST' });
+      const response = await adminFetch('/api/clock/start', { method: 'POST' });
       const result = await response.json();
       if (!result.success) {
         console.error('Failed to start clock:', result.message);
@@ -134,7 +135,7 @@ export default function RaceClock({ className = '', showControls = false }: Race
 
   const handleStop = async () => {
     try {
-      const response = await fetch('/api/clock/stop', { method: 'POST' });
+      const response = await adminFetch('/api/clock/stop', { method: 'POST' });
       const result = await response.json();
       if (!result.success) {
         console.error('Failed to stop clock:', result.message);
@@ -146,10 +147,18 @@ export default function RaceClock({ className = '', showControls = false }: Race
 
   const handleReset = async () => {
     try {
-      const response = await fetch('/api/clock/reset', { method: 'POST' });
-      const result = await response.json();
+      // One mis-tap between the gun and the first finisher used to wipe the
+      // start time with no question asked.
+      if (!window.confirm('Reset the race clock to 00:00? The start time will be lost.')) return;
+      let response = await adminFetch('/api/clock/reset', { method: 'POST' });
+      let result = await response.json();
       if (!result.success) {
-        console.error('Failed to reset clock:', result.message);
+        // The server refuses to reset under recorded finishers unless forced.
+        // This used to be swallowed, so the button looked dead on race day.
+        if (!window.confirm('Finishers already have times against this clock. Resetting makes those times wrong.\n\nReset the clock anyway?')) return;
+        response = await adminFetch('/api/clock/reset?force=true', { method: 'POST' });
+        result = await response.json();
+        if (!result.success) alert(result.message || 'The clock could not be reset.');
       }
     } catch (error) {
       console.error('Error resetting clock:', error);
@@ -160,7 +169,7 @@ export default function RaceClock({ className = '', showControls = false }: Race
     const newTime = prompt('Enter new time (MM:SS.cs format):', currentTime);
     if (newTime && newTime.trim()) {
       try {
-        const response = await fetch('/api/clock/edit', {
+        const response = await adminFetch('/api/clock/edit', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ time: newTime.trim() }),

@@ -1,0 +1,24 @@
+# Operator login for Live Management (src/api_backend/admin_auth.py).
+#
+#   cp config/admin.example.yml config/admin.local.yml
+#
+# then set a real password in the copy, which is gitignored. The API reads
+# config/admin.local.yml at startup; with no such file it runs with NO
+# login and says so. It refuses to start while the placeholder below is
+# still there, so a half-finished setup cannot pass for a finished one.
+#
+# Keep the quotes. YAML reads an unquoted 0123 as 83, yes as true and 10:24
+# as 624, and " #" starts a comment. The password needs 8+ characters (a
+# phrase is better), no space at either end, and must not be the username.
+# The username is not case-sensitive (a tablet keyboard will capitalise
+# it); the password is. The launcher prints the password's length at
+# startup so a value cut short by a stray " #" is noticed.
+username: "admin"
+password: "change-me"
+
+# The detector has no login. Its finishes and preview frames are accepted
+# only from where a detector can be: this machine, and the USB link to the
+# Jetson (192.168.55.x). If the Jetson ever posts over the hotspot instead
+# (--api-url http://<this Mac's hotspot address>:8001), list ITS hotspot
+# address here, or its finishes are refused with a 401:
+# detector_addresses: ["172.20.10.7"]

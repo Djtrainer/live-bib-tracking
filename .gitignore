@@ -56,3 +56,6 @@ __MACOSX/
 
 # broadcast.sh state (pids, ngrok and page logs)
 .broadcast/
+
+# Operator login for Live Management: the real credentials (see config/admin.example.yml)
+config/admin.local.yml

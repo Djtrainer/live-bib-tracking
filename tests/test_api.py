@@ -33,6 +33,11 @@ from api_backend.journal import RaceJournal  # noqa: E402
 def isolated_state(tmp_path, monkeypatch):
     """Fresh in-memory race and a throwaway journal for each test."""
     monkeypatch.setattr(server, "journal", RaceJournal(tmp_path))
+    # No operator login in these tests, whatever config/admin.local.yml on
+    # this machine says: tests/test_admin_auth.py covers the login.
+    monkeypatch.setenv("RACE_ADMIN_CONFIG", str(tmp_path / "no-admin-config.yml"))
+    monkeypatch.delenv("RACE_ADMIN_USER", raising=False)
+    monkeypatch.delenv("RACE_ADMIN_PASSWORD", raising=False)
     server.race_results.clear()
     server.race_clock_state.clear()
     server.race_clock_state.update({"raceStartTime": None, "status": "stopped", "offset": 0})

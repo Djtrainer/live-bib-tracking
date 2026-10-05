@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
   Settings, 
   Users, 
@@ -16,6 +17,7 @@ import {
 import Layout from '@/components/Layout';
 import RaceClock from '@/components/RaceClock';
 import { formatTime } from '../lib/utils';
+import { adminFetch, getAdminSession } from '../lib/adminApi';
 
 interface Finisher {
   id: string;
@@ -33,6 +35,28 @@ interface EditingCell {
 }
 
 export default function AdminDashboard() {
+  const navigate = useNavigate();
+
+  // This page used to open for anyone who typed its address. The server now
+  // refuses operator actions without a session; this sends a visitor without
+  // one to the login instead of showing a dashboard whose buttons all fail.
+  useEffect(() => {
+    let cancelled = false;
+    let first = true;
+    const check = () => getAdminSession().then((s) => {
+      if (!cancelled && s.configured && !s.authenticated && !s.unknown) {
+        navigate(first ? '/admin' : '/admin?expired=1', { replace: true });
+      }
+      first = false;
+    });
+    check();
+    // Asking also renews the session on the server, so a dashboard left open
+    // through the race never expires under the operator, and an ended
+    // session is noticed here rather than on the next Add Finisher.
+    const timer = window.setInterval(check, 10 * 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [navigate]);
+
   // Bumped when the WebSocket drops; re-runs the connection effect (fresh
   // socket + fresh fetch). See Index.tsx.
   const [wsGen, setWsGen] = useState(0);
@@ -217,7 +241,7 @@ export default function AdminDashboard() {
       // Use provided bib number or generate a placeholder based on current finisher count
       const finalBibNumber = bibNumber.trim() || `No-Bib-${finishers.length + 1}`;
 
-      const response = await fetch('/api/results', {
+      const response = await adminFetch('/api/results', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -247,7 +271,7 @@ export default function AdminDashboard() {
     if (!confirm('Are you sure you want to delete this finisher?')) return;
     
     try {
-      const response = await fetch(`/api/results/${id}`, {
+      const response = await adminFetch(`/api/results/${id}`, {
         method: 'DELETE',
       });
 
@@ -296,7 +320,7 @@ export default function AdminDashboard() {
     if (finisher[field as keyof Finisher] === processedValue) return;
 
     try {
-      const response = await fetch(`/api/results/${id}`, {
+      const response = await adminFetch(`/api/results/${id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -335,7 +359,7 @@ export default function AdminDashboard() {
     formData.append('file', file);
 
     try {
-      const response = await fetch('/api/roster/upload', {
+      const response = await adminFetch('/api/roster/upload', {
         method: 'POST',
         body: formData,
       });

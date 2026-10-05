@@ -49,7 +49,13 @@ def _format_finish(finish_ms: float | int | None) -> str:
     """MM:SS.t from milliseconds; blank when the racer has not finished."""
     if finish_ms is None:
         return "--:--.-"
-    total = float(finish_ms) / 1000.0
+    # One unformattable row must not stop the results file being written.
+    try:
+        total = float(finish_ms) / 1000.0
+    except (TypeError, ValueError):
+        return "--:--.-"
+    if total != total or total in (float("inf"), float("-inf")):
+        return "--:--.-"
     minutes, seconds = divmod(max(total, 0.0), 60.0)
     return f"{int(minutes):02d}:{seconds:04.1f}"
 

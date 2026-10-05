@@ -1,4 +1,5 @@
 import { ReactNode } from 'react';
+import { adminLogout } from '@/lib/adminApi';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import RaceClock from '@/components/RaceClock';
 import { LogOut } from 'lucide-react';
@@ -18,8 +19,9 @@ export default function Layout({ children, showNavigation = true, totalFinishers
   const navigate = useNavigate();
   const isAdmin = location.pathname.startsWith('/admin');
 
-  const handleLogout = () => {
-    navigate('/admin/login');
+  const handleLogout = async () => {
+    await adminLogout();          // ends the server-side session cookie
+    navigate('/admin');
   };
 
   return (

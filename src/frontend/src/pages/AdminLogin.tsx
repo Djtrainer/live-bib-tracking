@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Shield, 
@@ -10,6 +10,8 @@ import {
   Lock
 } from 'lucide-react';
 import Layout from '@/components/Layout';
+import { adminLogin, getAdminSession } from '@/lib/adminApi';
+import type { AdminSession } from '@/lib/adminApi';
 
 export default function AdminLogin() {
   const [credentials, setCredentials] = useState({ username: '', password: '' });
@@ -17,6 +19,23 @@ export default function AdminLogin() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const navigate = useNavigate();
+  // Until the server answers, assume a login is required: showing "no
+  // password set" for a moment on a locked server would be the wrong default.
+  const [session, setSession] = useState<AdminSession>({ configured: true, authenticated: false });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (new URLSearchParams(window.location.search).get('expired')) {
+      setError('Your session ended. Please sign in again.');
+    }
+    getAdminSession().then((s) => {
+      if (cancelled) return;
+      setSession(s);
+      // Already signed in on this browser: straight to Live Management.
+      if (s.configured && s.authenticated && !s.unknown) navigate('/admin/dashboard', { replace: true });
+    });
+    return () => { cancelled = true; };
+  }, [navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -36,16 +55,14 @@ export default function AdminLogin() {
       return;
     }
 
-    // Simulate authentication with validation
-    setTimeout(() => {
-      if (credentials.username.trim() === 'admin' && credentials.password.trim() === 'admin') {
-        sessionStorage.setItem('isAdmin', 'true');
-        navigate('/admin/dashboard');
-      } else {
-        setError('Invalid username or password. Please try again.');
-      }
-      setIsLoading(false);
-    }, 1000);
+    // The API checks the credentials; this page never knows them.
+    const result = await adminLogin(credentials.username.trim(), credentials.password);
+    if (result.ok) {
+      navigate('/admin/dashboard');
+    } else {
+      setError(result.message || 'Sign-in failed.');
+    }
+    setIsLoading(false);
   };
 
   return (
@@ -87,6 +104,10 @@ export default function AdminLogin() {
                       <input
                         id="username"
                         type="text"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        autoComplete="username"
                         value={credentials.username}
                         onChange={(e) => setCredentials(prev => ({ ...prev, username: e.target.value }))}
                         className="w-full pl-10 pr-4 py-3 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-primary focus:border-primary transition-all"
@@ -109,6 +130,10 @@ export default function AdminLogin() {
                       <input
                         id="password"
                         type={showPassword ? 'text' : 'password'}
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        autoComplete="current-password"
                         value={credentials.password}
                         onChange={(e) => setCredentials(prev => ({ ...prev, password: e.target.value }))}
                         className="w-full pl-10 pr-12 py-3 rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:ring-2 focus:ring-primary focus:border-primary transition-all"
@@ -151,21 +176,31 @@ export default function AdminLogin() {
                   </button>
                 </form>
 
-                {/* Demo Credentials Info */}
-                <div className="mt-8 p-4 bg-muted/50 rounded-lg border border-border/50">
-                  <div className="flex items-start gap-3">
-                    <Shield className="w-5 h-5 text-primary mt-0.5" />
-                    <div>
-                      <p className="text-sm font-semibold text-foreground mb-2">
-                        Demo Credentials
-                      </p>
-                      <div className="space-y-1 text-sm text-muted-foreground">
-                        <p><strong>Username:</strong> admin</p>
-                        <p><strong>Password:</strong> admin</p>
+
+                {/* Shown only when the server has no login configured at all. */}
+                {!session.configured && (
+                  <div className="mt-8 p-4 bg-muted/50 rounded-lg border border-border/50">
+                    <div className="flex items-start gap-3">
+                      <Shield className="w-5 h-5 text-primary mt-0.5" />
+                      <div className="text-sm text-muted-foreground">
+                        <p className="font-semibold text-foreground mb-1">
+                          No admin password is set on this server
+                        </p>
+                        <p>
+                          Anyone who can reach this page can manage the race. Set one in
+                          config/admin.local.yml and restart the results API.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => navigate('/admin/dashboard')}
+                          className="mt-3 underline text-primary font-semibold"
+                        >
+                          Continue to Live Management
+                        </button>
                       </div>
                     </div>
                   </div>
-                </div>
+                )}
               </div>
             </div>
           </div>

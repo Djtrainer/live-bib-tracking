@@ -3,6 +3,7 @@ import asyncio
 import csv
 import io
 import json
+import math
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ import logging
 import numpy as np
 import uvicorn
 from fastapi import (
+    Depends,
     FastAPI,
     File,
     HTTPException,
@@ -24,12 +26,13 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
 # Sibling module. The launcher runs this file as a script with PYTHONPATH=src;
 # make the same import work when it is run from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_backend.journal import RaceJournal, _format_finish  # noqa: E402
+from api_backend.admin_auth import COOKIE_NAME as ADMIN_COOKIE, AdminAuth, AdminConfigError  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: F401  (kept for the legacy Docker image)
 
 # The legacy in-process pipeline (image_processor.video_inference) is gone.
@@ -60,6 +63,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Code to run on startup
     logger.info("Application startup: FastAPI server ready")
+
+    # The operator login. Loaded here, not at import, so a test or a second
+    # process can point RACE_ADMIN_CONFIG somewhere else. A config that
+    # exists but is unusable raises AdminConfigError and the API does not
+    # start: see admin_auth.py for why that beats running open.
+    global admin_auth
+    admin_auth = AdminAuth.from_environment()
+    if admin_auth.enabled:
+        logger.info("Live Management requires the admin login (user '%s', %d-character password, from %s)",
+                    admin_auth.username, admin_auth.password_length, admin_auth.source)
+    else:
+        logger.warning(
+            "NO ADMIN LOGIN CONFIGURED (%s). Anyone who can reach this server can "
+            "start, stop or reset the clock and edit results. "
+            "cp config/admin.example.yml config/admin.local.yml and set a password.",
+            admin_auth.source,
+        )
 
     # Put the race back the way it was if this is a restart mid-race.
     # --fresh archives the old record instead. Either way, say what happened
@@ -231,11 +251,193 @@ app = FastAPI(lifespan=lifespan, title="Live Bib Tracking - Unified Server")
 # Add CORS middleware to allow requests from admin UI
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your actual domains
-    allow_credentials=True,
+    allow_origins=["*"],  # public, read-only GETs; the site itself is same-origin
+    # False: with the session in a cookie, no other origin may make
+    # credentialed requests. (The cookie is SameSite=Strict as well.)
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --- bounds on what anyone may send -------------------------------------------
+MAX_BODY_BYTES = 8 * 1024 * 1024     # a 1080p preview JPEG is ~0.3 MB, a roster CSV less
+MAX_RESULTS = 5000                   # a race is a few hundred rows
+RESULT_FIELD_LIMITS = {"bibNumber": 32, "racerName": 120, "eventId": 128, "source": 32,
+                       "gender": 40, "team": 120}
+_failed_login_gate = asyncio.Semaphore(4)
+
+
+class BodyLimitMiddleware:
+    """Refuse a request whose declared body is absurd, before reading it.
+
+    Plain ASGI on purpose: BaseHTTPMiddleware wraps streaming responses, and
+    /video_feed is one that must end when its viewer leaves.
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            for name, value in scope.get("headers", []):
+                if name == b"content-length":
+                    try:
+                        too_big = int(value) > self.max_bytes
+                    except ValueError:
+                        too_big = False
+                    if too_big:
+                        refusal = JSONResponse({"detail": "request body too large"}, status_code=413)
+                        await refusal(scope, receive, send)
+                        return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(BodyLimitMiddleware, max_bytes=MAX_BODY_BYTES)
+
+
+# --- operator login (admin_auth.py) ------------------------------------------
+# Replaced at startup by lifespan(); the default is "nothing configured".
+admin_auth = AdminAuth()
+
+
+def _request_is_https(request: Request) -> bool:
+    forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return request.url.scheme == "https" or forwarded == "https"
+
+
+def _set_session_cookie(response: Response, request: Request, renew: bool = False) -> None:
+    # renew: extend the session this request carries (same sign-in time, so
+    # the 72 h cap still counts from the original login) rather than start one.
+    token = admin_auth.issue(renew=request.cookies.get(ADMIN_COOKIE) if renew else None)
+    response.set_cookie(
+        ADMIN_COOKIE, token,
+        max_age=int(admin_auth.ttl_s), path="/",
+        httponly=True,                 # page scripts cannot read it
+        samesite="strict",             # never sent on a request another site started
+        secure=_request_is_https(request),   # the tablet uses plain http on the hotspot
+    )
+
+
+async def require_admin(request: Request, response: Response) -> None:
+    """Dependency for operator endpoints: a valid session cookie, or 401.
+
+    With no login configured this lets everything through, as the API
+    always did; the startup log and the login page say so. A session past
+    half its life is renewed here, so a dashboard in use never expires.
+    """
+    if not admin_auth.enabled:
+        return
+    token = request.cookies.get(ADMIN_COOKIE)
+    if not admin_auth.verify(token):
+        raise HTTPException(status_code=401, detail="Admin login required")
+    if admin_auth.needs_refresh(token):
+        _set_session_cookie(response, request, renew=True)
+
+
+def _client_host(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+_refused_detector_hosts: set = set()
+
+
+def _from_detector(request: Request) -> bool:
+    """The request comes straight from a machine a detector can be on.
+
+    Anything that arrived through the tunnel carries X-Forwarded-* (the
+    ngrok agent connects from localhost, so the socket address alone would
+    make every tunnel visitor look local). Sending the header yourself only
+    takes the exemption away.
+    """
+    if request.headers.get("x-forwarded-for") or request.headers.get("x-forwarded-host"):
+        return False
+    return admin_auth.is_detector_address(_client_host(request))
+
+
+async def require_detector_or_admin(request: Request, response: Response) -> None:
+    """Preview frames: from the detector's address, or a signed-in operator."""
+    if not admin_auth.enabled or _from_detector(request):
+        return
+    await require_admin(request, response)
+
+
+async def require_admin_unless_detector(request: Request, response: Response) -> None:
+    """POST /api/results serves two callers. The detector's finishes -- an
+    eventId, a race_cv* source, no finishTime, AND arriving from a detector
+    address -- need no login (the Jetson has none). Everything else is a
+    manual add and needs the session. The payload alone used to be enough,
+    and a phone on the hotspot could take first place with it."""
+    if not admin_auth.enabled:
+        return
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if (
+        isinstance(body, dict)
+        and body.get("eventId")
+        and str(body.get("source") or "").startswith("race_cv")
+        and "finishTime" not in body      # the detector reports a capture time, never a finish time
+    ):
+        if _from_detector(request):
+            return
+        host = _client_host(request) or "?"
+        if host not in _refused_detector_hosts and len(_refused_detector_hosts) < 50:
+            _refused_detector_hosts.add(host)
+            logger.warning(
+                "Refused a detector-shaped finish from %s: not a detector address. If that IS "
+                "the detector, add it to detector_addresses in config/admin.local.yml and restart.",
+                host,
+            )
+    await require_admin(request, response)
+
+
+@app.get("/api/admin/session")
+async def admin_session(request: Request, response: Response) -> Dict[str, Any]:
+    """Whether a login is configured at all, and whether this browser has one.
+
+    A valid session is renewed here: the login page and the dashboard both
+    ask on load (and the dashboard every few minutes), so a sign-in from
+    the evening before gets a full lifetime again on race morning instead
+    of expiring at the gun.
+    """
+    valid = admin_auth.enabled and admin_auth.verify(request.cookies.get(ADMIN_COOKIE))
+    if valid:
+        _set_session_cookie(response, request, renew=True)
+    return {
+        "success": True,
+        "configured": admin_auth.enabled,
+        "authenticated": (not admin_auth.enabled) or valid,
+    }
+
+
+@app.post("/api/admin/login")
+async def admin_login(credentials: Dict[str, Any], request: Request, response: Response) -> Dict[str, Any]:
+    if not admin_auth.enabled:
+        return {"success": True, "configured": False}
+    if not isinstance(credentials, dict) or not admin_auth.check_login(
+        credentials.get("username", ""), credentials.get("password", "")
+    ):
+        # A per-request delay alone does not limit guessing: 300 parallel
+        # wrong logins ran at ~390 guesses a second. Failures queue through
+        # a small gate instead, so the rate is bounded however many
+        # connections are opened. A correct login never enters the gate, so
+        # this cannot be used to lock the operator out.
+        async with _failed_login_gate:
+            logger.warning("Failed admin login from %s", _client_host(request))
+            await asyncio.sleep(0.6)
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    _set_session_cookie(response, request)
+    logger.info("Admin login from %s", request.client.host if request.client else "?")
+    return {"success": True, "configured": True}
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(response: Response) -> Dict[str, Any]:
+    response.delete_cookie(ADMIN_COOKIE, path="/")
+    return {"success": True}
 
 
 def time_string_to_milliseconds(time_str: str) -> float:
@@ -388,7 +590,7 @@ async def _generate_relay_frames() -> AsyncGenerator[bytes, None]:
         await asyncio.sleep(0.05)
 
 
-@app.post("/api/frame")
+@app.post("/api/frame", dependencies=[Depends(require_detector_or_admin)])
 async def post_frame(request: Request) -> Dict[str, Any]:
     """Accept one annotated JPEG frame from an external CV service.
 
@@ -447,7 +649,7 @@ async def get_results() -> Dict[str, Any]:
     return {"success": True, "data": finished_racers}
 
 
-@app.post("/api/roster/upload")
+@app.post("/api/roster/upload", dependencies=[Depends(require_admin)])
 async def upload_roster(file: UploadFile = File(...)) -> Dict[str, Any]:
     """Upload and merge a roster CSV file into the in-memory race results.
 
@@ -661,7 +863,7 @@ async def upload_roster(file: UploadFile = File(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
 
-@app.post("/api/results")
+@app.post("/api/results", dependencies=[Depends(require_admin_unless_detector)])
 async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     """Add a new finisher entry to the in-memory leaderboard.
 
@@ -677,6 +879,14 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     Raises:
         HTTPException: For invalid inputs or when the race clock is not running and a wallClockTime is provided.
     """
+    # Nothing in a result needs to be long. A 30 MB racerName was accepted
+    # and then served to every leaderboard.
+    if isinstance(finish_data, dict):
+        for _key, _limit in RESULT_FIELD_LIMITS.items():
+            _value = finish_data.get(_key)
+            if isinstance(_value, str) and len(_value) > _limit:
+                finish_data[_key] = _value[:_limit]
+
     logger.debug("🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
     logger.debug("🔍 DEBUG: Raw finish_data received: %s", finish_data)
     logger.debug("🔍 DEBUG: Type of finish_data: %s", type(finish_data))
@@ -698,7 +908,10 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
 
     if "wallClockTime" in finish_data:
         # NEW: Wall-clock time from video processor - calculate official finish time
-        wall_clock_time = float(finish_data["wallClockTime"])
+        try:
+            wall_clock_time = float(finish_data["wallClockTime"])
+        except (TypeError, ValueError):
+            return {"success": False, "message": "wallClockTime must be a number"}
         logger.debug("🔍 DEBUG: Received wall-clock time: %s", wall_clock_time)
 
         if (
@@ -761,6 +974,14 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     # CRITICAL FIX: Always create a new entry to allow duplicate bib numbers
     # Generate a unique ID using timestamp and bib number to ensure uniqueness
     import uuid
+
+    # A time that is not a finite number must never be stored: one NaN row
+    # froze race_results.txt and made its own DELETE answer 500.
+    try:
+        if not math.isfinite(float(finish_time)):
+            return {"success": False, "message": "the finish time must be a finite number"}
+    except (TypeError, ValueError):
+        return {"success": False, "message": "the finish time must be a number"}
 
     # Idempotency on the client's eventId. race_cv sends one with every
     # finish and retries until this endpoint confirms; if the API died after
@@ -827,6 +1048,9 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     logger.debug(f"🔍 DEBUG: Created new finisher object: {new_finisher}")
 
     # Add to race results (always creates new entry)
+    if len(race_results) >= MAX_RESULTS:
+        logger.error("Result limit reached (%d rows); refusing a new finisher", MAX_RESULTS)
+        return {"success": False, "message": f"result limit reached ({MAX_RESULTS} rows)"}
     race_results.append(new_finisher)
     _journal("ADD", _describe(new_finisher))
     logger.info(
@@ -862,7 +1086,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": True, "data": new_finisher}
 
 
-@app.put("/api/results/{finisher_id}")
+@app.put("/api/results/{finisher_id}", dependencies=[Depends(require_admin)])
 async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Dict[str, Any]:
     """Update an existing finisher by ID, merging immutable roster data when appropriate.
 
@@ -1042,7 +1266,7 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
     return {"success": False, "message": "Finisher not found"}
 
 
-@app.delete("/api/results/{finisher_id}")
+@app.delete("/api/results/{finisher_id}", dependencies=[Depends(require_admin)])
 async def delete_finisher(finisher_id: str) -> Dict[str, Any]:
     """Delete a finisher by its unique ID.
 
@@ -1074,7 +1298,7 @@ async def delete_finisher(finisher_id: str) -> Dict[str, Any]:
     return {"success": False, "message": "Finisher not found"}
 
 
-@app.post("/api/reorder")
+@app.post("/api/reorder", dependencies=[Depends(require_admin)])
 async def reorder_finishers(order_data: Dict[str, Any]) -> Dict[str, Any]:
     """Reorder finishers using client-provided order information.
 
@@ -1138,7 +1362,7 @@ async def get_server_time() -> Dict[str, Any]:
     return {"success": True, "epoch": time.time()}
 
 
-@app.post("/api/clock/start")
+@app.post("/api/clock/start", dependencies=[Depends(require_admin)])
 async def start_race_clock() -> Dict[str, Any]:
     """Start the official race clock and broadcast the update.
 
@@ -1171,7 +1395,7 @@ async def start_race_clock() -> Dict[str, Any]:
     return {"success": True, "data": race_clock_state}
 
 
-@app.post("/api/clock/stop")
+@app.post("/api/clock/stop", dependencies=[Depends(require_admin)])
 async def stop_race_clock() -> Dict[str, Any]:
     """Stop the official race clock and broadcast the update.
 
@@ -1193,7 +1417,7 @@ async def stop_race_clock() -> Dict[str, Any]:
     return {"success": True, "data": race_clock_state}
 
 
-@app.post("/api/clock/edit")
+@app.post("/api/clock/edit", dependencies=[Depends(require_admin)])
 async def edit_race_clock(edit_data: Dict[str, Any]) -> Dict[str, Any]:
     """Edit the race clock to a specific time (MM:SS.ms or numeric milliseconds).
 
@@ -1240,7 +1464,7 @@ async def edit_race_clock(edit_data: Dict[str, Any]) -> Dict[str, Any]:
     return {"success": True, "data": race_clock_state}
 
 
-@app.post("/api/clock/reset")
+@app.post("/api/clock/reset", dependencies=[Depends(require_admin)])
 async def reset_race_clock(force: bool = False) -> Dict[str, Any]:
     """Reset the race clock to its initial stopped state and broadcast the update.
 
@@ -1346,7 +1570,7 @@ if _FRONTEND_DIST is not None:
         candidate = (_FRONTEND_DIST / path).resolve() if path else None
         if (
             candidate is not None
-            and str(candidate).startswith(str(_FRONTEND_DIST))
+            and candidate.is_relative_to(_FRONTEND_DIST)
             and candidate.is_file()
         ):
             return FileResponse(candidate)
@@ -1389,6 +1613,18 @@ def main() -> None:
 
     logger.info("Starting results API on http://%s:%s", args.host, args.port)
     try:
+        # A login config that exists but cannot be used must stop the API, and say
+        # why in one line. Left to lifespan() alone the reason is the last line
+        # of a traceback, twenty seconds after the launcher started waiting.
+        try:
+            AdminAuth.from_environment()
+        except AdminConfigError as exc:
+            logger.error(
+                "ADMIN LOGIN CONFIG UNUSABLE: %s. Fix it, or remove config/admin.local.yml "
+                "(and unset RACE_ADMIN_USER / RACE_ADMIN_PASSWORD) to run with no login.", exc,
+            )
+            sys.exit(2)
+
         # The preview publisher posts a frame every 125 ms; at 8 fps that is
         # ~29,000 access-log lines an hour, which buries the lines an operator
         # tails this file for (clock, results, roster). Timing is unaffected.

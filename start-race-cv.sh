@@ -448,6 +448,23 @@ start_api_server() {
     for _ in $(seq 1 20); do
         if curl -s -o /dev/null "http://localhost:$PORT/"; then
             echo -e "${GREEN}✅ API server is up (PID: $API_PID)${NC}"
+            local admin
+            admin=$(curl -s -m 3 "http://localhost:$PORT/api/admin/session" 2>/dev/null || true)
+            if [[ "$admin" == *'"configured":true'* ]]; then
+                # Say where the API took the login from: exported RACE_ADMIN_*
+                # variables win over the file, silently, and the operator would
+                # type the file's password on the tablet and be refused.
+                local admin_src
+                admin_src=$(sed -nE "s/.*requires the admin login (\\(user .*\\))\$/\\1/p" api_server.log 2>/dev/null | tail -1 || true)
+                echo -e "${GREEN}🔐 Live Management requires the admin login ${admin_src:-(config/admin.local.yml)}${NC}"
+                if [[ "$admin_src" == *"from environment"* && -f config/admin.local.yml ]]; then
+                    echo -e "${YELLOW}⚠️  RACE_ADMIN_USER / RACE_ADMIN_PASSWORD are set in this terminal and override config/admin.local.yml.${NC}"
+                    echo -e "${YELLOW}   The file's password will NOT work. unset them and restart to use the file.${NC}"
+                fi
+            else
+                echo -e "${RED}⚠️  NO ADMIN LOGIN: anyone on this network can start, stop or reset the clock and edit results.${NC}"
+                echo -e "${BLUE}   cp config/admin.example.yml config/admin.local.yml, set a password in the copy, restart.${NC}"
+            fi
             # Say whether this is a restored race or a fresh one. A restore
             # at the start of a NEW event is the mistake this line prevents.
             local record
@@ -459,11 +476,18 @@ start_api_server() {
             fi
             return 0
         fi
+        kill -0 "$API_PID" 2>/dev/null || break     # it exited: do not wait out the loop
         sleep 0.5
     done
 
     echo -e "${RED}❌ API server did not come up. Check api_server.log${NC}"
-    tail -n 30 api_server.log
+    local why
+    why=$(grep -E "ADMIN LOGIN CONFIG UNUSABLE" api_server.log 2>/dev/null | tail -1 | sed -E 's/^.*ADMIN LOGIN CONFIG UNUSABLE: //' || true)
+    if [[ -n "$why" ]]; then
+        echo -e "${RED}   The admin login config cannot be used: $why${NC}"
+    else
+        tail -n 30 api_server.log
+    fi
     exit 1
 }
 
@@ -691,6 +715,7 @@ if [[ $API_ONLY -eq 1 ]]; then
     lan_ip=$(ipconfig getifaddr en0 2>/dev/null || true)
     [[ -n "$usb_link" ]] && echo -e "   over the USB link:   ${BLUE}--api-url http://$usb_link:$PORT${NC}   (L4T device mode; the Jetson is 192.168.55.1)"
     [[ -n "$lan_ip" ]]   && echo -e "   over the hotspot:    ${BLUE}--api-url http://$lan_ip:$PORT${NC}"
+    [[ -n "$lan_ip" ]]   && echo -e "                        (with a login set, also list the Jetson's hotspot address under detector_addresses in config/admin.local.yml)"
     [[ -z "$usb_link" && -z "$lan_ip" ]] && echo -e "${RED}   no USB-link or LAN address found on this machine${NC}"
     echo ""
     echo -e "${YELLOW}📋 Management Commands:${NC}"

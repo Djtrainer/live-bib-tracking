@@ -14,6 +14,9 @@ git push dantrainer@192.168.55.1:live-bib-tracking jetson-eval:refs/heads/from-m
 ```bash
 cp config/ngrok-policy.yml config/ngrok-policy.local.yml   # then put a real password in the copy
 ```
+```bash
+cp config/admin.example.yml config/admin.local.yml         # then set the Live Management login in the copy
+```
 
 Charge the Mac and the Jetson's power bank. Pack: USB-C cable (Mac to
 Jetson), camera and its USB 3 cable, tablet.
@@ -50,7 +53,9 @@ ssh dantrainer@192.168.55.1 tail -f live-bib-tracking/race_cv.log
 Good: `30.0 fps`, `pending 0`, `source dropped` barely moving.
 Bad: `SUPERVISOR ... RESTART`, `CAMERA SILENT`, `pending` climbing.
 
-**6. Tablet.** Open the address from step 1 with `/admin` on the end.
+**6. Tablet.** Open the address from step 1 with `/admin` on the end and
+sign in (the login from `config/admin.local.yml`; step 1 says whether one is set).
+Each address signs in separately: the tablet, and the Mac's own tabs.
 Upload the roster there (names). Check the camera picture and the finish
 line: `http://localhost:8001/video_feed` on the Mac.
 
