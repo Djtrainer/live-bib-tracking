@@ -8,11 +8,13 @@ states of the config: absent (open, loudly), usable, and broken (the API
 must not start, and must not print the password while saying why).
 """
 
+import asyncio
 import sys
 import time
 from pathlib import Path
 
 import cv2
+import httpx
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -134,7 +136,9 @@ class TestTokens:
         assert int(renewed.split(".")[2]) == 1151
         now[0] = 1101.0
         assert not auth.needs_refresh(token) and not auth.verify(token)        # expired: a login, not a refresh
-        assert auth.issue(renew=token).split(".")[1] == "1101"                 # an expired token renews nothing
+        assert auth.issue(renew=token) is None                                 # an expired token renews nothing
+        assert auth.issue(renew="v2.1.2." + "0" * 64) is None                  # nor does a forgery
+        assert auth.ends_in(token) is None
 
     def test_renewal_stops_at_the_cap_after_sign_in(self, monkeypatch):
         """A copied cookie cannot be kept alive forever."""
@@ -170,6 +174,24 @@ class TestTokens:
         assert auth.check_login(f"  {USER.upper()} ", PASSWORD)
         assert not auth.check_login(USER, PASSWORD.upper())
         assert not auth.check_login(USER, PASSWORD + " ")
+
+    def test_a_huge_login_field_is_refused_before_it_is_normalised(self, monkeypatch):
+        """NFKC is quadratic on combining marks in the wrong order: one 250 KB wrong
+        login held the event loop -- the clock, the detector's posts, a correct
+        login -- for 8 s, and the body limit is 8 MB."""
+        auth = AdminAuth(USER, PASSWORD)
+        normalised = []
+        monkeypatch.setattr(auth_module, "_normal", lambda text: normalised.append(len(text)) or text)
+        marks = "a" + "\u0301" * 60_000 + "\u0316" * 60_000
+        assert not auth.check_login(USER, marks)
+        assert not auth.check_login(marks, PASSWORD)
+        assert not auth.check_login(USER, "\ufdfa" * 100_000)
+        assert not auth.check_login([USER], PASSWORD) and not auth.check_login(USER, {"a": 1})
+        assert normalised == []
+        # Nothing a person types is affected.
+        assert auth.check_login(f" {USER.upper()} ", PASSWORD)
+        assert not auth.check_login(USER, PASSWORD + "x" * 900)
+        assert normalised
 
     def test_composed_and_decomposed_accents_are_the_same_password(self, tmp_path):
         write_config(tmp_path, 'username: "timer"\npassword: "café-au-lait-26"\n')
@@ -271,6 +293,44 @@ class TestConfigLoading:
             load(tmp_path)
 
 
+class TestDetectorAddressEntries:
+    def test_an_address_with_a_prefix_length_is_that_one_machine(self, tmp_path):
+        """`ip addr` prints 172.20.10.7/28. Read loosely that was the whole
+        hotspot, and every phone on it could post finishes with no login."""
+        write_config(tmp_path, CONFIG + 'detector_addresses: ["172.20.10.7/28"]\n')
+        auth = load(tmp_path)
+        assert auth.is_detector_address("172.20.10.7")
+        assert not auth.is_detector_address("172.20.10.9")
+        assert [str(n) for n in auth.extra_detector_networks] == ["172.20.10.7/32"]
+
+    def test_a_network_is_still_accepted_and_is_visible_as_one(self, tmp_path):
+        write_config(tmp_path, CONFIG + 'detector_addresses: ["172.20.10.0/28", "10.0.0.5"]\n')
+        auth = load(tmp_path)
+        assert auth.is_detector_address("172.20.10.9")                          # never refused: no lockout
+        assert [n.num_addresses for n in auth.extra_detector_networks] == [16, 1]
+
+    def test_a_misspelt_key_is_reported_not_silently_ignored(self, tmp_path):
+        write_config(tmp_path, CONFIG + 'detector_adresses: ["172.20.10.7"]\n')
+        auth = load(tmp_path)
+        assert auth.unknown_keys == ["detector_adresses"]
+        assert not auth.is_detector_address("172.20.10.7")
+
+    def test_the_environment_list_adds_to_the_file(self, tmp_path):
+        write_config(tmp_path, CONFIG + 'detector_addresses: "172.20.10.7"\n')
+        auth = AdminAuth.from_environment({
+            "RACE_ADMIN_CONFIG": str(tmp_path / "admin.yml"), "RACE_DETECTOR_ADDRESSES": "10.0.0.5, 10.0.0.6",
+        })
+        assert all(auth.is_detector_address(a) for a in ("172.20.10.7", "10.0.0.5", "10.0.0.6"))
+
+    def test_startup_says_which_addresses_are_exempt(self, isolated_state, caplog):
+        write_config(isolated_state, CONFIG + 'detector_addresses: ["172.20.10.0/28"]\nspeling: 1\n')
+        with caplog.at_level("INFO"), TestClient(server.app):
+            pass
+        text = " ".join(record.getMessage() for record in caplog.records)
+        assert "Detector posts accepted without a login from" in text and "172.20.10.0/28 covers many addresses" in text
+        assert "unknown key 'speling'" in text
+
+
 class TestOperatorEndpointsNeedTheLogin:
     def test_session_reports_configured_and_not_authenticated(self, client):
         assert client.get("/api/admin/session").json() == {"success": True, "configured": True, "authenticated": False}
@@ -349,6 +409,29 @@ class TestOperatorEndpointsNeedTheLogin:
         assert COOKIE_NAME in r.headers.get("set-cookie", "")
         assert r.cookies[COOKIE_NAME].split(".")[1] == first.split(".")[1]      # same sign-in time
 
+    def test_a_renewal_that_lapsed_in_between_sets_no_cookie(self, client, monkeypatch):
+        """verify() and issue() read the clock separately. A token that lapsed
+        between them came back as a new sign-in: 72 fresh hours, no password."""
+        login(client)
+        monkeypatch.setattr(server.admin_auth, "issue", lambda renew=None: None)
+        r = client.get("/api/admin/session")
+        assert r.json()["authenticated"] is True and "set-cookie" not in r.headers
+
+    def test_the_session_says_when_it_ends_and_ends_then(self, client, monkeypatch):
+        """72 h after the sign-in, whatever was renewed in between."""
+        login(client)
+        start = time.time()
+        assert abs(client.get("/api/admin/session").json()["endsIn"] - auth_module.MAX_SESSION_S) < 5
+        for hours in (10, 20, 30, 40, 50, 60, 70):                               # a dashboard left open
+            monkeypatch.setattr(server.admin_auth, "_clock", lambda h=hours: start + h * 3600)
+            body = client.get("/api/admin/session").json()
+            assert body["authenticated"] is True, hours
+            assert abs(body["endsIn"] - (72 - hours) * 3600) < 5
+        monkeypatch.setattr(server.admin_auth, "_clock", lambda: start + 72 * 3600 + 5)
+        body = client.get("/api/admin/session").json()
+        assert body["authenticated"] is False and "endsIn" not in body
+        assert client.post("/api/clock/start").status_code == 401
+
     def test_an_operator_action_renews_a_session_past_half_life(self, client, monkeypatch):
         login(client)
         assert "set-cookie" not in client.post("/api/clock/start").headers      # fresh: left alone
@@ -390,6 +473,63 @@ class TestTheDetectorIsKnownByItsAddress:
         tunnelled = {"X-Forwarded-For": "203.0.113.9"}
         assert local.post("/api/results", json=detector_finish("t1"), headers=tunnelled).status_code == 401
         assert local.post("/api/frame", content=jpeg(), headers={**tunnelled, "Content-Type": "image/jpeg"}).status_code == 401
+
+    @pytest.mark.parametrize("header", [
+        {"X-Forwarded-For": ""},                   # present and empty is still a proxy
+        {"X-Forwarded-Host": "slaysarcoma.ngrok.app"},
+        {"X-Forwarded-Proto": "https"},
+        {"Forwarded": "for=203.0.113.9"},
+        {"X-Real-IP": "203.0.113.9"},
+        {"Via": "1.1 proxy"},
+    ])
+    def test_any_sign_of_a_proxy_ends_the_exemption(self, running, header):
+        for address in (("127.0.0.1", 50005), JETSON):
+            caller = at(address)
+            assert caller.post("/api/results", json=detector_finish("p1"), headers=header).status_code == 401
+            assert caller.post("/api/frame", content=jpeg(), headers={**header, "Content-Type": "image/jpeg"}).status_code == 401
+        assert running.get("/api/results").json()["data"] == []
+
+    @pytest.mark.parametrize("header", [{"Origin": "https://example.org"}, {"Sec-Fetch-Site": "cross-site"}])
+    def test_a_browser_on_this_machine_is_not_the_detector(self, running, header):
+        """Any web page open on the Mac can post to 127.0.0.1. Browsers say
+        so; the detector's client never does."""
+        local = at(("127.0.0.1", 50006))
+        assert local.post("/api/results", json=detector_finish("b1"), headers=header).status_code == 401
+        assert local.post("/api/results", json=detector_finish("b2")).json()["success"] is True
+
+    def test_a_usb_link_address_counts_only_on_the_usb_link(self, running):
+        """192.168.55.1 as a source means the Jetson only on a connection
+        that arrived at this machine's own 192.168.55.x address."""
+        def jetson_arriving_at(local):
+            return TestClient(server.app, base_url=f"http://{local}:8001", client=JETSON)
+        assert jetson_arriving_at("192.168.55.100").post("/api/results", json=detector_finish("u1")).json()["success"] is True
+        assert jetson_arriving_at("172.20.10.5").post("/api/results", json=detector_finish("u2")).status_code == 401
+        assert jetson_arriving_at("172.20.10.5").post(
+            "/api/frame", content=jpeg(), headers={"Content-Type": "image/jpeg"}).status_code == 401
+        # Unknown local address (a name, a unix socket): as before, accepted.
+        assert at(JETSON).post("/api/results", json=detector_finish("u3")).json()["success"] is True
+        # This machine is not subject to it.
+        local = TestClient(server.app, base_url="http://172.20.10.5:8001", client=("127.0.0.1", 50007))
+        assert local.post("/api/results", json=detector_finish("u4")).json()["success"] is True
+
+    def test_a_listed_usb_address_is_taken_at_the_operators_word(self, isolated_state):
+        write_config(isolated_state, CONFIG + f'detector_addresses: ["{JETSON[0]}"]\n')
+        with TestClient(server.app) as tablet:
+            login(tablet)
+            tablet.post("/api/clock/start")
+            elsewhere = TestClient(server.app, base_url="http://172.20.10.5:8001", client=JETSON)
+            assert elsewhere.post("/api/results", json=detector_finish("l1")).json()["success"] is True
+
+    @pytest.mark.parametrize("kind", ["frame", "finish"])
+    def test_a_refused_detector_is_named_in_the_log_once(self, running, caplog, kind):
+        with caplog.at_level("WARNING"):
+            for _ in range(3):
+                if kind == "frame":
+                    at(HOTSPOT).post("/api/frame", content=jpeg(), headers={"Content-Type": "image/jpeg"})
+                else:
+                    at(HOTSPOT).post("/api/results", json=detector_finish("r1"))
+        named = [r.getMessage() for r in caplog.records if HOTSPOT[0] in r.getMessage() and "detector_addresses" in r.getMessage()]
+        assert len(named) == 1
 
     def test_a_configured_hotspot_address_is_a_detector(self, isolated_state):
         write_config(isolated_state, CONFIG + f'detector_addresses: ["{HOTSPOT[0]}"]\n')
@@ -442,6 +582,139 @@ class TestBounds:
         rows = client.get("/api/results").json()["data"]
         assert len(rows) == 1 and len(rows[0]["bibNumber"]) <= server.RESULT_FIELD_LIMITS["bibNumber"]
 
+    def test_a_body_that_declares_no_length_is_counted_as_it_arrives(self, client, jetson):
+        """Chunked transfer has no Content-Length; it went straight past the first limit."""
+        def chunks(total):
+            yield b"\xff\xd8"
+            for _ in range(total // 65536 + 1):
+                yield b"0" * 65536
+        big = jetson.post("/api/frame", content=chunks(server.MAX_BODY_BYTES), headers={"Content-Type": "image/jpeg"})
+        assert big.status_code == 413
+        assert "content-length" not in {k.lower() for k in big.request.headers}        # it really was chunked
+        ok = jetson.post("/api/frame", content=chunks(65536), headers={"Content-Type": "image/jpeg"})
+        assert ok.status_code == 200 and ok.json()["success"] is True
+        def json_chunks():
+            yield b'{"eventId":"c1","source":"race_cv","bibNumber":"1","captureTime":1,"wallClockTime":1,"racerName":"'
+            for _ in range(server.MAX_BODY_BYTES // 65536 + 2):
+                yield b"a" * 65536
+            yield b'"}'
+        r = jetson.post("/api/results", content=json_chunks(), headers={"Content-Type": "application/json"})
+        assert r.status_code == 413
+        assert client.get("/api/results").json()["data"] == []
+
+    def test_every_text_field_is_cut_whatever_its_type(self):
+        data = {"racerName": ["x" * 500], "age": "9" * 40, "team": {"a": "b" * 500}, "bibNumber": 12, "gender": None}
+        server._bound_result_fields(data)
+        assert len(data["racerName"]) == server.RESULT_FIELD_LIMITS["racerName"]
+        assert data["age"] == "9" * 8 and len(data["team"]) == server.RESULT_FIELD_LIMITS["team"]
+        assert data["bibNumber"] == 12 and data["gender"] is None                # scalars are left alone
+        edit = {"racerName": "n" * 500, "junk": "j" * 10_000_000, "finishTime": "01:00.0"}
+        server._bound_result_fields(edit, server.RESULT_EDITABLE)
+        assert set(edit) == {"racerName", "finishTime"} and len(edit["racerName"]) == 120
+
+    def test_an_edit_is_cut_too(self, client, jetson):
+        jetson.post("/api/results", json=detector_finish("edit-me"))
+        row = client.get("/api/results").json()["data"][0]
+        r = client.put(f"/api/results/{row['id']}", json={"racerName": "n" * 5000, "age": "4" * 100, "surprise": "s" * 5000})
+        assert r.status_code == 200 and r.json()["success"] is True
+        row = client.get("/api/results").json()["data"][0]
+        assert len(row["racerName"]) == 120 and len(str(row.get("age", ""))) <= 8 and "surprise" not in row
+
+    @pytest.mark.parametrize("value, expected", [
+        (1500, 1500.0), ("1500", 1500.0), (0, 0.0), (-3.5, -3.5),
+        (float("nan"), None), (float("inf"), None), ("NaN", None), ("1e999", None), (True, None),
+        (None, None), ([1], None), ({"a": 1}, None), ("soon", None), (10 ** 400, None),
+    ])
+    def test_finite_ms(self, value, expected):
+        assert server._finite_ms(value) == expected
+
+    @pytest.mark.parametrize("bad", ["NaN", "Infinity", "-1", "null", "[1]", "true", "1e999"])
+    def test_the_clock_is_never_set_to_something_that_is_not_a_time(self, client, jetson, bad):
+        """NaN became the clock's offset; every finish after it was refused, across restarts."""
+        before = dict(server.race_clock_state)
+        r = client.post("/api/clock/edit", content=('{"time": %s}' % bad).encode(), headers={"Content-Type": "application/json"})
+        assert r.status_code == 200 and r.json()["success"] is False
+        assert server.race_clock_state == before
+        assert jetson.post("/api/results", json=detector_finish("after-" + bad)).json()["success"] is True
+
+    @pytest.mark.parametrize("bad", ["NaN", "Infinity", "-5", "[1]", "true", '{"a":1}'])
+    def test_an_edit_never_stores_a_time_that_is_not_one(self, client, jetson, bad):
+        jetson.post("/api/results", json=detector_finish("t-edit"))
+        row = client.get("/api/results").json()["data"][0]
+        r = client.put(f"/api/results/{row['id']}", content=('{"finishTime": %s}' % bad).encode(),
+                       headers={"Content-Type": "application/json"})
+        assert r.status_code == 200 and r.json()["success"] is False
+        assert client.get("/api/results").json()["data"][0]["finishTime"] == row["finishTime"]
+        assert client.put(f"/api/results/{row['id']}", json={"finishTime": 61500}).json()["success"] is True
+        assert client.get("/api/results").json()["data"][0]["finishTime"] == 61500
+
+    def test_null_is_a_deliberate_clear_not_a_mistyped_time(self, client, jetson):
+        """null is the one not-a-time an edit accepts: it means "has not finished"
+        (an emptied time cell), and the row leaves /api/results. The server cannot
+        tell that from a mistyped time, because JSON has no NaN: the dashboard
+        must never send null for one (handleCellBlur checks Number.isFinite)."""
+        jetson.post("/api/results", json=detector_finish("t-clear"))
+        row = client.get("/api/results").json()["data"][0]
+        r = client.put(f"/api/results/{row['id']}", json={"finishTime": None})
+        assert r.status_code == 200 and r.json()["success"] is True and r.json()["data"]["finishTime"] is None
+        assert client.get("/api/results").json()["data"] == []
+        # Not lost: the same row takes a time again.
+        assert client.put(f"/api/results/{row['id']}", json={"finishTime": 61500}).json()["success"] is True
+        assert client.get("/api/results").json()["data"][0]["finishTime"] == 61500
+
+    @staticmethod
+    def drive_limit(pieces, respond_first=False):
+        """BodyLimitMiddleware(max 10 bytes) around an app that reads the whole
+        body, fed one ASGI message per piece. Returns the status it answered."""
+        sent = []
+
+        async def inner(scope, receive, send):
+            if respond_first:
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+            try:
+                more = True
+                while more:
+                    message = await receive()
+                    more = message.get("more_body", False)
+            except server.StarletteHTTPException as refused:
+                await send({"type": "http.response.start", "status": refused.status_code, "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            if not respond_first:
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        queue = [{"type": "http.request", "body": piece, "more_body": i < len(pieces) - 1}
+                 for i, piece in enumerate(pieces)]
+
+        async def receive():
+            return queue.pop(0)
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {"type": "http", "method": "POST", "path": "/x", "headers": []}
+        asyncio.run(server.BodyLimitMiddleware(inner, max_bytes=10)(scope, receive, send))
+        return [m["status"] for m in sent if m["type"] == "http.response.start"]
+
+    def test_the_body_count_runs_across_messages(self):
+        """A real server delivers a body in many pieces; no single one is over the limit."""
+        assert self.drive_limit([b"123456", b"123456", b"123456"]) == [413]
+        assert self.drive_limit([b"12345", b"12345"]) == [200]
+
+    def test_nothing_is_refused_once_the_response_has_started(self):
+        """/video_feed answers first and then only listens for a disconnect: a
+        413 can no longer be sent, and raising then was a traceback per request."""
+        assert self.drive_limit([b"123456", b"123456", b"123456"], respond_first=True) == [200]
+
+    def test_a_number_with_thousands_of_digits_is_cut_like_text(self):
+        data = {"bibNumber": int("9" * 4000), "age": 10 ** 50, "racerName": 7}
+        server._bound_result_fields(data)
+        assert data["bibNumber"] == "9" * server.RESULT_FIELD_LIMITS["bibNumber"]
+        assert data["age"] == ("1" + "0" * 50)[:8] and data["racerName"] == 7
+        small = {"bibNumber": 120, "age": 34}
+        assert server._bound_result_fields(small) == {"bibNumber": 120, "age": 34}
+
     def test_there_is_a_ceiling_on_rows(self, client, jetson, monkeypatch):
         monkeypatch.setattr(server, "MAX_RESULTS", 2)
         assert jetson.post("/api/results", json=detector_finish("a")).json()["success"] is True
@@ -449,6 +722,69 @@ class TestBounds:
         r = jetson.post("/api/results", json=detector_finish("c")).json()
         assert r["success"] is False and "limit" in r["message"]
         assert len(client.get("/api/results").json()["data"]) == 2
+
+
+class TestGuessingIsSlow:
+    """Failed logins wait their turn, four at a time, however many are sent."""
+
+    @pytest.fixture
+    def gates(self, client, monkeypatch):
+        # Fresh semaphores: an asyncio one binds to the first loop it waits in.
+        monkeypatch.setattr(server, "_failed_login_gate", asyncio.Semaphore(4))
+        monkeypatch.setattr(server, "_failed_login_gate_tunnel", asyncio.Semaphore(4))
+        return client
+
+    @staticmethod
+    def browser():
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://testserver")
+
+    @staticmethod
+    def guess(c, headers=None):
+        return c.post("/api/admin/login", json={"username": USER, "password": "a-wrong-guess"}, headers=headers or {})
+
+    def test_a_failed_login_pauses_and_a_good_one_does_not(self, gates, monkeypatch):
+        pauses = []
+        async def pause():
+            pauses.append(1)
+        monkeypatch.setattr(server, "_login_failure_pause", pause)
+        assert login(gates, password="a-wrong-guess").status_code == 401 and len(pauses) == 1
+        assert login(gates).status_code == 200 and len(pauses) == 1
+        assert server.FAILED_LOGIN_DELAY_S >= 0.5
+
+    def test_no_more_than_four_guesses_are_answered_at_once(self, gates, monkeypatch):
+        active, peak = 0, 0
+        async def pause():
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.05)
+            active -= 1
+        monkeypatch.setattr(server, "_login_failure_pause", pause)
+        async def flood():
+            async with self.browser() as c:
+                return await asyncio.gather(*[self.guess(c) for _ in range(12)])
+        answers = asyncio.run(flood())
+        assert [r.status_code for r in answers] == [401] * 12
+        assert peak == 4
+
+    def test_a_flood_through_the_tunnel_does_not_delay_the_tablet(self, gates, monkeypatch):
+        async def pause():
+            await asyncio.sleep(0)
+        monkeypatch.setattr(server, "_login_failure_pause", pause)
+        tunnelled = {"X-Forwarded-For": "203.0.113.9"}
+        async def scenario():
+            for _ in range(4):                               # the tunnel's queue is full
+                await server._failed_login_gate_tunnel.acquire()
+            async with self.browser() as c:
+                direct = await asyncio.wait_for(self.guess(c), 2)            # the tablet's typo is answered
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(self.guess(c, tunnelled), 0.3)    # the tunnel's guess waits
+                good = await asyncio.wait_for(
+                    c.post("/api/admin/login", json={"username": USER, "password": PASSWORD}, headers=tunnelled), 2)
+            return direct, good
+        direct, good = asyncio.run(scenario())
+        assert direct.status_code == 401
+        assert good.status_code == 200                       # a correct password never queues
 
 
 class TestNoLoginConfigured:

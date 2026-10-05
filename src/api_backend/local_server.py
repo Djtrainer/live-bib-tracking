@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import csv
 import io
+import ipaddress
 import json
 import math
 import sys
@@ -33,6 +34,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from api_backend.journal import RaceJournal, _format_finish  # noqa: E402
 from api_backend.admin_auth import COOKIE_NAME as ADMIN_COOKIE, AdminAuth, AdminConfigError  # noqa: E402
+from starlette.exceptions import HTTPException as StarletteHTTPException  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: F401  (kept for the legacy Docker image)
 
 # The legacy in-process pipeline (image_processor.video_inference) is gone.
@@ -80,6 +82,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "cp config/admin.example.yml config/admin.local.yml and set a password.",
             admin_auth.source,
         )
+    if admin_auth.enabled:
+        # Say what is exempt: a config that re-opens the detector's door to a
+        # whole network must not look the same as a correct one.
+        extras = admin_auth.extra_detector_networks
+        wide = [network for network in extras if network.num_addresses > 1]
+        listed = "".join(
+            f", {network.network_address if network.num_addresses == 1 else network}" for network in extras
+        )
+        (logger.warning if wide else logger.info)(
+            "Detector posts accepted without a login from: this machine, the USB link 192.168.55.0/24%s%s",
+            listed,
+            "" if not wide else (
+                f". WARNING: {', '.join(str(n) for n in wide)} covers many addresses; every device "
+                "there can post finishes without a login. List the Jetson's single address instead"
+            ),
+        )
+        for key in admin_auth.unknown_keys:
+            logger.warning("Admin config: unknown key '%s' ignored (the address list is detector_addresses)", key)
 
     # Put the race back the way it was if this is a restart mid-race.
     # --fresh archives the old record instead. Either way, say what happened
@@ -264,12 +284,58 @@ app.add_middleware(
 MAX_BODY_BYTES = 8 * 1024 * 1024     # a 1080p preview JPEG is ~0.3 MB, a roster CSV less
 MAX_RESULTS = 5000                   # a race is a few hundred rows
 RESULT_FIELD_LIMITS = {"bibNumber": 32, "racerName": 120, "eventId": 128, "source": 32,
-                       "gender": 40, "team": 120}
-_failed_login_gate = asyncio.Semaphore(4)
+                       "gender": 40, "team": 120, "age": 8}
+RESULT_EDITABLE = set(RESULT_FIELD_LIMITS) | {"finishTime"}
+# Failed logins queue here, so guessing is bounded however many connections
+# are opened. Two gates: a flood through the public URL must not delay the
+# answer to a typo made on the tablet at the finish line.
+_failed_login_gate = asyncio.Semaphore(4)          # callers that reach the API directly
+_failed_login_gate_tunnel = asyncio.Semaphore(4)   # callers that came through the tunnel
+FAILED_LOGIN_DELAY_S = 0.6
+
+
+async def _login_failure_pause() -> None:
+    await asyncio.sleep(FAILED_LOGIN_DELAY_S)
+
+
+def _bound_result_fields(data, allowed=None):
+    """Cut every text field of a result to its limit, in place. Never refuses.
+
+    A 30 MB racerName was accepted and served to every leaderboard; `age`,
+    non-string values and the edit endpoint were not covered at first.
+    """
+    if not isinstance(data, dict):
+        return data
+    if allowed is not None:
+        for key in [k for k in data if k not in allowed]:
+            del data[key]
+    for key, limit in RESULT_FIELD_LIMITS.items():
+        value = data.get(key)
+        if value is None or isinstance(value, (bool, float)):
+            continue                      # already small
+        if isinstance(value, int):        # a JSON integer may run to thousands of digits
+            if abs(value) >= 10 ** limit:
+                data[key] = str(value)[:limit]
+            continue
+        data[key] = (value if isinstance(value, str) else str(value))[:limit]
+    return data
+
+
+def _finite_ms(value):
+    """A finite float, or None. bool, list, dict, None, NaN and inf are not times."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        ms = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return ms if math.isfinite(ms) else None
 
 
 class BodyLimitMiddleware:
-    """Refuse a request whose declared body is absurd, before reading it.
+    """Refuse a request whose body is absurd: by its declared length before
+    reading it, and by counting what actually arrives (a chunked body
+    declares nothing, and went straight past the first version of this).
 
     Plain ASGI on purpose: BaseHTTPMiddleware wraps streaming responses, and
     /video_feed is one that must end when its viewer leaves.
@@ -280,18 +346,43 @@ class BodyLimitMiddleware:
         self.max_bytes = max_bytes
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] == "http":
-            for name, value in scope.get("headers", []):
-                if name == b"content-length":
-                    try:
-                        too_big = int(value) > self.max_bytes
-                    except ValueError:
-                        too_big = False
-                    if too_big:
-                        refusal = JSONResponse({"detail": "request body too large"}, status_code=413)
-                        await refusal(scope, receive, send)
-                        return
-        await self.app(scope, receive, send)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    too_big = int(value) > self.max_bytes
+                except ValueError:
+                    too_big = False
+                if too_big:
+                    refusal = JSONResponse({"detail": "request body too large"}, status_code=413)
+                    await refusal(scope, receive, send)
+                    return
+        seen = 0
+        started = False
+
+        async def counted_receive():
+            nonlocal seen
+            message = await receive()
+            # Only until the response starts: after that nothing is buffering
+            # the body, and an exception could no longer become a 413 (on
+            # /video_feed it surfaced as a traceback per request instead).
+            if message["type"] == "http.request" and not started:
+                seen += len(message.get("body", b""))
+                if seen > self.max_bytes:
+                    # FastAPI re-raises a Starlette HTTPException from its body
+                    # reader, so this becomes an ordinary 413.
+                    raise StarletteHTTPException(status_code=413, detail="request body too large")
+            return message
+
+        async def watched_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        await self.app(scope, counted_receive, watched_send)
 
 
 app.add_middleware(BodyLimitMiddleware, max_bytes=MAX_BODY_BYTES)
@@ -311,6 +402,8 @@ def _set_session_cookie(response: Response, request: Request, renew: bool = Fals
     # renew: extend the session this request carries (same sign-in time, so
     # the 72 h cap still counts from the original login) rather than start one.
     token = admin_auth.issue(renew=request.cookies.get(ADMIN_COOKIE) if renew else None)
+    if token is None:      # it lapsed between the check and here: leave the cookie alone
+        return
     response.set_cookie(
         ADMIN_COOKIE, token,
         max_age=int(admin_auth.ttl_s), path="/",
@@ -341,25 +434,78 @@ def _client_host(request: Request) -> str:
 
 
 _refused_detector_hosts: set = set()
+_PROXY_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded", "x-real-ip", "via")
+_USB_LINK = ipaddress.ip_network("192.168.55.0/24")
+
+
+def _came_through_proxy(request: Request) -> bool:
+    # Presence, not truthiness: an empty X-Forwarded-For is still a proxy.
+    return any(name in request.headers for name in _PROXY_HEADERS)
+
+
+def _ip(text):
+    try:
+        address = ipaddress.ip_address(text or "")
+    except ValueError:
+        return None
+    return getattr(address, "ipv4_mapped", None) or address
 
 
 def _from_detector(request: Request) -> bool:
     """The request comes straight from a machine a detector can be on.
 
-    Anything that arrived through the tunnel carries X-Forwarded-* (the
-    ngrok agent connects from localhost, so the socket address alone would
-    make every tunnel visitor look local). Sending the header yourself only
-    takes the exemption away.
+    * Not through a proxy. The ngrok agent connects from localhost, so the
+      socket address alone would make every tunnel visitor look local; any
+      forwarding header at all takes the exemption away. (A forwarder on
+      this Mac that adds none -- a TCP-mode tunnel, `ssh -R`, a dev proxy
+      without xfwd -- would make every visitor the detector: with the login
+      on, only `ngrok http`, as broadcast.sh runs it, is supported.)
+    * Not from a browser. A page from any site, open in a browser on this
+      Mac, is at 127.0.0.1 too; browsers send Origin on these requests and
+      the detector's client never does.
+    * A 192.168.55.x peer only on a connection that arrived at this
+      machine's own 192.168.55.x address: that source address means the USB
+      link only when the link is there.
     """
-    if request.headers.get("x-forwarded-for") or request.headers.get("x-forwarded-host"):
+    if _came_through_proxy(request) or "origin" in request.headers or "sec-fetch-site" in request.headers:
         return False
-    return admin_auth.is_detector_address(_client_host(request))
+    peer = _client_host(request)
+    if not admin_auth.is_detector_address(peer):
+        return False
+    peer_ip = _ip(peer)
+    if peer_ip is None or peer_ip.version != 4 or peer_ip not in _USB_LINK:
+        return True                        # this machine, or an address the operator listed
+    if any(peer_ip in network for network in admin_auth.extra_detector_networks if network.version == 4):
+        return True                        # listed explicitly: the operator's word stands
+    local_ip = _ip((request.scope.get("server") or ("",))[0])
+    if local_ip is None:
+        return True                        # the server did not say where it arrived: as before
+    return local_ip.version == 4 and local_ip in _USB_LINK
+
+
+def _note_refused_detector(request: Request, what: str) -> None:
+    """One WARNING per address and reason: a refused detector must be findable in the log."""
+    host = _client_host(request) or "?"
+    if _came_through_proxy(request):
+        reason = "it arrived through the tunnel or a proxy, and detector posts are only accepted directly."
+    elif "origin" in request.headers or "sec-fetch-site" in request.headers:
+        reason = "it was sent by a web page in a browser, not by the detector."
+    else:
+        reason = ("not a detector address. If that IS the detector, add it to "
+                  "detector_addresses in config/admin.local.yml and restart.")
+    key = (host, reason[:12])
+    if key in _refused_detector_hosts or len(_refused_detector_hosts) >= 50:
+        return
+    _refused_detector_hosts.add(key)
+    logger.warning("Refused %s from %s: %s", what, host, reason)
 
 
 async def require_detector_or_admin(request: Request, response: Response) -> None:
     """Preview frames: from the detector's address, or a signed-in operator."""
     if not admin_auth.enabled or _from_detector(request):
         return
+    if not admin_auth.verify(request.cookies.get(ADMIN_COOKIE)):
+        _note_refused_detector(request, "a preview frame")
     await require_admin(request, response)
 
 
@@ -373,6 +519,8 @@ async def require_admin_unless_detector(request: Request, response: Response) ->
         return
     try:
         body = await request.json()
+    except StarletteHTTPException:
+        raise                              # the body limit; not ours to swallow
     except Exception:
         body = None
     if (
@@ -383,14 +531,8 @@ async def require_admin_unless_detector(request: Request, response: Response) ->
     ):
         if _from_detector(request):
             return
-        host = _client_host(request) or "?"
-        if host not in _refused_detector_hosts and len(_refused_detector_hosts) < 50:
-            _refused_detector_hosts.add(host)
-            logger.warning(
-                "Refused a detector-shaped finish from %s: not a detector address. If that IS "
-                "the detector, add it to detector_addresses in config/admin.local.yml and restart.",
-                host,
-            )
+        if not admin_auth.verify(request.cookies.get(ADMIN_COOKIE)):
+            _note_refused_detector(request, "a detector-shaped finish")
     await require_admin(request, response)
 
 
@@ -403,14 +545,22 @@ async def admin_session(request: Request, response: Response) -> Dict[str, Any]:
     the evening before gets a full lifetime again on race morning instead
     of expiring at the gun.
     """
-    valid = admin_auth.enabled and admin_auth.verify(request.cookies.get(ADMIN_COOKIE))
-    if valid:
-        _set_session_cookie(response, request, renew=True)
-    return {
+    cookie = request.cookies.get(ADMIN_COOKIE)
+    valid = admin_auth.enabled and admin_auth.verify(cookie)
+    body: Dict[str, Any] = {
         "success": True,
         "configured": admin_auth.enabled,
         "authenticated": (not admin_auth.enabled) or valid,
     }
+    if valid:
+        _set_session_cookie(response, request, renew=True)
+        # Seconds until the session's hard end (72 h after the sign-in). The
+        # login page asks for the password again when this is under a day,
+        # so a sign-in from three days ago cannot end in the middle of the race.
+        ends_in = admin_auth.ends_in(cookie)
+        if ends_in is not None:
+            body["endsIn"] = ends_in
+    return body
 
 
 @app.post("/api/admin/login")
@@ -423,11 +573,13 @@ async def admin_login(credentials: Dict[str, Any], request: Request, response: R
         # A per-request delay alone does not limit guessing: 300 parallel
         # wrong logins ran at ~390 guesses a second. Failures queue through
         # a small gate instead, so the rate is bounded however many
-        # connections are opened. A correct login never enters the gate, so
-        # this cannot be used to lock the operator out.
-        async with _failed_login_gate:
+        # connections are opened. A correct login never enters the gate, and
+        # check_login() bounds what it will look at, so neither a flood nor
+        # one huge body can keep the operator's own password waiting.
+        gate = _failed_login_gate_tunnel if _came_through_proxy(request) else _failed_login_gate
+        async with gate:
             logger.warning("Failed admin login from %s", _client_host(request))
-            await asyncio.sleep(0.6)
+            await _login_failure_pause()
         raise HTTPException(status_code=401, detail="Invalid username or password")
     _set_session_cookie(response, request)
     logger.info("Admin login from %s", request.client.host if request.client else "?")
@@ -879,13 +1031,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     Raises:
         HTTPException: For invalid inputs or when the race clock is not running and a wallClockTime is provided.
     """
-    # Nothing in a result needs to be long. A 30 MB racerName was accepted
-    # and then served to every leaderboard.
-    if isinstance(finish_data, dict):
-        for _key, _limit in RESULT_FIELD_LIMITS.items():
-            _value = finish_data.get(_key)
-            if isinstance(_value, str) and len(_value) > _limit:
-                finish_data[_key] = _value[:_limit]
+    _bound_result_fields(finish_data)
 
     logger.debug("🔍 DEBUG: === POST /api/results ENDPOINT CALLED ===")
     logger.debug("🔍 DEBUG: Raw finish_data received: %s", finish_data)
@@ -910,7 +1056,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
         # NEW: Wall-clock time from video processor - calculate official finish time
         try:
             wall_clock_time = float(finish_data["wallClockTime"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return {"success": False, "message": "wallClockTime must be a number"}
         logger.debug("🔍 DEBUG: Received wall-clock time: %s", wall_clock_time)
 
@@ -980,7 +1126,7 @@ async def update_finish_time(finish_data: Dict[str, Any]) -> Dict[str, Any]:
     try:
         if not math.isfinite(float(finish_time)):
             return {"success": False, "message": "the finish time must be a finite number"}
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {"success": False, "message": "the finish time must be a number"}
 
     # Idempotency on the client's eventId. race_cv sends one with every
@@ -1101,11 +1247,17 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
         HTTPException: Not raised directly here, but invalid time formats return a failure response.
     """
     logger.debug(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
+    _bound_result_fields(finisher_data, RESULT_EDITABLE)
     logger.debug(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
     logger.info(
         f"🔍 DEBUG: Original roster has {len(original_roster)} entries: {list(original_roster.keys())}"
     )
 
+    if finisher_data.get("finishTime") is not None and not isinstance(finisher_data["finishTime"], str):
+        _ms = _finite_ms(finisher_data["finishTime"])
+        if _ms is None or _ms < 0:
+            return {"success": False, "message": "finishTime must be MM:SS.ms or a finite number"}
+        finisher_data["finishTime"] = _ms
     if "finishTime" in finisher_data and isinstance(finisher_data["finishTime"], str):
         time_ms = time_string_to_milliseconds(finisher_data["finishTime"])
         if time_ms < 0:
@@ -1440,7 +1592,11 @@ async def edit_race_clock(edit_data: Dict[str, Any]) -> Dict[str, Any]:
         if time_ms < 0:
             return {"success": False, "message": "Invalid time format. Use MM:SS.ms"}
     else:
-        time_ms = float(time_str)
+        # NaN here became the clock's offset, and from then on every finish
+        # the detector reported was refused -- across restarts.
+        time_ms = _finite_ms(time_str)
+        if time_ms is None or time_ms < 0:
+            return {"success": False, "message": "Time must be MM:SS.ms or a finite number of milliseconds"}
 
     # Calculate the offset needed to achieve the desired time
     if race_clock_state["raceStartTime"] is not None:

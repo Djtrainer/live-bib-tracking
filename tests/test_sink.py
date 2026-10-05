@@ -171,6 +171,14 @@ class TestDurability:
         ]
         assert statuses == ["pending", "delivered"]
 
+    def test_finishes_never_go_through_a_proxy(self, tmp_path, monkeypatch):
+        """HTTP_PROXY exported on the detector's machine would put a proxy in
+        front of its console, which takes any sign of one as "not the detector"
+        and refuses the finish."""
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+        sink = ResultSink(SinkConfig(api_url="http://localhost:8001", event_log=str(tmp_path / "e.jsonl")))
+        assert sink._ensure_session().trust_env is False
+
     def test_offline_mode_needs_no_api(self, tmp_path):
         config = SinkConfig(api_url="", event_log=str(tmp_path / "e.jsonl"))
         sink = ResultSink(config)

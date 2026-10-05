@@ -15,15 +15,21 @@ export default defineConfig(({ mode }) => {
       port: process.env.PORT ? parseInt(process.env.PORT) : 8080,
       proxy: {
         // Proxy all /api requests to the FastAPI backend
+        // xfwd: the API treats a request from this machine with no
+        // forwarding header as the detector and asks it for no login. This
+        // dev server listens on every interface, so without the header
+        // anyone on the network would be the detector through it.
         '/api': {
           target: apiBaseUrl,
           changeOrigin: true,
+          xfwd: true,
         },
         // Proxy WebSocket connections
         '/ws': {
           target: wsBaseUrl,
           ws: true,
           changeOrigin: true,
+          xfwd: true,
         },
       },
     },

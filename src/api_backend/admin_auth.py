@@ -56,6 +56,10 @@ COOKIE_NAME = "race_admin"
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "admin.local.yml"
 DEFAULT_TTL_S = 18 * 3600          # one race day, start to pack-up; renewed on use
 MAX_SESSION_S = 72 * 3600          # ...but never past this long after the sign-in
+# Longest username or password check_login() will look at, in characters.
+# Normalising is not linear in the worst case: 250 KB of combining marks in
+# the wrong order held the event loop for 8 s, and the body limit is 8 MB.
+LOGIN_FIELD_MAX = 1024
 # "admin" is on the list because admin/admin is what the old client-side
 # login shipped in its JavaScript and in a public repository.
 PLACEHOLDER_PASSWORDS = {"change-me", "changeme", "password", "admin", "letmein", ""}
@@ -120,22 +124,38 @@ def _validated(username: object, password: object, where: str) -> tuple[str, str
     return username, password
 
 
+def _as_list(value: object) -> object:
+    """None, "a, b" or ["a", "b"] as a list; anything else is returned as is
+    for the caller to refuse."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [part for part in re.split(r"[,\s]+", value) if part]
+    if isinstance(value, tuple):
+        return list(value)
+    return value
+
+
 def _networks(extra: object, where: str) -> tuple:
     """The built-in detector addresses plus any configured ones."""
-    if extra is None:
-        extra = []
-    if isinstance(extra, str):
-        extra = [part for part in re.split(r"[,\s]+", extra) if part]
+    extra = _as_list(extra)
     if not isinstance(extra, (list, tuple)):
         raise AdminConfigError(f"{where}: detector_addresses must be a list of addresses")
     networks = []
     for value in list(DEFAULT_DETECTOR_ADDRESSES) + [str(item) for item in extra]:
         try:
-            networks.append(ipaddress.ip_network(value, strict=False))
+            interface = ipaddress.ip_interface(value)
         except ValueError:
             raise AdminConfigError(
                 f"{where}: detector_addresses entry '{value}' is not an address or a network"
             ) from None
+        # "172.20.10.7/28", exactly as `ip addr` prints it on the Jetson, means
+        # that one machine. Read loosely it was the whole hotspot subnet, and
+        # every phone on it was a detector again.
+        if interface.ip == interface.network.network_address:
+            networks.append(interface.network)
+        else:
+            networks.append(ipaddress.ip_network(interface.ip))
     return tuple(networks)
 
 
@@ -149,6 +169,8 @@ class AdminAuth:
         self._clock = clock
         self.source = source
         self.detector_networks = _networks(detector_addresses, source or "detector_addresses")
+        self.extra_detector_networks = self.detector_networks[len(DEFAULT_DETECTOR_ADDRESSES):]
+        self.unknown_keys: list = []      # misspelt keys in the config file, for the startup log
         # The tablet at the finish line speaks plain http on the hotspot, so a
         # session cookie can be captured there. The cookie is an HMAC under
         # this key; a key that is one SHA-256 of the password would let a
@@ -210,11 +232,14 @@ class AdminAuth:
         if not isinstance(data, dict):
             raise AdminConfigError(f"{path} must contain 'username:' and 'password:'")
         user, password = _validated(data.get("username"), data.get("password"), str(path))
-        addresses = data.get("detector_addresses")
-        if env_addresses:
-            addresses = (list(addresses) if isinstance(addresses, (list, tuple)) else ([addresses] if addresses else [])) \
-                + [part for part in re.split(r"[,\s]+", env_addresses) if part]
-        return cls(user, password, clock=clock, source=str(path), detector_addresses=addresses)
+        addresses = _as_list(data.get("detector_addresses"))
+        if env_addresses and isinstance(addresses, list):
+            addresses = addresses + _as_list(env_addresses)
+        auth = cls(user, password, clock=clock, source=str(path), detector_addresses=addresses)
+        auth.unknown_keys = sorted(
+            str(key) for key in data if key not in ("username", "password", "detector_addresses")
+        )
+        return auth
 
     # -- the detector --------------------------------------------------------
     def is_detector_address(self, host: str | None) -> bool:
@@ -236,9 +261,17 @@ class AdminAuth:
         # first letter of a text field, and "Admin" must not be a lockout.
         # The password is compared exactly. Bytes, not str: compare_digest
         # raises on non-ASCII text, which would turn a strange login into a 500.
+        # Bounded BEFORE normalising, and only text: this runs on the event
+        # loop, ahead of the failed-login gate, for anyone who can reach the
+        # port. The login form sends two strings and nothing else does.
+        if not isinstance(username, str) or not isinstance(password, str):
+            return False
+        if (len(username) > max(LOGIN_FIELD_MAX, 8 * len(self.username))
+                or len(password) > max(LOGIN_FIELD_MAX, 8 * len(self._password))):
+            return False
         try:
-            given_user = _normal(str(username)).strip().casefold()
-            given_password = _normal(str(password))
+            given_user = _normal(username).strip().casefold()
+            given_password = _normal(password)
         except Exception:
             return False
         user_ok = hmac.compare_digest(
@@ -270,13 +303,31 @@ class AdminAuth:
             return None
         return login_at, expiry
 
-    def issue(self, renew: str | None = None) -> str:
-        """A new session; or, given a valid token, that session extended."""
+    def issue(self, renew: str | None = None) -> str | None:
+        """A new session; or, given a valid token, that session extended.
+
+        None when the token to renew is not valid (any more). A renewal must
+        never turn into a new sign-in: the check and this call read the clock
+        separately, and a token that lapsed in between used to come back with
+        a fresh sign-in time and a fresh 72 hours, with no password.
+        """
         now = self._clock()
-        parsed = self._parse(renew) if renew is not None else None
-        login_at = parsed[0] if parsed else int(now)
+        if renew is None:
+            login_at = int(now)
+        else:
+            parsed = self._parse(renew)
+            if parsed is None:
+                return None
+            login_at = parsed[0]
         expiry = int(min(now + self.ttl_s, login_at + MAX_SESSION_S))
         return f"v2.{login_at}.{expiry}.{self._sign(login_at, expiry)}"
+
+    def ends_in(self, token: str | None) -> int | None:
+        """Seconds until this session's hard end (the cap after sign-in)."""
+        parsed = self._parse(token)
+        if not parsed:
+            return None
+        return max(0, int(parsed[0] + MAX_SESSION_S - self._clock()))
 
     def verify(self, token: str | None) -> bool:
         return self._parse(token) is not None

@@ -148,11 +148,21 @@ a bookmarked `/admin` shows the holding page too.
   Jetson (192.168.55.x), and never through the tunnel. So nothing changes
   on the Jetson over the cable. If it ever posts over the hotspot instead,
   list its hotspot address under `detector_addresses` in the same file, or
-  its finishes are refused: the Jetson's health line shows `pending`
-  climbing with a 401, and `api_server.log` names the refused address. A session lasts 18 hours from its last use (it is renewed
+  its finishes are refused until you do: the Jetson's launcher asks the
+  console before it opens the camera and prints the address to add in red
+  (again as its last lines), and `api_server.log` names the refused address.
+  The detector starts regardless, so the line is still timed: the finishes
+  wait in the Jetson's `events.jsonl` and land, with their real times, once
+  the address is listed and the console restarted (without `--fresh`). List the Jetson's single
+  address, not the network: a network there makes every phone on the
+  hotspot a detector (the launcher prints the list it is using and warns).
+  The login relies on the public URL being served by `ngrok http`, as
+  `broadcast.sh` runs it; do not put another forwarder (a TCP tunnel,
+  `ssh -R`) in front of port 8001 on the Mac. A session lasts 18 hours from its last use (it is renewed
   while the dashboard is open, so it does not end under you; 72 hours after
-  the sign-in it ends regardless) and survives an
-  API restart. Sessions are per address: the tablet on the hotspot, the
+  the sign-in it ends regardless, and with under a day left the login page
+  and the dashboard ask you to sign in again, so sign in on race morning)
+  and survives an API restart. Sessions are per address: the tablet on the hotspot, the
   Mac on localhost and the public URL each sign in once. Sign Out only
   drops the cookie in that browser; to end every session, change the
   password and restart the API. The username is not case-sensitive, the

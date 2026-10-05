@@ -30,10 +30,11 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, fail_times: int = 0, delay: float = 0.0):
+    def __init__(self, fail_times: int = 0, delay: float = 0.0, status_code: int = 200):
         self.posts = []
         self.fail_times = fail_times
         self.delay = delay
+        self.status_code = status_code
 
     def post(self, url, data=None, headers=None, timeout=None):
         if self.delay:
@@ -42,7 +43,7 @@ class FakeSession:
         if self.fail_times > 0:
             self.fail_times -= 1
             raise ConnectionError("simulated network failure")
-        return FakeResponse()
+        return FakeResponse(self.status_code)
 
 
 class TestSubmitNeverBlocks:
@@ -111,6 +112,27 @@ class TestPublishing:
         streamer.stop()
         assert streamer.stats.errors >= 1
         assert streamer.stats.last_error is not None
+
+    def test_frames_never_go_through_a_proxy(self, monkeypatch):
+        """HTTP_PROXY exported on the detector's machine would put a proxy in
+        front of its console, which takes any sign of one as "not the detector"."""
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+        streamer = FrameStreamer("http://x", StreamConfig())
+        assert streamer._ensure_session().trust_env is False
+
+    def test_a_refused_frame_is_an_error_not_a_publish(self):
+        """A console with a login answers 401 to an address it does not know.
+        Counted as sent, the health line said the preview was fine."""
+        session = FakeSession(status_code=401)
+        streamer = FrameStreamer("http://x", StreamConfig(target_fps=0), session=session)
+        streamer.start()
+        deadline = time.time() + 2
+        while streamer.stats.errors < 2 and time.time() < deadline:
+            streamer.submit(frame())
+            time.sleep(0.05)
+        streamer.stop()
+        assert streamer.stats.errors >= 2 and streamer.stats.sent == 0
+        assert streamer.stats.last_error == "HTTP 401"
 
     def test_a_slow_post_does_not_block_submit(self):
         """The core guarantee: a hung network call must never propagate back."""

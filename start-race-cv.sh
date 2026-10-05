@@ -461,6 +461,19 @@ start_api_server() {
                     echo -e "${YELLOW}⚠️  RACE_ADMIN_USER / RACE_ADMIN_PASSWORD are set in this terminal and override config/admin.local.yml.${NC}"
                     echo -e "${YELLOW}   The file's password will NOT work. unset them and restart to use the file.${NC}"
                 fi
+                # Which addresses may post finishes without the login, as the
+                # API read them: a list that re-opens that door to a whole
+                # network must not look the same as a correct one.
+                local detector_line
+                detector_line=$(sed -nE 's/.*(Detector posts accepted without a login from: .*)$/\1/p' api_server.log 2>/dev/null | tail -1 || true)
+                if [[ "$detector_line" == *"WARNING"* ]]; then
+                    echo -e "${YELLOW}⚠️  ${detector_line}${NC}"
+                elif [[ -n "$detector_line" ]]; then
+                    echo -e "${GREEN}   ${detector_line}${NC}"
+                fi
+                # Every one, not the last: a stray key must not hide a misspelt detector_addresses.
+                sed -nE "s/.*(Admin config: unknown key .*)\$/\1/p" api_server.log 2>/dev/null \
+                    | while IFS= read -r unknown_key; do echo -e "${YELLOW}⚠️  ${unknown_key}${NC}"; done || true
             else
                 echo -e "${RED}⚠️  NO ADMIN LOGIN: anyone on this network can start, stop or reset the clock and edit results.${NC}"
                 echo -e "${BLUE}   cp config/admin.example.yml config/admin.local.yml, set a password in the copy, restart.${NC}"
@@ -530,11 +543,12 @@ measure_skew() {  # this machine's clock minus the console's, seconds (+ = ahead
     python3 - "$API_URL" <<'PY' 2>/dev/null
 import json, sys, time, urllib.request
 url = sys.argv[1] + "/api/time"
+direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # never through a proxy
 best = None
 for _ in range(5):
     t0 = time.time()
     try:
-        epoch = float(json.load(urllib.request.urlopen(url, timeout=4))["epoch"])
+        epoch = float(json.load(direct.open(url, timeout=4))["epoch"])
     except Exception:
         break
     t3 = time.time()
@@ -545,13 +559,33 @@ print(f"{best[0]:+.3f}" if best else "")
 PY
 }
 
+# The console answers but refuses this machine's posts (a login is set and
+# this address is not a detector address). Said in red here and again as the
+# launcher's last lines -- but NOT a reason to exit: the detector still times
+# every finish into its event log and retries, and they all land, with their
+# real times, once the console lists this address. Exiting here left the line
+# untimed for as long as the console took to fix.
+DETECTOR_REFUSED=0
+DETECTOR_ADDR=""
+say_detector_refused() {
+    echo -e "${RED}❌ The console has an admin login and does not accept detector posts from this machine${DETECTOR_ADDR:+ ($DETECTOR_ADDR)}.${NC}"
+    echo -e "${RED}   Every finish and every preview frame is REFUSED until that is fixed. The detector runs anyway:${NC}"
+    echo -e "${RED}   finishes are timed into its event log and land once the console accepts this address.${NC}"
+    echo -e "${BLUE}💡 Over the USB link use  --api-url http://192.168.55.100:$PORT  (accepted with no setup).${NC}"
+    echo -e "${BLUE}   Over a hotspot, on the console add this machine's address to config/admin.local.yml:${NC}"
+    echo -e "${BLUE}     detector_addresses: [\"${DETECTOR_ADDR:-JETSON_ADDRESS}\"]${NC}"
+    echo -e "${BLUE}   and restart the console (./stop-race-cv.sh, then ./start-race-cv.sh --api-only; no --fresh mid-race).${NC}"
+}
+
 # --api-url: the API lives on the console machine. Refuse to start a detector
 # that has nowhere to deliver; a finish logged only to the event log is a
 # recovery job, not a result.
 check_remote_api() {
     echo -e "${YELLOW}🛰  Checking the results API at $API_URL...${NC}"
     local code
-    code=$(curl -s -o /dev/null -m 4 -w '%{http_code}' "$API_URL/api/clock/status" 2>/dev/null || true)
+    # --noproxy: an HTTP_PROXY exported on this machine must not sit between
+    # the detector and its console (the detector itself ignores it too).
+    code=$(curl -s --noproxy '*' -o /dev/null -m 4 -w '%{http_code}' "$API_URL/api/clock/status" 2>/dev/null || true)
     if [[ "$code" != "200" ]]; then
         echo -e "${RED}❌ No results API at $API_URL (HTTP ${code:-none}).${NC}"
         echo -e "${BLUE}💡 On the console machine run:  ./start-race-cv.sh --api-only --fresh -r roster.csv${NC}"
@@ -559,6 +593,19 @@ check_remote_api() {
         exit 1
     fi
     echo -e "${GREEN}✅ API answers at $API_URL${NC}"
+    # With a login set on the console, the detector is known by its address.
+    # Ask now, with a body the console will not show (not a JPEG): a 401
+    # means every finish and every preview frame from here is refused. Say so
+    # and go on (see say_detector_refused): a refused finish is a delayed one.
+    local probe
+    probe=$(curl -s --noproxy '*' -o /dev/null -m 4 -w '%{http_code}' -X POST -H 'Content-Type: image/jpeg' --data-binary 'probe' "$API_URL/api/frame" 2>/dev/null || true)
+    if [[ "$probe" == "401" ]]; then
+        DETECTOR_ADDR=$(ip -4 route get "$(echo "$API_URL" | sed -E 's#^[a-z]+://##; s#[:/].*##')" 2>/dev/null | sed -nE 's/.* src ([0-9.]+).*/\1/p' | head -1 || true)
+        DETECTOR_REFUSED=1
+        say_detector_refused
+    elif [[ "$probe" == "200" ]]; then
+        echo -e "${GREEN}✅ The console accepts detector posts from this machine${NC}"
+    fi
     # The API converts every finish against ITS clock; a detector on another
     # machine with a different idea of the time shifts every result by the
     # difference. The API's Date header is whole seconds, which is enough to
@@ -572,7 +619,7 @@ check_remote_api() {
     skew=$(measure_skew)
     if [[ -z "$skew" ]]; then
         local remote_epoch local_epoch
-        remote_epoch=$(curl -s -m 4 -D - -o /dev/null "$API_URL/api/clock/status" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
+        remote_epoch=$(curl -s --noproxy '*' -m 4 -D - -o /dev/null "$API_URL/api/clock/status" 2>/dev/null | awk -F': ' 'tolower($1)=="date"{print $2}' | tr -d '\r')
         if [[ -n "$remote_epoch" ]]; then
             remote_epoch=$(date -u -d "$remote_epoch" +%s 2>/dev/null || date -u -j -f "%a, %d %b %Y %T %Z" "$remote_epoch" +%s 2>/dev/null || true)
             local_epoch=$(date -u +%s)
@@ -765,3 +812,9 @@ echo -e "${BLUE}  Stop everything:${NC}       ./stop-race-cv.sh   (race_cv first
 echo -e "${BLUE}  Stop race_cv only:${NC}     pkill -TERM -f race_cv.run   (kills the supervisor too)"
 echo ""
 echo -e "${YELLOW}💡 Undelivered finish events, if any, are preserved in $(grep -A1 '^sink:' "$CONFIG" | grep event_log | awk '{print $2}')${NC}"
+# Last, so it cannot scroll away. An if, not `[[ ]] &&`: as the script's final
+# command a false test would make a healthy start exit 1.
+if [[ "$DETECTOR_REFUSED" == "1" ]]; then
+    echo ""
+    say_detector_refused
+fi

@@ -14,6 +14,18 @@ export interface AdminSession {
   authenticated: boolean;
   /** The server could not be asked; do not bounce the operator on a network blip. */
   unknown?: boolean;
+  /** Seconds until this sign-in ends for good (72 h after it was made). */
+  endsIn?: number;
+}
+
+/** Under this much left, the login asks for the password again instead of forwarding. */
+export const SESSION_ENDS_SOON_S = 24 * 3600;
+
+export function hoursLeft(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  if (hours >= 2) return `about ${hours} hours`;
+  if (hours === 1) return 'about an hour';
+  return `${Math.max(1, Math.round(seconds / 60))} minutes`;
 }
 
 export async function getAdminSession(): Promise<AdminSession> {
@@ -22,7 +34,11 @@ export async function getAdminSession(): Promise<AdminSession> {
     if (res.status === 404) return { configured: false, authenticated: true };   // an older API without the login
     if (!res.ok) return { configured: true, authenticated: false, unknown: true };
     const body = await res.json();
-    return { configured: !!body.configured, authenticated: !!body.authenticated };
+    return {
+      configured: !!body.configured,
+      authenticated: !!body.authenticated,
+      endsIn: typeof body.endsIn === 'number' ? body.endsIn : undefined,
+    };
   } catch {
     return { configured: true, authenticated: false, unknown: true };
   }
@@ -32,19 +48,30 @@ export async function adminLogin(
   username: string,
   password: string,
 ): Promise<{ ok: boolean; configured: boolean; message?: string }> {
+  // A wrong password is answered after a short pause, and behind a queue
+  // when many are being tried at once. The operator gets an answer either
+  // way: after 8 s, give up and say so rather than spin.
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 8000);
   try {
     const res = await fetch('/api/admin/login', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
+      signal: controller.signal,
     });
     if (res.status === 401) return { ok: false, configured: true, message: 'Invalid username or password. Please try again.' };
     if (!res.ok) return { ok: false, configured: true, message: `The server answered ${res.status}. Is the results API running?` };
     const body = await res.json();
     return { ok: true, configured: body.configured !== false };
   } catch {
+    if (controller.signal.aborted) {
+      return { ok: false, configured: true, message: 'No answer in time. A correct password is answered at once: check it and try again.' };
+    }
     return { ok: false, configured: true, message: 'Could not reach the results API.' };
+  } finally {
+    window.clearTimeout(timer);
   }
 }
 

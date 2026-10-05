@@ -17,7 +17,7 @@ import {
 import Layout from '@/components/Layout';
 import RaceClock from '@/components/RaceClock';
 import { formatTime } from '../lib/utils';
-import { adminFetch, getAdminSession } from '../lib/adminApi';
+import { adminFetch, getAdminSession, hoursLeft, SESSION_ENDS_SOON_S } from '../lib/adminApi';
 
 interface Finisher {
   id: string;
@@ -40,12 +40,17 @@ export default function AdminDashboard() {
   // This page used to open for anyone who typed its address. The server now
   // refuses operator actions without a session; this sends a visitor without
   // one to the login instead of showing a dashboard whose buttons all fail.
+  const [sessionEndsIn, setSessionEndsIn] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
     let first = true;
     const check = () => getAdminSession().then((s) => {
-      if (!cancelled && s.configured && !s.authenticated && !s.unknown) {
+      if (cancelled) return;
+      if (s.configured && !s.authenticated && !s.unknown) {
         navigate(first ? '/admin' : '/admin?expired=1', { replace: true });
+      }
+      if (!s.unknown) {
+        setSessionEndsIn(s.endsIn !== undefined && s.endsIn < SESSION_ENDS_SOON_S ? s.endsIn : null);
       }
       first = false;
     });
@@ -310,6 +315,12 @@ export default function AdminDashboard() {
           const minutes = parseInt(timeParts[0]);
           const seconds = parseFloat(timeParts[1]);
           processedValue = (minutes * 60 + seconds) * 1000;
+          // "25:" or "x5:30" is NaN, and JSON.stringify sends NaN as null: the
+          // server takes null as "has not finished" and the runner vanishes.
+          if (!Number.isFinite(processedValue)) {
+            console.error('Invalid time. Use MM:SS.ss');
+            return;
+          }
         } else {
           console.error('Invalid time format. Use MM:SS.ss');
           return;
@@ -464,6 +475,15 @@ export default function AdminDashboard() {
       <div className="leaderboard-container">
         <div className="max-w-[1800px] mx-auto">
           
+          {/* A sign-in ends for good 72 h after it was made; say so before it does. */}
+          {sessionEndsIn !== null && (
+            <div className="mb-4 p-3 rounded-lg border border-destructive/30 bg-destructive/10 text-sm text-foreground">
+              This sign-in ends in {hoursLeft(sessionEndsIn)}.{' '}
+              <a href="/admin" className="underline font-semibold">Sign in again</a>{' '}
+              before the race so it cannot end during it.
+            </div>
+          )}
+
           {/* Admin Header - TV Optimized */}
           <div className="hero-section-tv">
             <div className="flex items-center justify-between">

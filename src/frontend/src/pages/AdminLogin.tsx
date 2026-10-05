@@ -10,7 +10,7 @@ import {
   Lock
 } from 'lucide-react';
 import Layout from '@/components/Layout';
-import { adminLogin, getAdminSession } from '@/lib/adminApi';
+import { adminLogin, getAdminSession, hoursLeft, SESSION_ENDS_SOON_S } from '@/lib/adminApi';
 import type { AdminSession } from '@/lib/adminApi';
 
 export default function AdminLogin() {
@@ -22,6 +22,8 @@ export default function AdminLogin() {
   // Until the server answers, assume a login is required: showing "no
   // password set" for a moment on a locked server would be the wrong default.
   const [session, setSession] = useState<AdminSession>({ configured: true, authenticated: false });
+  // Set when this browser is signed in but the sign-in ends within a day.
+  const [endsSoon, setEndsSoon] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -31,8 +33,15 @@ export default function AdminLogin() {
     getAdminSession().then((s) => {
       if (cancelled) return;
       setSession(s);
+      if (!(s.configured && s.authenticated && !s.unknown)) return;
+      // A sign-in ends for good 72 h after it was made. One from three days
+      // ago would end during the race, so ask now, while it costs nothing.
+      if (s.endsIn !== undefined && s.endsIn < SESSION_ENDS_SOON_S) {
+        setEndsSoon(s.endsIn);
+        return;
+      }
       // Already signed in on this browser: straight to Live Management.
-      if (s.configured && s.authenticated && !s.unknown) navigate('/admin/dashboard', { replace: true });
+      navigate('/admin/dashboard', { replace: true });
     });
     return () => { cancelled = true; };
   }, [navigate]);
@@ -88,6 +97,24 @@ export default function AdminLogin() {
                 {error && (
                   <div className="mb-6 p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
                     <p className="text-destructive text-sm font-medium">{error}</p>
+                  </div>
+                )}
+
+                {endsSoon !== null && (
+                  <div className="mb-6 p-4 bg-muted/50 border border-border/50 rounded-lg text-sm">
+                    <p className="font-semibold text-foreground mb-1">
+                      This sign-in ends in {hoursLeft(endsSoon)}
+                    </p>
+                    <p className="text-muted-foreground">
+                      Sign in again now and it lasts three days, so it cannot end during the race.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/admin/dashboard')}
+                      className="mt-2 underline text-primary font-semibold"
+                    >
+                      Continue without signing in again
+                    </button>
                   </div>
                 )}
 

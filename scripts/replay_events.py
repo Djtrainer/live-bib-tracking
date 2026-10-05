@@ -118,6 +118,7 @@ def main(argv=None) -> int:
 
     url = args.api_url.rstrip("/") + "/api/results"
     session = requests.Session()
+    session.trust_env = False          # straight to the console, as the detector posts
     sent = failed = 0
     for event_id, record in sorted(targets.items(), key=lambda kv: kv[1]["capture_ts"]):
         payload = to_payload(record)

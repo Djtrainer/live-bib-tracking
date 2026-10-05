@@ -20,5 +20,16 @@ password: "change-me"
 # only from where a detector can be: this machine, and the USB link to the
 # Jetson (192.168.55.x). If the Jetson ever posts over the hotspot instead
 # (--api-url http://<this Mac's hotspot address>:8001), list ITS hotspot
-# address here, or its finishes are refused with a 401:
+# address here, or its finishes wait on the Jetson, refused with a 401,
+# until you do (its launcher checks this at startup and names the address):
 # detector_addresses: ["172.20.10.7"]
+#
+# One address per machine. "172.20.10.7/28", as `ip addr` prints it, is read
+# as that one machine. A whole network ("172.20.10.0/28") makes every phone
+# on it a detector that can post finishes with no login; the API accepts it
+# and warns at startup. The launcher prints the list it is using.
+#
+# The login assumes the public URL is served by `ngrok http` (broadcast.sh):
+# that is what marks a request as coming from outside. A forwarder on this
+# Mac that adds no X-Forwarded-For header (a TCP tunnel, ssh -R) would make
+# every visitor look like the detector on this machine.

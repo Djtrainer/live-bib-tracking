@@ -61,6 +61,7 @@ class FrameStreamer:
             import requests
 
             self._session = requests.Session()
+            self._session.trust_env = False    # as in sink.py: straight to the console
         return self._session
 
     def submit(self, frame_bgr: np.ndarray) -> None:
@@ -115,14 +116,24 @@ class FrameStreamer:
                 continue
 
             try:
-                self._ensure_session().post(
+                response = self._ensure_session().post(
                     self.url,
                     data=buffer.tobytes(),
                     headers={"Content-Type": "image/jpeg"},
                     timeout=self.config.timeout_seconds,
                 )
+                # A refusal is not a publish. A 401 here means the console does
+                # not accept detector posts from this address; counted as
+                # "sent", the health line said the preview was fine while the
+                # operator looked at a blank picture.
+                status = getattr(response, "status_code", 200)
                 with self._lock:
-                    self._stats.sent += 1
+                    if isinstance(status, int) and status >= 400:
+                        self._stats.errors += 1
+                        self._stats.last_error = f"HTTP {status}"
+                    else:
+                        self._stats.sent += 1
+                        self._stats.last_error = None
                 last_sent = now
             except Exception as exc:
                 with self._lock:

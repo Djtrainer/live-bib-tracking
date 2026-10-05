@@ -133,6 +133,7 @@ def measure_clock_offset(api_url: str, session=None, samples: int = 5,
         import requests
 
         session = requests.Session()
+        session.trust_env = False      # straight to the console, never via a proxy
     url = api_url.rstrip("/") + "/api/time"
     best: ClockOffset | None = None
     for i in range(max(1, samples)):
@@ -200,6 +201,10 @@ class ResultSink:
             import requests
 
             self._session = requests.Session()
+            # Never through a proxy: an HTTP_PROXY exported on this machine
+            # would put one between the detector and its console, and the
+            # console takes any sign of a proxy as "not the detector".
+            self._session.trust_env = False
         return self._session
 
     def submit(self, event: FinishEvent) -> None:
