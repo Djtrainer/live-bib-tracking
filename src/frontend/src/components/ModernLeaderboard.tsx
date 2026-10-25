@@ -531,7 +531,7 @@ const ModernLeaderboard = ({
                   <div className="section-icon-tv">
                     <Users className="w-5 h-5 text-white" />
                   </div>
-                  <h2 className="section-title-tv">Age Brackets</h2>
+                  <h2 className="section-title-tv">Team Name</h2>
                 </div>
                 
                 <div ref={teamScrollViewportRef} className="p-4 space-y-4 max-h-96 overflow-y-auto">
