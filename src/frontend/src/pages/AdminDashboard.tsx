@@ -12,7 +12,9 @@ import {
   Trash2,
   Plus,
   Monitor,
-  Download
+  Download,
+  CheckCircle2,
+  ArrowDown
 } from 'lucide-react';
 import Layout from '@/components/Layout';
 import RaceClock from '@/components/RaceClock';
@@ -27,6 +29,7 @@ interface Finisher {
   finishTime: number | null;
   gender?: string;
   team?: string;
+  verified?: boolean;
 }
 
 interface EditingCell {
@@ -75,6 +78,29 @@ export default function AdminDashboard() {
   const [clockStatus, setClockStatus] = useState<any>(null);
   const resultsContainerRef = useRef<HTMLDivElement>(null);
   const [preservedScrollPosition, setPreservedScrollPosition] = useState<number>(0);
+
+  // The WebSocket handler is created once per connection, so state it closes
+  // over is as of connect time; it reads these mirrors instead.
+  const finishersRef = useRef<Finisher[]>([]);
+  const editingCellRef = useRef<EditingCell | null>(null);
+  useEffect(() => { finishersRef.current = finishers; }, [finishers]);
+  useEffect(() => { editingCellRef.current = editingCell; }, [editingCell]);
+
+  // Following the bottom pauses while a cell is being edited or the operator
+  // has scrolled up (issue #38); arrivals meanwhile are counted into a pill.
+  const followAfterRenderRef = useRef(false);
+  const [pendingNew, setPendingNew] = useState(0);
+
+  // Measured when asked rather than remembered from scroll events: a freshly
+  // mounted list (reload, tab switch, reconnect) sits at the top without ever
+  // having scrolled. A little slack so a partly visible last row still counts.
+  const isAtBottom = () => {
+    const el = resultsContainerRef.current;
+    return !el || el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
+  };
+
+  // Set by Escape so the blur that follows closes the editor without saving.
+  const cancelEditRef = useRef(false);
 
   // Function to preserve scroll position
   const preserveScrollPosition = () => {
@@ -159,12 +185,13 @@ export default function AdminDashboard() {
         if (message.action === 'reload') {
           fetchFinishers(true); // Preserve scroll position on reload
         } else if (message.type === 'add' || message.type === 'update') {
+          // Decided outside the updater, which must stay free of side effects.
+          const isNewFinisher = !finishersRef.current.some(f => f.id === message.data.id);
           setFinishers(prev => {
             // Only match by ID for updates, not by bib number to allow duplicates
             const existingIndex = prev.findIndex(f => f.id === message.data.id);
             let updated;
-            const isNewFinisher = existingIndex === -1;
-            
+
             if (existingIndex > -1) {
               // Update existing entry
               updated = [...prev];
@@ -174,18 +201,18 @@ export default function AdminDashboard() {
               updated = [...prev, message.data];
             }
             updated.sort((a, b) => (a.finishTime || 0) - (b.finishTime || 0));
-            
-            // Auto-scroll to bottom when a new finisher is added
-            if (isNewFinisher && message.type === 'add') {
-              setTimeout(scrollToBottom, 100);
-            }
-            // Update clock status on clock messages (if provided)
-            if (message.type === 'clock_update' && message.data) {
-              setClockStatus(message.data);
-            }
-            
             return updated;
           });
+          if (isNewFinisher && message.type === 'add') {
+            // Measured here, before React has rendered the new row.
+            if (isAtBottom() && !editingCellRef.current) {
+              followAfterRenderRef.current = true;
+            } else {
+              setPendingNew(n => n + 1);
+            }
+          }
+        } else if (message.type === 'clock_update' && message.data) {
+          setClockStatus(message.data);
         }
       } catch (error) {
         console.error('Error processing WebSocket message:', error);
@@ -214,6 +241,22 @@ export default function AdminDashboard() {
     if (resultsContainerRef.current) {
       resultsContainerRef.current.scrollTop = resultsContainerRef.current.scrollHeight;
     }
+  };
+
+  // Scrolls once the new row is in the DOM, rather than after a guessed delay.
+  useEffect(() => {
+    if (!followAfterRenderRef.current) return;
+    followAfterRenderRef.current = false;
+    scrollToBottom();
+  }, [finishers]);
+
+  const handleResultsScroll = () => {
+    if (isAtBottom()) setPendingNew(0);
+  };
+
+  const showPendingNew = () => {
+    scrollToBottom();
+    setPendingNew(0);
   };
 
   const handleQuickAdd = async () => {
@@ -261,9 +304,8 @@ export default function AdminDashboard() {
       
       if (result.success) {
         setBibNumber('');
-        // Auto-scroll to bottom after adding finisher
-        setTimeout(scrollToBottom, 100);
-        // fetchFinishers(); // The WebSocket will handle the update
+        // The WebSocket 'add' shows the row, following when the list is at the
+        // bottom and counting into the pill otherwise, like any other arrival.
       } else {
         console.error('Failed to add finisher:', result.error || result.message);
       }
@@ -292,15 +334,54 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleCellKeyPress = (e: React.KeyboardEvent, id: string, field: string, value: string) => {
+  const handleToggleVerified = async (id: string, verified: boolean) => {
+    const setVerified = (v: boolean) =>
+      setFinishers(prev => prev.map(f => f.id === id ? { ...f, verified: v } : f));
+    // Optimistic: the operator ticks rows faster than a round trip. The
+    // 'update' broadcast brings the server's record; revert only on failure.
+    setVerified(verified);
+    try {
+      const response = await adminFetch(`/api/results/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ verified }),
+      });
+
+      const result = await response.json();
+
+      if (!result.success) {
+        console.error('Failed to update verified:', result.error || result.message);
+        setVerified(!verified);
+      }
+    } catch (error) {
+      console.error('Error updating verified:', error);
+      setVerified(!verified);
+    }
+  };
+
+  // Both keys hand off to onBlur: blurring the input fires it synchronously,
+  // and an input that has already lost focus fires nothing when it unmounts,
+  // so each edit saves exactly once (Enter) or not at all (Escape).
+  const handleCellKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      handleCellBlur(id, field, value);
+      e.currentTarget.blur();
+    } else if (e.key === 'Escape') {
+      cancelEditRef.current = true;
+      e.currentTarget.blur();
+      cancelEditRef.current = false;
+      setEditingCell(null);
     }
   };
 
   const handleCellBlur = async (id: string, field: string, value: string) => {
     setEditingCell(null);
-    
+    if (cancelEditRef.current) {
+      cancelEditRef.current = false;
+      return;
+    }
+
     const finisher = finishers.find(f => f.id === id);
     if (!finisher) return;
 
@@ -399,7 +480,7 @@ export default function AdminDashboard() {
     }
 
     // Create CSV content
-    const headers = ['Rank', 'Bib Number', 'Racer Name', 'Finish Time', 'Gender', 'Team'];
+    const headers = ['Rank', 'Bib Number', 'Racer Name', 'Finish Time', 'Gender', 'Team', 'Verified'];
     const normalizeFinishTime = (ft: number | null) => {
       if (ft === null || ft === undefined) return null;
       // If it looks like a unix epoch in ms (greater than year 3000 ~32503680000000),
@@ -427,7 +508,8 @@ export default function AdminDashboard() {
           return normalized ? formatTime(normalized) : '';
         })(),
         finisher.gender || '',
-        `"${finisher.team || ''}"`
+        `"${finisher.team || ''}"`,
+        finisher.verified ? 'yes' : ''
       ].join(','))
     ].join('\n');
 
@@ -464,6 +546,12 @@ export default function AdminDashboard() {
   const isDuplicateBib = (bibNumber: string, currentId: string) => {
     return finishers.filter(f => f.bibNumber === bibNumber && f.id !== currentId).length > 0;
   };
+
+  // "Through place P": the leading run of verified rows, in displayed order,
+  // is where the operator left off checking.
+  const verifiedCount = finishers.filter(f => f.verified).length;
+  let verifiedThrough = 0;
+  while (verifiedThrough < finishers.length && finishers[verifiedThrough].verified) verifiedThrough++;
 
   return (
     <Layout 
@@ -610,16 +698,22 @@ export default function AdminDashboard() {
               
               {/* Left Side - Manage Results Table (75% width, left-aligned) */}
               <div className="w-3/4 overflow-hidden">
-                <div className="section-card-tv h-full flex flex-col">
+                <div className="section-card-tv h-full flex flex-col relative">
                   <div className="section-header-tv flex-shrink-0">
                     <div className="section-icon-tv">
                       <Users className="w-5 h-5 text-white" />
                     </div>
                     <h2 className="section-title-tv">Manage Results</h2>
+                    {finishers.length > 0 && (
+                      <span className="ml-auto text-sm text-muted-foreground whitespace-nowrap">
+                        Verified {verifiedCount} of {finishers.length}, through place {verifiedThrough}
+                      </span>
+                    )}
                   </div>
-                  
-                  <div 
+
+                  <div
                     ref={resultsContainerRef}
+                    onScroll={handleResultsScroll}
                     className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-border scrollbar-track-transparent"
                   >
                     {loading ? (
@@ -635,124 +729,151 @@ export default function AdminDashboard() {
                         </p>
                       </div>
                     ) : (
-                      <div className="overflow-x-auto">
-                        <table className="results-table-tv">
-                          <thead className="sticky top-0 bg-card z-10">
-                            <tr>
-                              <th className="w-20">Rank</th>
-                              <th className="w-28">Bib #</th>
-                              <th className="w-auto min-w-[200px]">Racer Name</th>
-                              <th className="w-32">Finish Time</th>
-                              <th className="w-20">Gender</th>
-                              <th className="w-auto min-w-[150px]">Team</th>
-                              <th className="w-24">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {finishers.map((finisher, index) => (
-                              <tr key={finisher.id} className={`group ${isDuplicateBib(finisher.bibNumber, finisher.id) ? 'duplicate-bib' : ''}`}>
-                                <td>
-                                  <span className="rank-cell-tv">{index + 1}</span>
-                                </td>
-                                <td>
-                                  {editingCell?.id === finisher.id && editingCell?.field === 'bibNumber' ? (
-                                    <input
-                                      type="text"
-                                      defaultValue={finisher.bibNumber}
-                                      className="w-full p-2 rounded border border-border bg-background text-left font-mono text-lg"
-                                      autoFocus
-                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'bibNumber', (e.target as HTMLInputElement).value)}
-                                      onBlur={(e) => handleCellBlur(finisher.id, 'bibNumber', e.target.value)}
-                                    />
-                                  ) : (
-                                    <span 
-                                      className="bib-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                      onClick={() => setEditingCell({ id: finisher.id, field: 'bibNumber' })}
-                                    >
-                                      #{finisher.bibNumber}
-                                    </span>
-                                  )}
-                                </td>
-                                <td>
-                                  {editingCell?.id === finisher.id && editingCell?.field === 'racerName' ? (
-                                    <input
-                                      type="text"
-                                      defaultValue={finisher.racerName}
-                                      className="w-full p-2 rounded border border-border bg-background text-lg"
-                                      autoFocus
-                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'racerName', (e.target as HTMLInputElement).value)}
-                                      onBlur={(e) => handleCellBlur(finisher.id, 'racerName', e.target.value)}
-                                    />
-                                  ) : (
-                                    <span 
-                                      className="name-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                      onClick={() => setEditingCell({ id: finisher.id, field: 'racerName' })}
-                                    >
-                                      {finisher.racerName || 'Unknown Runner'}
-                                    </span>
-                                  )}
-                                </td>
-                                <td>
-                                  {editingCell?.id === finisher.id && editingCell?.field === 'finishTime' ? (
-                                    <input
-                                      type="text"
-                                      defaultValue={getDisplayFinishTime(finisher.finishTime) || ''}
-                                      className="w-full p-2 rounded border border-border bg-background text-left font-mono text-lg"
-                                      autoFocus
-                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'finishTime', (e.target as HTMLInputElement).value)}
-                                      onBlur={(e) => handleCellBlur(finisher.id, 'finishTime', e.target.value)}
-                                    />
-                                  ) : (
-                                    <span 
-                                      className="time-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                      onClick={() => setEditingCell({ id: finisher.id, field: 'finishTime' })}
-                                    >
-                                      {getDisplayFinishTime(finisher.finishTime) || '-'}
-                                    </span>
-                                  )}
-                                </td>
-                                <td>
-                                  {editingCell?.id === finisher.id && editingCell?.field === 'gender' ? (
-                                    <select
-                                      defaultValue={finisher.gender || ''}
-                                      className="w-full p-2 rounded border border-border bg-background text-left"
-                                      autoFocus
-                                      onBlur={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
-                                      onChange={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
-                                    >
-                                      <option value="">-</option>
-                                      <option value="M">M</option>
-                                      <option value="W">W</option>
-                                    </select>
-                                  ) : (
-                                    <span 
-                                      className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1 font-semibold"
-                                      onClick={() => setEditingCell({ id: finisher.id, field: 'gender' })}
-                                    >
-                                      {finisher.gender || '-'}
-                                    </span>
-                                  )}
-                                </td>
-                                <td>
-                                  {editingCell?.id === finisher.id && editingCell?.field === 'team' ? (
-                                    <input
-                                      type="text"
-                                      defaultValue={finisher.team || ''}
-                                      className="w-full p-2 rounded border border-border bg-background"
-                                      autoFocus
-                                      onKeyPress={(e) => handleCellKeyPress(e, finisher.id, 'team', (e.target as HTMLInputElement).value)}
-                                      onBlur={(e) => handleCellBlur(finisher.id, 'team', e.target.value)}
-                                    />
-                                  ) : (
-                                    <span 
-                                      className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
-                                      onClick={() => setEditingCell({ id: finisher.id, field: 'team' })}
-                                    >
-                                      {finisher.team || '-'}
-                                    </span>
-                                  )}
-                                </td>
-                                <td>
+                      <table className="results-table-tv">
+                        <thead className="sticky top-0 bg-card z-10">
+                          <tr>
+                            <th className="w-20">Rank</th>
+                            <th className="w-28">Bib #</th>
+                            <th className="w-auto min-w-[200px]">Racer Name</th>
+                            <th className="w-32">Finish Time</th>
+                            <th className="w-20">Gender</th>
+                            <th className="w-auto min-w-[150px]">Team</th>
+                            <th className="w-28">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {finishers.map((finisher, index) => (
+                            // duplicate-bib's background is !important in index.css, so a
+                            // duplicate row stays pink even when verified; the border on the
+                            // first cell (tr borders do not paint on this table) still shows.
+                            // Its colour is !important too: index.css sets border-color on
+                            // every cell with a selector that outranks a plain utility.
+                            <tr key={finisher.id} className={`group ${isDuplicateBib(finisher.bibNumber, finisher.id) ? 'duplicate-bib' : ''} ${finisher.verified ? 'bg-emerald-500/10' : ''}`}>
+                              <td className={finisher.verified ? 'border-l-4 !border-l-emerald-500' : 'border-l-4 !border-l-transparent'}>
+                                <span className="rank-cell-tv">{index + 1}</span>
+                              </td>
+                              <td>
+                                {editingCell?.id === finisher.id && editingCell?.field === 'bibNumber' ? (
+                                  <input
+                                    type="text"
+                                    defaultValue={finisher.bibNumber}
+                                    className="w-full p-2 rounded border border-border bg-background text-left font-mono text-lg"
+                                    autoFocus
+                                    onFocus={(e) => e.currentTarget.select()}
+                                    onKeyDown={handleCellKeyDown}
+                                    onBlur={(e) => handleCellBlur(finisher.id, 'bibNumber', e.target.value)}
+                                  />
+                                ) : (
+                                  <span 
+                                    className="bib-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                    onClick={() => setEditingCell({ id: finisher.id, field: 'bibNumber' })}
+                                  >
+                                    #{finisher.bibNumber}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {editingCell?.id === finisher.id && editingCell?.field === 'racerName' ? (
+                                  <input
+                                    type="text"
+                                    defaultValue={finisher.racerName}
+                                    className="w-full p-2 rounded border border-border bg-background text-lg"
+                                    autoFocus
+                                    onFocus={(e) => e.currentTarget.select()}
+                                    onKeyDown={handleCellKeyDown}
+                                    onBlur={(e) => handleCellBlur(finisher.id, 'racerName', e.target.value)}
+                                  />
+                                ) : (
+                                  <span 
+                                    className="name-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                    onClick={() => setEditingCell({ id: finisher.id, field: 'racerName' })}
+                                  >
+                                    {finisher.racerName || 'Unknown Runner'}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {editingCell?.id === finisher.id && editingCell?.field === 'finishTime' ? (
+                                  <input
+                                    type="text"
+                                    defaultValue={getDisplayFinishTime(finisher.finishTime) || ''}
+                                    className="w-full p-2 rounded border border-border bg-background text-left font-mono text-lg"
+                                    autoFocus
+                                    onFocus={(e) => e.currentTarget.select()}
+                                    onKeyDown={handleCellKeyDown}
+                                    onBlur={(e) => handleCellBlur(finisher.id, 'finishTime', e.target.value)}
+                                  />
+                                ) : (
+                                  <span 
+                                    className="time-cell-tv cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                    onClick={() => setEditingCell({ id: finisher.id, field: 'finishTime' })}
+                                  >
+                                    {getDisplayFinishTime(finisher.finishTime) || '-'}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {editingCell?.id === finisher.id && editingCell?.field === 'gender' ? (
+                                  <select
+                                    defaultValue={finisher.gender || ''}
+                                    className="w-full p-2 rounded border border-border bg-background text-left"
+                                    autoFocus
+                                    onBlur={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
+                                    onChange={(e) => handleCellBlur(finisher.id, 'gender', e.target.value)}
+                                  >
+                                    <option value="">-</option>
+                                    <option value="M">M</option>
+                                    <option value="W">W</option>
+                                  </select>
+                                ) : (
+                                  <span 
+                                    className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1 font-semibold"
+                                    onClick={() => setEditingCell({ id: finisher.id, field: 'gender' })}
+                                  >
+                                    {finisher.gender || '-'}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {editingCell?.id === finisher.id && editingCell?.field === 'team' ? (
+                                  <input
+                                    type="text"
+                                    defaultValue={finisher.team || ''}
+                                    className="w-full p-2 rounded border border-border bg-background"
+                                    autoFocus
+                                    onKeyDown={handleCellKeyDown}
+                                    onBlur={(e) => handleCellBlur(finisher.id, 'team', e.target.value)}
+                                  />
+                                ) : (
+                                  <span 
+                                    className="cursor-pointer hover:bg-muted/20 rounded px-2 py-1"
+                                    onClick={() => setEditingCell({ id: finisher.id, field: 'team' })}
+                                  >
+                                    {finisher.team || '-'}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {/* The tick shares the Actions cell: the table is table-layout
+                                    fixed, so every sized column is taken from Racer Name and
+                                    Team, which a 1024px tablet already leaves narrow. */}
+                                <div className="flex items-center justify-center gap-2">
+                                  {/* A native button already toggles on Space and Enter. */}
+                                  <button
+                                    type="button"
+                                    role="checkbox"
+                                    aria-checked={!!finisher.verified}
+                                    aria-label={`Verified, place ${index + 1}, bib ${finisher.bibNumber}`}
+                                    title={finisher.verified ? 'Verified (click to clear)' : 'Mark verified'}
+                                    onClick={() => handleToggleVerified(finisher.id, !finisher.verified)}
+                                    className={`p-2 rounded-lg transition-colors ${
+                                      finisher.verified
+                                        ? 'text-emerald-500 hover:bg-emerald-500/15'
+                                        : 'text-muted-foreground/40 hover:text-muted-foreground hover:bg-muted/20'
+                                    }`}
+                                  >
+                                    <CheckCircle2 className="w-5 h-5" />
+                                  </button>
                                   <button
                                     onClick={() => handleDelete(finisher.id)}
                                     className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
@@ -760,14 +881,27 @@ export default function AdminDashboard() {
                                   >
                                     <Trash2 className="w-4 h-4" />
                                   </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     )}
                   </div>
+
+                  {/* Arrivals while following is paused; sits over the card's bottom edge,
+                      centred so the Actions column on the right stays clear. */}
+                  {pendingNew > 0 && (
+                    <button
+                      type="button"
+                      onClick={showPendingNew}
+                      className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary text-primary-foreground text-sm font-semibold shadow-lg hover:bg-primary/90 transition-colors"
+                    >
+                      <ArrowDown className="w-4 h-4" />
+                      {pendingNew} new finisher{pendingNew === 1 ? '' : 's'}
+                    </button>
+                  )}
                 </div>
               </div>
 
