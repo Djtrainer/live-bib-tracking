@@ -256,12 +256,32 @@ All colors MUST be HSL.
     @apply text-center;
   }
 
-  /* Auto-scroll viewport for results table */
+  /* Results table viewport: capped so the list scrolls instead of growing the page */
   .results-scroll-viewport {
-    /* limit height so auto-scroll activates when content overflows */
-    max-height: 60vh; /* matches previous max-h usage */
-    overflow: hidden;
+    max-height: 60vh;
     position: relative;
+  }
+
+  /* Scroll container shared by the auto-scrolling lists: a real, thin scrollbar
+     the viewer can grab, with its gutter reserved so rows do not shift when it appears */
+  .scroll-viewport-tv {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--primary) / 0.5) transparent;
+    scrollbar-gutter: stable;
+  }
+
+  .scroll-viewport-tv::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .scroll-viewport-tv::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scroll-viewport-tv::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--primary) / 0.5);
+    border-radius: 9999px;
   }
 
   /* Fixed header that stays above scrolling content */
@@ -272,13 +292,6 @@ All colors MUST be HSL.
     z-index: 10;
     background: linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--muted) / 0.3) 100%);
     backdrop-filter: blur(8px);
-  }
-
-  /* Allow tbody transforms for smooth scrolling */
-  .results-table-tv tbody {
-    display: table-row-group;
-    transform: translateY(0);
-    will-change: transform;
   }
 
   .results-table-tv {

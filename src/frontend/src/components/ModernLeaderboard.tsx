@@ -39,6 +39,86 @@ interface ModernLeaderboardProps {
   teamData: Map<string, Finisher[]>;
 }
 
+const AUTO_SCROLL_PX_PER_SEC = 30;
+const AUTO_SCROLL_HOLD_MS = 3000;
+const AUTO_SCROLL_RESUME_MS = 10000;
+
+// Drives a real scroll container: creep down at a steady pace, hold at the
+// bottom, jump back to the top, hold, repeat. Nothing moves while the content
+// fits. Any interaction hands the viewport to the viewer, and the animation
+// picks up from wherever they left it once they have been quiet for a while.
+// Returns the teardown.
+function attachAutoScroll(el: HTMLElement): () => void {
+  let rafId = 0;
+  let lastTs: number | null = null;
+  let waitUntil = 0;
+  let jumpToTop = false;
+  // scrollTop rounds to whole pixels in some browsers, so the sub-pixel
+  // progress lives here and the element is only ever written from it.
+  let pos = el.scrollTop;
+  // Until the first write, a moved element is the browser restoring a scroll
+  // position at load, not the viewer; the creep simply starts from there.
+  let started = false;
+
+  const write = (top: number) => {
+    started = true;
+    el.scrollTop = top;
+  };
+
+  const step = (ts: number) => {
+    rafId = requestAnimationFrame(step);
+    // Capped so a backgrounded tab does not leap when it comes back.
+    const dt = lastTs === null ? 0 : Math.min(ts - lastTs, 100);
+    lastTs = ts;
+    if (ts < waitUntil) return;
+
+    const maxTop = el.scrollHeight - el.clientHeight;
+    if (maxTop <= 0) return;
+
+    if (jumpToTop) {
+      jumpToTop = false;
+      pos = 0;
+      write(0);
+      waitUntil = ts + AUTO_SCROLL_HOLD_MS;
+      return;
+    }
+
+    // Someone else moved it (the viewer, or a layout change): carry on from there.
+    if (Math.abs(el.scrollTop - pos) > 1) pos = el.scrollTop;
+    pos = Math.min(pos + (dt * AUTO_SCROLL_PX_PER_SEC) / 1000, maxTop);
+    write(pos);
+    if (pos >= maxTop) {
+      jumpToTop = true;
+      waitUntil = ts + AUTO_SCROLL_HOLD_MS;
+    }
+  };
+
+  const onInteract = () => {
+    jumpToTop = false;
+    waitUntil = performance.now() + AUTO_SCROLL_RESUME_MS;
+  };
+  // A scroll event is the viewer's only when the element is somewhere other
+  // than where the animation put it. Our own writes land within a pixel of
+  // pos, and so does the odd event the browser fires at load or after a layout
+  // change without moving anything; neither may pause the creep.
+  const onScroll = () => {
+    if (!started) { pos = el.scrollTop; return; }
+    if (Math.abs(el.scrollTop - pos) <= 1) return;
+    onInteract();
+  };
+
+  const interactions = ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'keydown'] as const;
+  interactions.forEach(type => el.addEventListener(type, onInteract, { passive: true }));
+  el.addEventListener('scroll', onScroll, { passive: true });
+  rafId = requestAnimationFrame(step);
+
+  return () => {
+    cancelAnimationFrame(rafId);
+    interactions.forEach(type => el.removeEventListener(type, onInteract));
+    el.removeEventListener('scroll', onScroll);
+  };
+}
+
 const ModernLeaderboard = ({
   finishers,
   totalFinishers,
@@ -50,16 +130,7 @@ const ModernLeaderboard = ({
   const [currentTime, setCurrentTime] = useState(new Date());
   const [clockStatus, setClockStatus] = useState<any>(null);
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
-  const tableBodyRef = useRef<HTMLTableSectionElement | null>(null);
-  const scrollIntervalRef = useRef<number | null>(null);
-  const translateYRef = useRef<number>(0);
-  const originalBodyHeightRef = useRef<number>(0);
-  // Team results auto-scroll refs
   const teamScrollViewportRef = useRef<HTMLDivElement | null>(null);
-  const teamBodyRef = useRef<HTMLDivElement | null>(null);
-  const teamScrollIntervalRef = useRef<number | null>(null);
-  const teamTranslateYRef = useRef<number>(0);
-  const teamOriginalBodyHeightRef = useRef<number>(0);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -75,224 +146,23 @@ const ModernLeaderboard = ({
       .catch(() => {});
   }, []);
 
-  // Auto-scroll setup/teardown and helpers
-  const clearAutoScroll = () => {
-    if (scrollIntervalRef.current) {
-      window.clearInterval(scrollIntervalRef.current);
-      scrollIntervalRef.current = null;
-    }
-    const tbody = tableBodyRef.current;
-    if (tbody) {
-      // remove cloned rows
-    Array.from(tbody.querySelectorAll('[data-clone="true"]') as NodeListOf<HTMLElement>).forEach(n => n.remove());
-      tbody.style.transform = '';
-    }
-    translateYRef.current = 0;
-    originalBodyHeightRef.current = 0;
-  };
-
-  const clearTeamAutoScroll = () => {
-    if (teamScrollIntervalRef.current) {
-      window.clearInterval(teamScrollIntervalRef.current);
-      teamScrollIntervalRef.current = null;
-    }
-    const tbody = teamBodyRef.current;
-    if (tbody) {
-      Array.from(tbody.querySelectorAll('[data-clone="true"]') as NodeListOf<HTMLElement>).forEach(n => n.remove());
-      (tbody as HTMLElement).style.transform = '';
-    }
-    teamTranslateYRef.current = 0;
-    teamOriginalBodyHeightRef.current = 0;
-  };
-
-  const startScrollInterval = (tbody: HTMLTableSectionElement, origHeight: number) => {
-    // ensure any previous interval is cleared
-    if (scrollIntervalRef.current) {
-      window.clearInterval(scrollIntervalRef.current);
-      scrollIntervalRef.current = null;
-    }
-
-    const speedPxPerSec = 30; // pixels per second, tweakable
-    const intervalMs = 16; // ~60fps
-    const pxPerInterval = (speedPxPerSec * intervalMs) / 1000;
-
-    // start interval that updates transform based on translateYRef
-    scrollIntervalRef.current = window.setInterval(() => {
-      translateYRef.current -= pxPerInterval;
-      // reset when we've scrolled the height of the original content
-      if (Math.abs(translateYRef.current) >= originalBodyHeightRef.current) {
-        translateYRef.current += originalBodyHeightRef.current;
-      }
-      tbody.style.transform = `translateY(${translateYRef.current}px)`;
-    }, intervalMs);
-  };
-
-  const startTeamScrollInterval = (body: HTMLDivElement, origHeight: number) => {
-    if (teamScrollIntervalRef.current) {
-      window.clearInterval(teamScrollIntervalRef.current);
-      teamScrollIntervalRef.current = null;
-    }
-
-    const speedPxPerSec = 30; // same speed as main
-    const intervalMs = 16;
-    const pxPerInterval = (speedPxPerSec * intervalMs) / 1000;
-
-    teamScrollIntervalRef.current = window.setInterval(() => {
-      teamTranslateYRef.current -= pxPerInterval;
-      if (Math.abs(teamTranslateYRef.current) >= teamOriginalBodyHeightRef.current) {
-        teamTranslateYRef.current += teamOriginalBodyHeightRef.current;
-      }
-      body.style.transform = `translateY(${teamTranslateYRef.current}px)`;
-    }, intervalMs);
-  };
-
-  const setupAutoScroll = () => {
-    // full setup: clear everything then build clones and start scrolling
-    clearAutoScroll();
-    const viewport = scrollViewportRef.current;
-    const tbody = tableBodyRef.current;
-    if (!viewport || !tbody) return;
-
-    // compute height of the rendered (non-cloned) rows
-    const rows = Array.from(tbody.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
-    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
-    const viewportHeight = viewport.clientHeight;
-    if (originalHeight <= viewportHeight) return; // no autoscroll needed
-
-    originalBodyHeightRef.current = originalHeight;
-
-    // clone original rows to create seamless loop
-    rows.forEach(r => {
-      const clone = r.cloneNode(true) as HTMLElement;
-      clone.setAttribute('data-clone', 'true');
-      tbody.appendChild(clone);
-    });
-
-    // start from current translate (fresh setup starts at 0)
-    translateYRef.current = 0;
-    startScrollInterval(tbody, originalHeight);
-  };
-
-  // Called when finishers change but autoscroll is already running.
-  // Refreshes clones and original height without resetting translateY or interval.
-  const refreshAutoScrollPreservePosition = () => {
-    const viewport = scrollViewportRef.current;
-    const tbody = tableBodyRef.current;
-    if (!viewport || !tbody) return;
-
-    // remove any existing clones
-    Array.from(tbody.querySelectorAll('[data-clone="true"]') as NodeListOf<HTMLElement>).forEach(n => n.remove());
-
-    // compute height of the rendered (non-cloned) rows
-    const rows = Array.from(tbody.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
-    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
-    const viewportHeight = viewport.clientHeight;
-    if (originalHeight <= viewportHeight) {
-      // no autoscroll needed anymore
-      clearAutoScroll();
-      return;
-    }
-
-    originalBodyHeightRef.current = originalHeight;
-
-    // append fresh clones
-    rows.forEach(r => {
-      const clone = r.cloneNode(true) as HTMLElement;
-      clone.setAttribute('data-clone', 'true');
-      tbody.appendChild(clone);
-    });
-
-    // ensure interval is running
-    if (!scrollIntervalRef.current) {
-      startScrollInterval(tbody, originalHeight);
-    }
-    // keep translateYRef.current as-is so it doesn't jump
-  };
-
-  const setupTeamAutoScroll = () => {
-    clearTeamAutoScroll();
-    const viewport = teamScrollViewportRef.current;
-    const body = teamBodyRef.current;
-    if (!viewport || !body) return;
-
-    const rows = Array.from(body.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
-    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
-    const viewportHeight = viewport.clientHeight;
-    if (originalHeight <= viewportHeight) return;
-
-    teamOriginalBodyHeightRef.current = originalHeight;
-
-    rows.forEach(r => {
-      const clone = r.cloneNode(true) as HTMLElement;
-      clone.setAttribute('data-clone', 'true');
-      body.appendChild(clone);
-    });
-
-    teamTranslateYRef.current = 0;
-    startTeamScrollInterval(body, originalHeight);
-  };
-
-  const refreshTeamAutoScrollPreservePosition = () => {
-    const viewport = teamScrollViewportRef.current;
-    const body = teamBodyRef.current;
-    if (!viewport || !body) return;
-
-    Array.from(body.querySelectorAll('[data-clone="true"]') as NodeListOf<HTMLElement>).forEach(n => n.remove());
-
-    const rows = Array.from(body.children).filter(c => !(c as HTMLElement).hasAttribute('data-clone')) as HTMLElement[];
-    const originalHeight = rows.reduce((acc: number, row) => acc + row.offsetHeight, 0);
-    const viewportHeight = viewport.clientHeight;
-    if (originalHeight <= viewportHeight) {
-      clearTeamAutoScroll();
-      return;
-    }
-
-    teamOriginalBodyHeightRef.current = originalHeight;
-
-    rows.forEach(r => {
-      const clone = r.cloneNode(true) as HTMLElement;
-      clone.setAttribute('data-clone', 'true');
-      body.appendChild(clone);
-    });
-
-    if (!teamScrollIntervalRef.current) {
-      startTeamScrollInterval(body, originalHeight);
-    }
-  };
-
-  // Recreate/reset autoscroll whenever finishers change (pause and include new row)
+  // The viewports only render once there is something to show, so the
+  // auto-scroll attaches when one appears and detaches when it goes. Finisher
+  // updates in between leave it, and the native scroll position, alone.
+  const hasResults = finishers.length > 0;
   useEffect(() => {
-    // brief delay to allow DOM update
-    const t = setTimeout(() => {
-      // If autoscroll is already running, refresh clones and sizes without
-      // resetting the translate/position. Otherwise do a full setup.
-      if (scrollIntervalRef.current) {
-        refreshAutoScrollPreservePosition();
-      } else {
-        setupAutoScroll();
-      }
-    }, 120);
-    return () => {
-      clearTimeout(t);
-    };
-  }, [finishers.length]);
+    const el = scrollViewportRef.current;
+    if (!el || !hasResults) return;
+    return attachAutoScroll(el);
+  }, [hasResults]);
 
-  // Team auto-scroll: start when totalFinishers >= 3 (user requested) or when teamData changes
+  // The team list waits for the third finisher before it starts moving.
+  const teamsScroll = teamData.size > 0 && (totalFinishers || 0) >= 3;
   useEffect(() => {
-    const t = setTimeout(() => {
-      // If autoscroll already running for teams, refresh, otherwise setup if condition met
-      if (teamScrollIntervalRef.current) {
-        refreshTeamAutoScrollPreservePosition();
-      } else {
-        // Start team autoscroll only when at least 3 finishers have been recorded
-        if ((totalFinishers || 0) >= 3) {
-          setupTeamAutoScroll();
-        }
-      }
-    }, 120);
-
-    return () => clearTimeout(t);
-  }, [totalFinishers, teamData.size]);
+    const el = teamScrollViewportRef.current;
+    if (!el || !teamsScroll) return;
+    return attachAutoScroll(el);
+  }, [teamsScroll]);
 
   const getPodiumClass = (position: number) => {
     switch (position) {
@@ -390,7 +260,7 @@ const ModernLeaderboard = ({
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <div ref={scrollViewportRef} className="results-scroll-viewport">
+            <div ref={scrollViewportRef} className="results-scroll-viewport scroll-viewport-tv" tabIndex={0}>
               <table className="results-table-tv">
                 <thead>
                 <tr>
@@ -400,7 +270,7 @@ const ModernLeaderboard = ({
                   <th className="w-44">Finish Time</th>
                 </tr>
               </thead>
-                <tbody ref={tableBodyRef}>
+                <tbody>
                 {finishers.map((finisher, index) => (
                   <tr key={finisher.id || finisher.bibNumber} className="group">
                     <td>
@@ -534,65 +404,63 @@ const ModernLeaderboard = ({
                   <h2 className="section-title-tv">Team Name</h2>
                 </div>
                 
-                <div ref={teamScrollViewportRef} className="p-4 space-y-4 max-h-96 overflow-y-auto">
-                  <div ref={teamBodyRef}>
-                    {Array.from(teamData.entries()).slice(0, 6).map(([teamName, runners]) => (
-                      <div key={teamName} className="category-card-tv">
-                        <div className="category-header-tv">
-                          <Users className="w-4 h-4 text-primary" />
-                          <h3 className="category-title-tv">{teamName}</h3>
-                        </div>
-                        
-                        <div className="space-y-2">
-                          {runners.length === 0 ? (
-                            <div className="text-center py-4">
-                              <Timer className="w-5 h-5 text-muted-foreground mx-auto mb-2" />
-                              <p className="text-muted-foreground text-xs">No finishers yet...</p>
-                            </div>
-                          ) : (
-                            runners.slice(0, 3).map((runner, index) => (
-                                <div key={runner.id} className="podium-item-tv group">
-                                  <div className={`podium-position-tv ${getPodiumClass(index)}`}>
-                                    {index + 1}
-                                  </div>
-                                  {index < 3 && (
-                                    <Medal className={`w-5 h-5 ml-2 ${
-                                      index === 0 ? 'medal-gold' : index === 1 ? 'medal-silver' : 'medal-bronze'
-                                    }`} />
-                                  )}
+                <div ref={teamScrollViewportRef} className="scroll-viewport-tv p-4 space-y-4 max-h-96" tabIndex={0}>
+                  {Array.from(teamData.entries()).slice(0, 6).map(([teamName, runners]) => (
+                    <div key={teamName} className="category-card-tv">
+                      <div className="category-header-tv">
+                        <Users className="w-4 h-4 text-primary" />
+                        <h3 className="category-title-tv">{teamName}</h3>
+                      </div>
+                      
+                      <div className="space-y-2">
+                        {runners.length === 0 ? (
+                          <div className="text-center py-4">
+                            <Timer className="w-5 h-5 text-muted-foreground mx-auto mb-2" />
+                            <p className="text-muted-foreground text-xs">No finishers yet...</p>
+                          </div>
+                        ) : (
+                          runners.slice(0, 3).map((runner, index) => (
+                              <div key={runner.id} className="podium-item-tv group">
+                                <div className={`podium-position-tv ${getPodiumClass(index)}`}>
+                                  {index + 1}
+                                </div>
+                                {index < 3 && (
+                                  <Medal className={`w-5 h-5 ml-2 ${
+                                    index === 0 ? 'medal-gold' : index === 1 ? 'medal-silver' : 'medal-bronze'
+                                  }`} />
+                                )}
 
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center justify-between">
-                                      <div>
-                                        <p className="podium-name-tv group-hover:text-primary transition-colors">
-                                          {runner.racerName || 'Unknown Runner'}
-                                        </p>
-                                        <p className="podium-bib-tv">Bib #{runner.bibNumber}</p>
-                                      </div>
-                                    
-                                      <div className="text-right">
-                                        <p className="podium-time-tv">
-                                          {formatTime(normalizeFinishTime(runner.finishTime))}
-                                        </p>
-                                        <p className="text-xs text-muted-foreground">
-                                          Overall #{runner.rank}
-                                        </p>
-                                      </div>
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center justify-between">
+                                    <div>
+                                      <p className="podium-name-tv group-hover:text-primary transition-colors">
+                                        {runner.racerName || 'Unknown Runner'}
+                                      </p>
+                                      <p className="podium-bib-tv">Bib #{runner.bibNumber}</p>
+                                    </div>
+                                  
+                                    <div className="text-right">
+                                      <p className="podium-time-tv">
+                                        {formatTime(normalizeFinishTime(runner.finishTime))}
+                                      </p>
+                                      <p className="text-xs text-muted-foreground">
+                                        Overall #{runner.rank}
+                                      </p>
                                     </div>
                                   </div>
                                 </div>
-                              ))
-                          )}
-                          
-                          {runners.length > 3 && (
-                            <div className="text-center text-xs text-muted-foreground pt-2 border-t border-border/30">
-                              +{runners.length - 3} more team members
-                            </div>
-                          )}
-                        </div>
+                              </div>
+                            ))
+                        )}
+                        
+                        {runners.length > 3 && (
+                          <div className="text-center text-xs text-muted-foreground pt-2 border-t border-border/30">
+                            +{runners.length - 3} more team members
+                          </div>
+                        )}
                       </div>
-                    ))}
-                  </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
