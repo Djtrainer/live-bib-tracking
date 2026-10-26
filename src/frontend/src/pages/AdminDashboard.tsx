@@ -733,12 +733,18 @@ export default function AdminDashboard() {
                         <thead className="sticky top-0 bg-card z-10">
                           <tr>
                             <th className="w-20">Rank</th>
+                            {/* The tick sits beside the bib, which is what the operator reads
+                                off while checking; the header is the icon so the column stays
+                                narrow in this fixed-layout table. */}
+                            <th className="w-12 text-center" aria-label="Verified" title="Verified">
+                              <CheckCircle2 className="w-5 h-5 inline-block" aria-hidden="true" />
+                            </th>
                             <th className="w-28">Bib #</th>
                             <th className="w-auto min-w-[200px]">Racer Name</th>
                             <th className="w-32">Finish Time</th>
                             <th className="w-20">Gender</th>
                             <th className="w-auto min-w-[150px]">Team</th>
-                            <th className="w-28">Actions</th>
+                            <th className="w-16">Actions</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -751,6 +757,24 @@ export default function AdminDashboard() {
                             <tr key={finisher.id} className={`group ${isDuplicateBib(finisher.bibNumber, finisher.id) ? 'duplicate-bib' : ''} ${finisher.verified ? 'bg-emerald-500/10' : ''}`}>
                               <td className={finisher.verified ? 'border-l-4 !border-l-emerald-500' : 'border-l-4 !border-l-transparent'}>
                                 <span className="rank-cell-tv">{index + 1}</span>
+                              </td>
+                              <td className="text-center">
+                                {/* A native button already toggles on Space and Enter. */}
+                                <button
+                                  type="button"
+                                  role="checkbox"
+                                  aria-checked={!!finisher.verified}
+                                  aria-label={`Verified, place ${index + 1}, bib ${finisher.bibNumber}`}
+                                  title={finisher.verified ? 'Verified (click to clear)' : 'Mark verified'}
+                                  onClick={() => handleToggleVerified(finisher.id, !finisher.verified)}
+                                  className={`p-2 rounded-lg transition-colors ${
+                                    finisher.verified
+                                      ? 'text-emerald-500 hover:bg-emerald-500/15'
+                                      : 'text-muted-foreground/40 hover:text-muted-foreground hover:bg-muted/20'
+                                  }`}
+                                >
+                                  <CheckCircle2 className="w-5 h-5" />
+                                </button>
                               </td>
                               <td>
                                 {editingCell?.id === finisher.id && editingCell?.field === 'bibNumber' ? (
@@ -854,34 +878,13 @@ export default function AdminDashboard() {
                                 )}
                               </td>
                               <td>
-                                {/* The tick shares the Actions cell: the table is table-layout
-                                    fixed, so every sized column is taken from Racer Name and
-                                    Team, which a 1024px tablet already leaves narrow. */}
-                                <div className="flex items-center justify-center gap-2">
-                                  {/* A native button already toggles on Space and Enter. */}
-                                  <button
-                                    type="button"
-                                    role="checkbox"
-                                    aria-checked={!!finisher.verified}
-                                    aria-label={`Verified, place ${index + 1}, bib ${finisher.bibNumber}`}
-                                    title={finisher.verified ? 'Verified (click to clear)' : 'Mark verified'}
-                                    onClick={() => handleToggleVerified(finisher.id, !finisher.verified)}
-                                    className={`p-2 rounded-lg transition-colors ${
-                                      finisher.verified
-                                        ? 'text-emerald-500 hover:bg-emerald-500/15'
-                                        : 'text-muted-foreground/40 hover:text-muted-foreground hover:bg-muted/20'
-                                    }`}
-                                  >
-                                    <CheckCircle2 className="w-5 h-5" />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDelete(finisher.id)}
-                                    className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
-                                    title="Delete entry"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </div>
+                                <button
+                                  onClick={() => handleDelete(finisher.id)}
+                                  className="p-2 text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                                  title="Delete entry"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
                               </td>
                             </tr>
                           ))}
