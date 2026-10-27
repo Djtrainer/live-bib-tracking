@@ -285,7 +285,7 @@ MAX_BODY_BYTES = 8 * 1024 * 1024     # a 1080p preview JPEG is ~0.3 MB, a roster
 MAX_RESULTS = 5000                   # a race is a few hundred rows
 RESULT_FIELD_LIMITS = {"bibNumber": 32, "racerName": 120, "eventId": 128, "source": 32,
                        "gender": 40, "team": 120, "age": 8}
-RESULT_EDITABLE = set(RESULT_FIELD_LIMITS) | {"finishTime"}
+RESULT_EDITABLE = set(RESULT_FIELD_LIMITS) | {"finishTime", "verified"}
 # Failed logins queue here, so guessing is bounded however many connections
 # are opened. Two gates: a flood through the public URL must not delay the
 # answer to a typo made on the tablet at the finish line.
@@ -1247,7 +1247,14 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
         HTTPException: Not raised directly here, but invalid time formats return a failure response.
     """
     logger.debug(f"🔍 DEBUG: === PUT /api/results/{finisher_id} ENDPOINT CALLED ===")
+    # POST stores the bib as str; a JSON integer here is the same bib, not a new row
+    if finisher_data.get("bibNumber") is not None:
+        finisher_data["bibNumber"] = str(finisher_data["bibNumber"])
     _bound_result_fields(finisher_data, RESULT_EDITABLE)
+    # verified is the operator's tick that the row was checked; a string
+    # "false" would read as ticked, so only a JSON bool is taken
+    if "verified" in finisher_data and not isinstance(finisher_data["verified"], bool):
+        return {"success": False, "message": "verified must be true or false"}
     logger.debug(f"🔍 DEBUG: Updating finisher {finisher_id} with data: {finisher_data}")
     logger.info(
         f"🔍 DEBUG: Original roster has {len(original_roster)} entries: {list(original_roster.keys())}"
@@ -1324,6 +1331,8 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
                         "finishTime"
                     ),  # Preserve original finish time
                     "rank": finisher.get("rank"),  # Preserve original rank
+                    # a different bib is a different row: ticked again only if this edit says so
+                    "verified": finisher_data.get("verified", False),
                 }
 
                 # Add optional fields from roster if available
@@ -1389,6 +1398,8 @@ async def update_finisher(finisher_id: str, finisher_data: Dict[str, Any]) -> Di
                 # CRITICAL FIX: If bib number changed and not found in roster, update name to "Racer #<bib>"
                 if bib_changed:
                     updated_data["racerName"] = f"Racer #{new_bib}"
+                    # a different bib is a different row: ticked again only if this edit says so
+                    updated_data["verified"] = finisher_data.get("verified", False)
                     logger.info(
                         f"🔍 DEBUG: Bib changed to unknown number - updated name to: {updated_data['racerName']}"
                     )

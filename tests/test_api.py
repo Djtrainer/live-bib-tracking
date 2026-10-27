@@ -39,6 +39,7 @@ def isolated_state(tmp_path, monkeypatch):
     monkeypatch.delenv("RACE_ADMIN_USER", raising=False)
     monkeypatch.delenv("RACE_ADMIN_PASSWORD", raising=False)
     server.race_results.clear()
+    server.original_roster.clear()
     server.race_clock_state.clear()
     server.race_clock_state.update({"raceStartTime": None, "status": "stopped", "offset": 0})
     server.app_state.pop("fresh", None)
@@ -165,6 +166,108 @@ class TestJournalAndRestore:
             again = c2.post("/api/results", json=finish("120", "evt-1")).json()
             assert again.get("duplicate") is True
             assert len(c2.get("/api/results").json()["data"]) == 1
+
+
+ROSTER = {"file": ("r.csv", b"bibNumber,racerName\n7,Ada Lovelace\n", "text/csv")}
+
+
+class TestVerifiedFlag:
+    """Operators tick finisher rows in batches; the tick must outlive a reload."""
+
+    def _finished(self, client, bib="120", event_id="evt-1"):
+        client.post("/api/clock/start")
+        return client.post("/api/results", json=finish(bib, event_id)).json()["data"]["id"]
+
+    def _row(self, client, rid):
+        return next(r for r in client.get("/api/results").json()["data"] if r["id"] == rid)
+
+    def test_new_finishers_carry_no_flag(self, client):
+        rid = self._finished(client)
+        assert "verified" not in self._row(client, rid)
+
+    def test_put_true_shows_in_get_and_false_clears_it(self, client):
+        rid = self._finished(client)
+        assert client.put(f"/api/results/{rid}", json={"verified": True}).json()["success"]
+        assert self._row(client, rid)["verified"] is True
+        assert client.put(f"/api/results/{rid}", json={"verified": False}).json()["success"]
+        assert self._row(client, rid)["verified"] is False
+
+    def test_name_edit_keeps_it_and_a_bib_change_clears_it(self, client):
+        rid = self._finished(client)
+        client.put(f"/api/results/{rid}", json={"verified": True})
+        client.put(f"/api/results/{rid}", json={"bibNumber": "120", "racerName": "Jane"})
+        assert self._row(client, rid)["verified"] is True
+        client.put(f"/api/results/{rid}", json={"bibNumber": "121"})
+        assert self._row(client, rid)["verified"] is False
+
+    def test_bib_change_ticked_in_the_same_edit_stays_ticked(self, client):
+        rid = self._finished(client)
+        client.put(f"/api/results/{rid}", json={"bibNumber": "121", "verified": True})
+        row = self._row(client, rid)
+        assert row["bibNumber"] == "121" and row["verified"] is True
+
+    def test_the_same_bib_sent_as_a_number_is_not_a_change(self, client):
+        """POST stores bibs as str; a client that posts the number back must not un-tick the row."""
+        rid = self._finished(client)
+        client.put(f"/api/results/{rid}", json={"racerName": "Jane", "verified": True})
+        assert client.put(f"/api/results/{rid}", json={"bibNumber": 120}).json()["success"]
+        row = self._row(client, rid)
+        assert row["bibNumber"] == "120" and row["racerName"] == "Jane" and row["verified"] is True
+        client.put(f"/api/results/{rid}", json={"bibNumber": 121})
+        row = self._row(client, rid)
+        assert row["bibNumber"] == "121" and row["racerName"] == "Racer #121" and row["verified"] is False
+
+    def test_roster_merge_clears_the_tick(self, client):
+        """The roster branch rebuilds the record from scratch; it would drop any extra key."""
+        assert client.post("/api/roster/upload", files=ROSTER).json()["success"]
+        rid = self._finished(client, bib="999")
+        client.put(f"/api/results/{rid}", json={"verified": True})
+        assert client.put(f"/api/results/{rid}", json={"bibNumber": "7"}).json()["success"]
+        row = self._row(client, rid)
+        assert row["racerName"] == "Ada Lovelace" and row["verified"] is False
+
+    def test_roster_merge_keeps_the_tick_when_the_edit_says_so(self, client):
+        client.post("/api/roster/upload", files=ROSTER)
+        rid = self._finished(client, bib="999")
+        client.put(f"/api/results/{rid}", json={"bibNumber": "7", "verified": True})
+        row = self._row(client, rid)
+        assert row["racerName"] == "Ada Lovelace" and row["verified"] is True
+
+    @pytest.mark.parametrize("bad", ["true", 1, 0, None, [True], {"on": True}])
+    def test_anything_but_a_bool_is_refused_and_changes_nothing(self, client, bad):
+        rid = self._finished(client)
+        client.put(f"/api/results/{rid}", json={"verified": True})
+        before = self._row(client, rid)
+        r = client.put(f"/api/results/{rid}", json={"verified": bad, "racerName": "Mallory"}).json()
+        assert r["success"] is False and r["message"] == "verified must be true or false"
+        assert self._row(client, rid) == before
+
+    def test_reorder_and_delete_leave_the_flag_alone(self, client):
+        first = self._finished(client, "120", "evt-1")
+        second = client.post("/api/results", json=finish("121", "evt-2")).json()["data"]["id"]
+        client.put(f"/api/results/{first}", json={"verified": True})
+        order = {"order": [{"id": second, "rank": 1}, {"id": first, "rank": 2}]}
+        assert client.post("/api/reorder", json=order).json()["success"]
+        assert self._row(client, first)["verified"] is True
+        assert "verified" not in self._row(client, second)
+        assert client.delete(f"/api/results/{second}").json()["success"]
+        assert self._row(client, first)["verified"] is True
+
+    def test_update_broadcast_carries_the_flag(self, client):
+        rid = self._finished(client)
+        with client.websocket_connect("/ws") as ws:
+            client.put(f"/api/results/{rid}", json={"verified": True})
+            msg = ws.receive_json()
+        assert msg["type"] == "update" and msg["data"]["id"] == rid
+        assert msg["data"]["verified"] is True
+
+    def test_flag_survives_a_restart(self, client):
+        rid = self._finished(client)
+        client.put(f"/api/results/{rid}", json={"verified": True})
+        server.race_results.clear()
+        with TestClient(server.app):            # lifespan startup runs the restore
+            pass
+        assert [(r["id"], r.get("verified")) for r in server.race_results] == [(rid, True)]
 
 
 DIST = Path(__file__).resolve().parents[1] / "src" / "frontend" / "dist" / "index.html"
